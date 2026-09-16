@@ -1,0 +1,6 @@
+# Checkov configuration
+framework:
+  - terraform
+compact: true
+quiet: true
+soft-fail: true

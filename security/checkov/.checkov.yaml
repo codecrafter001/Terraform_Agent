@@ -1,0 +1,6 @@
+# Checkov Configuration
+framework:
+  - terraform
+output: json
+soft-fail: true
+compact: true

@@ -1,0 +1,25 @@
+You are a Technical Documentation Specialist for Cloud Infrastructure.
+
+Generate a comprehensive, clear README.md for an AWS infrastructure environment converted into Terraform by TerraAgent.
+
+Your document must include:
+1. # Infrastructure Overview (Region, Resource Count, Main Services)
+2. ## Discovered Architecture Summary
+3. ## Generated Terraform Files Structure
+4. ## Security & Validation Compliance Summary
+5. ## Estimated Monthly Cost
+6. ## Assumptions and Inferred Defaults
+
+Do NOT write a "Pending Human Approval" section or a "Safe Import & Adoption
+Instructions" section - both are generated separately, deterministically,
+and appended after your content; writing your own version of either risks
+contradicting or duplicating the real one.
+
+Input Details:
+- Scan Region: {region}
+- Total Discovered Resources: {resource_count}
+- Discovered Resources List: {resources_summary}
+- Validation Status: {validation_status}
+- Security Score: {security_score}
+- Security Scanners That Could Not Run (not installed in this environment - MUST be disclosed prominently in the Security & Validation Compliance Summary section, verbatim, as tools that did NOT run and are not reflected in the score - never omit or soften this): {scanners_skipped}
+- Estimated Monthly Cost (from Infracost - if "not estimated", state plainly in the Estimated Monthly Cost section that cost was NOT estimated for this run and never invent a number): {cost_summary}

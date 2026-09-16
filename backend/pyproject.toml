@@ -1,0 +1,32 @@
+[tool.ruff]
+line-length = 170
+target-version = "py311"
+exclude = ["tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+disallow_untyped_defs = false
+exclude = ["tests/"]
+
+# services/database.py + models/orm.py: classic SQLAlchemy declarative_base()
+# style is fundamentally not statically typeable without the sqlalchemy2-stubs
+# mypy plugin (Base's dynamic metaclass, Column[T] vs T on assignment) - these
+# are well-known false positives for this ORM style, not runtime bugs, and
+# migrating to SQLAlchemy 2.0's Mapped[]-typed-columns style is a real,
+# separate refactor rather than a config tweak.
+[[tool.mypy.overrides]]
+module = ["services.database", "models.orm"]
+disable_error_code = ["assignment", "valid-type", "misc"]
+
+# main.py: slowapi's _rate_limit_exceeded_handler is typed as
+# Callable[[Request, RateLimitExceeded], Response] rather than Starlette's
+# generic Callable[[Request, Exception], Response] - this is slowapi's own
+# stub being imprecise about its documented, correct usage pattern (confirmed
+# working at runtime: a real request over the limit gets a real 429).
+[[tool.mypy.overrides]]
+module = ["main"]
+disable_error_code = ["arg-type"]

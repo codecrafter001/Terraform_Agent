@@ -1,0 +1,40 @@
+version: "3.8"
+
+# Development overlay: mounts local source directories for hot-reload, and
+# republishes the infra ports the base compose file intentionally hides from
+# the host in production (Postgres/Redis/Ollama) so local tooling (a DB GUI,
+# redis-cli, curling Ollama directly) can still reach them.
+services:
+  terraagent-api:
+    volumes:
+      - ./backend:/app
+    environment:
+      - ENVIRONMENT=development
+    # --reload lives here, not in the image's own CMD - a dev-only convenience
+    # this overlay opts into, never baked into what ships for production.
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+    # Direct :8000 access for local debugging (curl/Swagger UI without going
+    # through Nginx). Rate limiting is effectively unenforceable through this
+    # path (see the base file's comment) - acceptable for local dev, never
+    # published in the base/production file.
+    ports:
+      - "8000:8000"
+
+  terraagent-frontend:
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+      - /app/.next
+    command: npm run dev
+
+  terraagent-postgres:
+    ports:
+      - "5432:5432"
+
+  terraagent-redis:
+    ports:
+      - "6379:6379"
+
+  terraagent-ollama:
+    ports:
+      - "11434:11434"

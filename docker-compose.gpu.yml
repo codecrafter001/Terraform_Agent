@@ -1,0 +1,24 @@
+# Optional GPU passthrough override for the Ollama container.
+#
+# Not merged into the base docker-compose.yml because a hard GPU device
+# reservation makes `docker compose up` fail outright on any machine without
+# an NVIDIA GPU + nvidia-container-runtime installed (this dev sandbox
+# included) - so it's opt-in via an extra -f flag instead of an unconditional
+# default that would break the common case.
+#
+# Usage (requires the NVIDIA Container Toolkit installed on the host):
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+#
+# Not verified in this environment (no GPU hardware available here) - the
+# `deploy.resources.reservations.devices` block below is the documented
+# Compose v2 mechanism for NVIDIA passthrough, but treat it as unverified
+# config until run on real GPU hardware.
+services:
+  terraagent-ollama:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

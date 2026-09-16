@@ -1,0 +1,148 @@
+# ==============================================================================
+# Render Blueprint Specification for TerraAgent
+# https://render.com/docs/blueprint-spec
+# ==============================================================================
+
+databases:
+  # ----------------------------------------------------------------------------
+  # 1. PostgreSQL Database (Audit trail & Job history)
+  # ----------------------------------------------------------------------------
+  - name: terraagent-postgres
+    databaseName: terraagent
+    user: terraagent
+    plan: starter # Change to 'free' or higher as needed
+    region: oregon
+
+services:
+  # ----------------------------------------------------------------------------
+  # 2. Managed Redis (Task queue & Real-time SSE event streaming)
+  # ----------------------------------------------------------------------------
+  - type: redis
+    name: terraagent-redis
+    plan: starter # Change to 'free' or higher as needed
+    region: oregon
+    ipAllowList: [] # Internal private network access only
+
+  # ----------------------------------------------------------------------------
+  # 3. TerraAgent Backend API (FastAPI Gateway)
+  # ----------------------------------------------------------------------------
+  - type: web
+    name: terraagent-api
+    runtime: docker
+    dockerfilePath: backend/Dockerfile
+    dockerContext: backend
+    plan: starter
+    region: oregon
+    healthCheckPath: /api/health
+    envVars:
+      - key: PORT
+        value: 8000
+      - key: ENVIRONMENT
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: terraagent-postgres
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: terraagent-redis
+          property: connectionString
+      - key: CELERY_BROKER_URL
+        fromService:
+          type: redis
+          name: terraagent-redis
+          property: connectionString
+      - key: CELERY_RESULT_BACKEND
+        fromService:
+          type: redis
+          name: terraagent-redis
+          property: connectionString
+      # Cloud LLM API Key (Recommended for Render)
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash
+      - key: CORS_ORIGINS
+        value: "*"
+      # Shared API Key for securing API endpoints
+      - key: TERRAAGENT_API_KEY
+        generateValue: true
+      - key: OUTPUT_DIR
+        value: /tmp/terraagent
+      - key: ZIP_EXPIRY_HOURS
+        value: 24
+      - key: MAX_JOB_RUNTIME_SECONDS
+        value: 1800
+
+  # ----------------------------------------------------------------------------
+  # 4. Celery Background Worker (Multi-Agent LangGraph Pipeline execution)
+  # ----------------------------------------------------------------------------
+  - type: worker
+    name: terraagent-celery
+    runtime: docker
+    dockerfilePath: backend/Dockerfile
+    dockerContext: backend
+    dockerCommand: celery -A services.celery_app worker --beat --loglevel=info
+    plan: starter
+    region: oregon
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: terraagent-postgres
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: terraagent-redis
+          property: connectionString
+      - key: CELERY_BROKER_URL
+        fromService:
+          type: redis
+          name: terraagent-redis
+          property: connectionString
+      - key: CELERY_RESULT_BACKEND
+        fromService:
+          type: redis
+          name: terraagent-redis
+          property: connectionString
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash
+      - key: OUTPUT_DIR
+        value: /tmp/terraagent
+      - key: ZIP_EXPIRY_HOURS
+        value: 24
+      - key: MAX_JOB_RUNTIME_SECONDS
+        value: 1800
+
+  # ----------------------------------------------------------------------------
+  # 5. Next.js Frontend Web Application
+  # ----------------------------------------------------------------------------
+  - type: web
+    name: terraagent-frontend
+    runtime: docker
+    dockerfilePath: frontend/Dockerfile
+    dockerContext: frontend
+    plan: starter
+    region: oregon
+    envVars:
+      - key: PORT
+        value: 3000
+      - key: NEXT_PUBLIC_API_URL
+        value: /api
+      # Internal routing to backend API service on Render private network
+      - key: BACKEND_API_INTERNAL_URL
+        fromService:
+          type: web
+          name: terraagent-api
+          property: host
+        # Combined with /api/:path* in proxy/rewrites
+      - key: TERRAAGENT_API_KEY
+        fromService:
+          type: web
+          name: terraagent-api
+          envVarKey: TERRAAGENT_API_KEY

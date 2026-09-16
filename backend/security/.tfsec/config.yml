@@ -1,0 +1,4 @@
+# tfsec configuration
+minimum_severity: MEDIUM
+exclude:
+  - aws-s3-enable-versioning
