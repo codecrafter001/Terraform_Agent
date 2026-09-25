@@ -1,39 +1,70 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import {
+  Activity,
   ArrowRight,
+  Boxes,
   CheckCircle2,
-  Cloud,
+  Inbox,
   Loader2,
+  PauseCircle,
   PlusCircle,
   RefreshCw,
-  ShieldCheck,
-  XCircle,
+  Search,
 } from "lucide-react";
-import { checkHealth, fetchJobs, AuditJobRecord } from "@/lib/api";
+import { fetchJobs, AuditJobRecord } from "@/lib/api";
+import { PageHeader, StatCard, StatusBadge } from "@/components/ui";
 
-const STATUS_STYLES: Record<string, string> = {
-  COMPLETE: "bg-emerald-50 text-emerald-700 border-emerald-200/80",
-  RUNNING: "bg-blue-50 text-blue-700 border-blue-200/80",
-  PENDING: "bg-slate-100 text-slate-600 border-slate-200/80",
-  FAILED: "bg-rose-50 text-rose-700 border-rose-200/80",
-};
+type StatusFilter = "ALL" | "ACTIVE" | "COMPLETE" | "ATTENTION" | "FAILED";
+
+const FILTERS: { id: StatusFilter; label: string; statuses: string[] | null }[] = [
+  { id: "ALL", label: "All", statuses: null },
+  { id: "ACTIVE", label: "Running", statuses: ["RUNNING", "PENDING"] },
+  { id: "ATTENTION", label: "Needs approval", statuses: ["AWAITING_APPROVAL"] },
+  { id: "COMPLETE", label: "Complete", statuses: ["COMPLETE"] },
+  { id: "FAILED", label: "Failed / rejected", statuses: ["FAILED", "REJECTED"] },
+];
+
+function relativeTime(iso: string): string {
+  const diff = Date.now() - new Date(iso).getTime();
+  if (Number.isNaN(diff)) return "—";
+  const sec = Math.round(diff / 1000);
+  if (sec < 60) return "just now";
+  const min = Math.round(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.round(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  const day = Math.round(hr / 24);
+  if (day < 30) return `${day}d ago`;
+  return new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+}
+
+function jobHref(job: AuditJobRecord): string {
+  return job.status === "COMPLETE" ? `/results/${job.job_id}` : `/scan/${job.job_id}`;
+}
 
 export default function HomePage() {
   const [jobs, setJobs] = useState<AuditJobRecord[]>([]);
-  const [isHealthy, setIsHealthy] = useState<boolean | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [filter, setFilter] = useState<StatusFilter>("ALL");
+  const [query, setQuery] = useState("");
   const mountedRef = useRef(true);
 
   const loadData = useCallback(async () => {
-    const [jobList, healthy] = await Promise.all([fetchJobs(), checkHealth()]);
+    const jobList = await fetchJobs();
     if (!mountedRef.current) return;
     setJobs(jobList);
-    setIsHealthy(healthy);
     setIsLoading(false);
+    setIsRefreshing(false);
   }, []);
+
+  const refresh = async () => {
+    setIsRefreshing(true);
+    await loadData();
+  };
 
   useEffect(() => {
     mountedRef.current = true;
@@ -45,75 +76,117 @@ export default function HomePage() {
     };
   }, [loadData]);
 
+  const stats = useMemo(() => {
+    const complete = jobs.filter((j) => j.status === "COMPLETE").length;
+    const finished = jobs.filter((j) => ["COMPLETE", "FAILED", "REJECTED"].includes(j.status)).length;
+    return {
+      total: jobs.length,
+      running: jobs.filter((j) => j.status === "RUNNING" || j.status === "PENDING").length,
+      awaiting: jobs.filter((j) => j.status === "AWAITING_APPROVAL").length,
+      successRate: finished > 0 ? Math.round((complete / finished) * 100) : null,
+      resources: jobs.reduce((sum, j) => sum + (j.resources_discovered || 0), 0),
+    };
+  }, [jobs]);
+
+  const filterCounts = useMemo(() => {
+    const counts: Record<StatusFilter, number> = { ALL: jobs.length, ACTIVE: 0, ATTENTION: 0, COMPLETE: 0, FAILED: 0 };
+    for (const f of FILTERS) {
+      if (f.statuses) counts[f.id] = jobs.filter((j) => f.statuses!.includes(j.status)).length;
+    }
+    return counts;
+  }, [jobs]);
+
+  const visibleJobs = useMemo(() => {
+    const active = FILTERS.find((f) => f.id === filter);
+    const q = query.trim().toLowerCase();
+    return jobs.filter((j) => {
+      if (active?.statuses && !active.statuses.includes(j.status)) return false;
+      if (!q) return true;
+      return [j.job_id, j.region, j.operation, j.aws_account_id ?? ""].some((v) => v.toLowerCase().includes(q));
+    });
+  }, [jobs, filter, query]);
+
   return (
-    <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-10 space-y-8">
-      {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <div className="space-y-1">
-          <h1 className="text-2xl font-bold tracking-tight text-slate-900 flex items-center gap-2">
-            <Cloud className="w-6 h-6 text-brand-600" />
-            TerraAgent Dashboard
-          </h1>
-          <p className="text-sm text-slate-500">
-            Zero-mutation AWS discovery, backed by an 8-agent LangGraph pipeline.
-          </p>
-        </div>
+    <div className="space-y-6">
+      <PageHeader
+        title="Dashboard"
+        description="Read-only AWS discovery, four agents with a self-correcting verify/repair loop. Nothing in your AWS account is ever changed."
+        actions={
+          <>
+            <button onClick={refresh} className="btn-secondary px-3" title="Refresh" aria-label="Refresh">
+              <RefreshCw className={`w-4 h-4 ${isRefreshing ? "animate-spin" : ""}`} />
+            </button>
+            <Link href="/scan" className="btn-primary">
+              <PlusCircle className="w-4 h-4" />
+              New scan
+            </Link>
+          </>
+        }
+      />
 
-        <div className="flex items-center gap-3">
-          <button
-            onClick={loadData}
-            className="p-2.5 rounded-xl bg-white hover:bg-slate-50 text-slate-600 border border-slate-200 shadow-xs transition-all"
-            title="Refresh"
-          >
-            <RefreshCw className="w-4 h-4" />
-          </button>
-
-          <div
-            className={`inline-flex items-center gap-2 px-3 py-2 rounded-xl border text-xs font-semibold shadow-xs ${
-              isHealthy === null
-                ? "bg-slate-100 text-slate-500 border-slate-200"
-                : isHealthy
-                ? "bg-emerald-50 text-emerald-700 border-emerald-200"
-                : "bg-rose-50 text-rose-700 border-rose-200"
-            }`}
-          >
-            <span
-              className={`w-2 h-2 rounded-full ${
-                isHealthy === null ? "bg-slate-400" : isHealthy ? "bg-emerald-500 animate-pulse" : "bg-rose-500"
-              }`}
-            />
-            {isHealthy === null ? "Checking..." : isHealthy ? "API Healthy" : "API Unreachable"}
-          </div>
-
-          <Link
-            href="/scan"
-            className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-brand-600 to-indigo-600 hover:from-brand-500 hover:to-indigo-500 text-white font-semibold text-sm shadow-md shadow-brand-500/20 hover:shadow-lg transition-all"
-          >
-            <PlusCircle className="w-4 h-4" />
-            <span>New Scan</span>
-          </Link>
-        </div>
-      </div>
-
-      {/* Safety Banner */}
-      <div className="p-4 rounded-xl bg-brand-50/70 border border-brand-200 text-xs text-brand-900 flex items-center gap-3 shadow-xs">
-        <ShieldCheck className="w-5 h-5 text-brand-600 shrink-0" />
-        <span>
-          Read-only discovery only. TerraAgent never runs <code className="bg-brand-100/80 px-1.5 py-0.5 rounded font-mono text-brand-900 font-semibold">terraform apply</code> or{" "}
-          <code className="bg-brand-100/80 px-1.5 py-0.5 rounded font-mono text-brand-900 font-semibold">destroy</code>, and never mutates AWS resources.
-        </span>
+      {/* KPI tiles */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+        <StatCard label="Total scans" value={isLoading ? "—" : stats.total} icon={Activity} tone="brand" />
+        <StatCard
+          label="Success rate"
+          value={isLoading || stats.successRate === null ? "—" : `${stats.successRate}%`}
+          icon={CheckCircle2}
+          tone="emerald"
+          hint={stats.running > 0 ? `${stats.running} running now` : "of finished scans"}
+        />
+        <StatCard
+          label="Resources discovered"
+          value={isLoading ? "—" : stats.resources.toLocaleString()}
+          icon={Boxes}
+          tone="indigo"
+          hint="across all scans"
+        />
+        <StatCard
+          label="Pending approvals"
+          value={isLoading ? "—" : stats.awaiting}
+          icon={PauseCircle}
+          tone={stats.awaiting > 0 ? "amber" : "slate"}
+          hint={stats.awaiting > 0 ? "need a human decision" : "nothing waiting"}
+        />
       </div>
 
       {/* Job History */}
-      <div className="rounded-2xl border border-slate-200/90 bg-white shadow-sm overflow-hidden">
-        <div className="px-6 py-4 border-b border-slate-100 bg-slate-50/70 flex items-center justify-between">
-          <div className="flex items-center gap-2.5">
-            <div className="w-2 h-2 rounded-full bg-brand-600" />
-            <h2 className="text-sm font-bold text-slate-900">Job History</h2>
+      <div className="card overflow-hidden">
+        <div className="card-header flex-col items-stretch sm:flex-row sm:items-center">
+          <div>
+            <h2 className="text-sm font-bold text-slate-900">Job history</h2>
+            <p className="text-2xs text-slate-500 mt-0.5">Refreshes every 15 seconds</p>
           </div>
-          <span className="text-xs text-slate-500 font-medium">
-            {jobs.length} {jobs.length === 1 ? "record" : "records"}
-          </span>
+          <div className="relative sm:w-64">
+            <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search job ID, region, account..."
+              className="field-input pl-9 py-2"
+            />
+          </div>
+        </div>
+
+        <div className="px-5 py-2.5 border-b border-slate-100 flex gap-1.5 overflow-x-auto">
+          {FILTERS.map((f) => (
+            <button
+              key={f.id}
+              onClick={() => setFilter(f.id)}
+              className={`px-3 py-1.5 rounded-lg text-2xs font-semibold whitespace-nowrap transition-colors flex items-center gap-1.5 ${
+                filter === f.id ? "bg-slate-900 text-white" : "text-slate-600 hover:bg-slate-100"
+              }`}
+            >
+              {f.label}
+              <span
+                className={`tabular-nums px-1.5 rounded-md ${
+                  filter === f.id ? "bg-white/20" : "bg-slate-100 text-slate-500"
+                }`}
+              >
+                {filterCounts[f.id]}
+              </span>
+            </button>
+          ))}
         </div>
 
         {isLoading ? (
@@ -122,71 +195,81 @@ export default function HomePage() {
             <span>Loading job history...</span>
           </div>
         ) : jobs.length === 0 ? (
-          <div className="p-12 text-center text-sm text-slate-500 space-y-3">
-            <p className="font-medium text-slate-600">No scans found yet.</p>
-            <Link
-              href="/scan"
-              className="inline-flex items-center gap-1.5 text-brand-600 hover:text-brand-700 font-semibold"
-            >
+          <div className="p-12 flex flex-col items-center text-center gap-3">
+            <div className="p-3 rounded-2xl bg-brand-50 text-brand-600">
+              <Inbox className="w-6 h-6" />
+            </div>
+            <div>
+              <p className="text-sm font-semibold text-slate-800">No scans yet</p>
+              <p className="text-xs text-slate-500 mt-1">Start a read-only discovery to generate your first Terraform bundle.</p>
+            </div>
+            <Link href="/scan" className="btn-primary mt-1">
               Launch your first scan <ArrowRight className="w-3.5 h-3.5" />
             </Link>
+          </div>
+        ) : visibleJobs.length === 0 ? (
+          <div className="p-10 text-center text-xs text-slate-500">
+            No jobs match this filter.{" "}
+            <button
+              onClick={() => {
+                setFilter("ALL");
+                setQuery("");
+              }}
+              className="text-brand-600 font-semibold hover:text-brand-700"
+            >
+              Clear filters
+            </button>
           </div>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
-                <tr className="text-left text-[11px] uppercase tracking-wider text-slate-500 bg-slate-50/60 border-b border-slate-100">
-                  <th className="px-6 py-3.5 font-semibold">Job ID</th>
-                  <th className="px-6 py-3.5 font-semibold">Operation</th>
-                  <th className="px-6 py-3.5 font-semibold">Region</th>
-                  <th className="px-6 py-3.5 font-semibold">Status</th>
-                  <th className="px-6 py-3.5 font-semibold">Created</th>
-                  <th className="px-6 py-3.5 font-semibold text-right">Actions</th>
+                <tr className="text-left text-3xs uppercase tracking-wider text-slate-500 bg-slate-50/70 border-b border-slate-100">
+                  <th className="px-5 py-3 font-semibold">Job</th>
+                  <th className="px-5 py-3 font-semibold">Status</th>
+                  <th className="px-5 py-3 font-semibold">Region</th>
+                  <th className="px-5 py-3 font-semibold text-right">Resources</th>
+                  <th className="px-5 py-3 font-semibold text-right">Findings</th>
+                  <th className="px-5 py-3 font-semibold">Created</th>
+                  <th className="px-5 py-3" />
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {jobs.map((job) => (
-                  <tr key={job.job_id} className="hover:bg-blue-50/40 transition-colors group">
-                    <td className="px-6 py-4 font-mono text-xs font-medium text-slate-800">
-                      <span className="bg-slate-100 group-hover:bg-white transition-colors px-2 py-1 rounded-md border border-slate-200/80 shadow-2xs">
-                        {job.job_id}
+                {visibleJobs.map((job) => (
+                  <tr key={job.job_id} className="hover:bg-slate-50/80 transition-colors group">
+                    <td className="px-5 py-3.5">
+                      <Link href={jobHref(job)} className="block">
+                        <div className="font-mono text-xs font-semibold text-slate-900 group-hover:text-brand-700 transition-colors">
+                          {job.job_id}
+                        </div>
+                        <div className="text-2xs text-slate-500 capitalize mt-0.5">{job.operation}</div>
+                      </Link>
+                    </td>
+                    <td className="px-5 py-3.5">
+                      <StatusBadge status={job.status} />
+                    </td>
+                    <td className="px-5 py-3.5 font-mono text-xs text-slate-600">{job.region}</td>
+                    <td className="px-5 py-3.5 text-xs text-slate-700 text-right tabular-nums">
+                      {job.resources_discovered ?? 0}
+                    </td>
+                    <td className="px-5 py-3.5 text-xs text-right tabular-nums">
+                      <span className={job.security_findings_count > 0 ? "text-amber-700 font-semibold" : "text-slate-400"}>
+                        {job.security_findings_count ?? 0}
                       </span>
                     </td>
-                    <td className="px-6 py-4 capitalize text-slate-700 font-medium text-xs">{job.operation}</td>
-                    <td className="px-6 py-4 font-mono text-xs text-slate-600">
-                      <span className="bg-slate-50 px-2 py-0.5 rounded border border-slate-200/60">
-                        {job.region}
-                      </span>
+                    <td
+                      className="px-5 py-3.5 text-xs text-slate-500 whitespace-nowrap"
+                      title={new Date(job.created_at).toLocaleString()}
+                    >
+                      {relativeTime(job.created_at)}
                     </td>
-                    <td className="px-6 py-4">
-                      <span
-                        className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-[11px] font-semibold ${
-                          STATUS_STYLES[job.status] || STATUS_STYLES.PENDING
-                        }`}
-                      >
-                        {job.status === "COMPLETE" && <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />}
-                        {job.status === "RUNNING" && <Loader2 className="w-3.5 h-3.5 animate-spin text-blue-600" />}
-                        {job.status === "FAILED" && <XCircle className="w-3.5 h-3.5 text-rose-600" />}
-                        {job.status}
-                      </span>
-                    </td>
-                    <td className="px-6 py-4 text-xs text-slate-500 font-normal">
-                      {new Date(job.created_at).toLocaleString(undefined, {
-                        month: 'short',
-                        day: 'numeric',
-                        year: 'numeric',
-                        hour: 'numeric',
-                        minute: '2-digit',
-                        second: '2-digit'
-                      })}
-                    </td>
-                    <td className="px-6 py-4 text-right">
+                    <td className="px-5 py-3.5 text-right">
                       <Link
-                        href={job.status === "COMPLETE" ? `/results/${job.job_id}` : `/scan/${job.job_id}`}
-                        className="inline-flex items-center gap-1 text-xs font-semibold text-brand-600 hover:text-brand-700 hover:bg-brand-50 px-3 py-1.5 rounded-lg border border-transparent hover:border-brand-200 transition-all"
+                        href={jobHref(job)}
+                        className="inline-flex items-center gap-1 text-xs font-semibold text-brand-600 hover:text-brand-700 whitespace-nowrap"
                       >
-                        <span>{job.status === "COMPLETE" ? "View Results" : "View Progress"}</span>
-                        <ArrowRight className="w-3.5 h-3.5 opacity-70 group-hover:translate-x-0.5 transition-transform" />
+                        {jobHref(job).startsWith("/results") ? "Results" : "Progress"}
+                        <ArrowRight className="w-3.5 h-3.5 group-hover:translate-x-0.5 transition-transform" />
                       </Link>
                     </td>
                   </tr>

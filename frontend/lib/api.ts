@@ -2,7 +2,7 @@
  * API client utilities for TerraAgent frontend
  */
 
-import { JobResults } from "./types";
+import { JobProgress, JobResults } from "./types";
 
 export interface ScanRequestPayload {
   aws_access_key: string;
@@ -12,6 +12,7 @@ export interface ScanRequestPayload {
   operation: "generate" | "scan" | "explain" | "validate";
   resource_filters: string[];
   terraform_binary?: "terraform" | "tofu";
+  use_resource_explorer?: boolean;
 }
 
 export interface ScanResponseData {
@@ -23,15 +24,7 @@ export interface ScanResponseData {
   message?: string;
 }
 
-export interface JobProgressData {
-  job_id: string;
-  status: "PENDING" | "RUNNING" | "COMPLETE" | "FAILED" | "AWAITING_APPROVAL" | "REJECTED";
-  progress_percentage: number;
-  current_agent?: string;
-  completed_agents: string[];
-  created_at: string;
-  error?: string;
-}
+export type JobProgressData = JobProgress;
 
 export interface JobDecisionResponse {
   job_id: string;

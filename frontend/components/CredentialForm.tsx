@@ -20,8 +20,11 @@ import {
   Database,
   Lock,
   HardDrive,
-  Network
+  Network,
+  Cpu,
 } from "lucide-react";
+
+const AUTO_REGION = "auto";
 
 const AWS_REGIONS = [
   { value: "us-east-1", label: "US East (N. Virginia) — us-east-1" },
@@ -81,7 +84,8 @@ export default function CredentialForm() {
   const [accessKey, setAccessKey] = useState("");
   const [secretKey, setSecretKey] = useState("");
   const [sessionToken, setSessionToken] = useState("");
-  const [region, setRegion] = useState("us-east-1");
+  const [region, setRegion] = useState(AUTO_REGION);
+  const [useResourceExplorer, setUseResourceExplorer] = useState(true);
   const [terraformBinary, setTerraformBinary] = useState<"terraform" | "tofu">("terraform");
   const [operation, setOperation] = useState<"generate" | "scan" | "explain" | "validate">("generate");
   const [selectedResources, setSelectedResources] = useState<string[]>(["EC2", "VPC", "SG", "S3", "RDS", "IAM"]);
@@ -117,249 +121,399 @@ export default function CredentialForm() {
         operation,
         resource_filters: selectedResources,
         terraform_binary: terraformBinary,
+        // "auto" needs Resource Explorer to find the region.
+        use_resource_explorer: useResourceExplorer || region === AUTO_REGION,
       };
 
       const result = await initiateScan(payload);
       router.push(`/scan/${result.job_id}`);
-    } catch (err: any) {
-      setError(err.message || "Failed to initiate scan");
+    } catch (err) {
+      setError(err instanceof Error && err.message ? err.message : "Failed to initiate scan");
     } finally {
       setIsLoading(false);
     }
   };
 
+  const selectedMode = OPERATION_MODES.find((m) => m.id === operation);
+  const hasCredentials = accessKey.length > 0 && secretKey.length > 0;
+  const canSubmit = !isLoading && hasCredentials && selectedResources.length > 0;
+
   return (
-    <form onSubmit={handleSubmit} className="space-y-7">
-      {/* Safety Notice Banner */}
-      <div className="p-4 rounded-xl bg-gradient-to-r from-brand-50/90 to-indigo-50/60 border border-brand-200/80 text-xs text-brand-950 flex items-start gap-3.5 shadow-2xs">
-        <div className="p-1.5 rounded-lg bg-brand-600 text-white shrink-0 mt-0.5 shadow-xs">
-          <Shield className="w-4 h-4" />
-        </div>
-        <div className="space-y-1">
-          <span className="font-bold text-slate-900 block text-sm">Strict Read-Only Guarantee</span>
-          <p className="text-slate-600 leading-relaxed">
-            Credentials reside strictly in ephemeral memory for read-only AWS APIs (<code className="text-brand-700 bg-white/80 px-1 py-0.5 rounded border border-brand-200/50">Describe*</code>, <code className="text-brand-700 bg-white/80 px-1 py-0.5 rounded border border-brand-200/50">Get*</code>, <code className="text-brand-700 bg-white/80 px-1 py-0.5 rounded border border-brand-200/50">List*</code>). They are never saved to disk, logged, or sent to LLMs.
-          </p>
-        </div>
-      </div>
-
-      {error && (
-        <div className="p-4 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-800 flex items-start gap-3 animate-in fade-in duration-200 shadow-xs">
-          <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
-          <span className="font-medium">{error}</span>
-        </div>
-      )}
-
-      {/* Credentials Section */}
-      <div className="space-y-4">
-        <div className="text-xs font-bold uppercase tracking-wider text-slate-500 flex items-center gap-1.5">
-          <Key className="w-3.5 h-3.5 text-brand-600" />
-          <span>AWS Authentication</span>
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {/* Access Key */}
-          <div className="space-y-1.5">
-            <label className="text-xs font-medium text-slate-700 flex items-center justify-between">
-              <span>AWS Access Key ID <span className="text-rose-500">*</span></span>
-            </label>
-            <input
-              type="text"
-              required
-              placeholder="AKIAIOSFODNN7EXAMPLE"
-              value={accessKey}
-              onChange={(e) => setAccessKey(e.target.value)}
-              className="w-full px-3.5 py-2.5 rounded-xl bg-white border border-slate-200/90 text-slate-900 placeholder:text-slate-400 text-xs font-mono shadow-2xs focus:border-brand-600 focus:ring-3 focus:ring-brand-500/15 outline-none transition-all"
-            />
+    <form onSubmit={handleSubmit} className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
+      <div className="xl:col-span-8 space-y-5">
+        {/* 1. Credentials */}
+        <FormSection
+          step={1}
+          icon={Key}
+          title="AWS credentials"
+          description="Use a read-only IAM user or short-lived STS credentials."
+        >
+          <div className="p-3.5 rounded-xl bg-brand-50/70 border border-brand-100 text-xs flex items-start gap-3">
+            <Shield className="w-4 h-4 text-brand-600 shrink-0 mt-0.5" />
+            <p className="text-slate-600 leading-relaxed">
+              Credentials are kept in memory only and used for read-only AWS calls (
+              <code className="text-brand-700 font-mono">Describe*</code>,{" "}
+              <code className="text-brand-700 font-mono">Get*</code>,{" "}
+              <code className="text-brand-700 font-mono">List*</code>). They are never saved to disk, logged, or sent
+              to an LLM.
+            </p>
           </div>
 
-          {/* Secret Key */}
-          <div className="space-y-1.5">
-            <label className="text-xs font-medium text-slate-700 flex items-center justify-between">
-              <span>AWS Secret Access Key <span className="text-rose-500">*</span></span>
-              <button
-                type="button"
-                onClick={() => setShowSecret(!showSecret)}
-                className="text-[11px] text-brand-600 hover:text-brand-700 font-medium inline-flex items-center gap-1"
-              >
-                {showSecret ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3" />}
-                {showSecret ? "Hide" : "Show"}
-              </button>
-            </label>
-            <div className="relative">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="space-y-1.5">
+              <label htmlFor="aws-access-key" className="text-xs font-medium text-slate-700 block">
+                Access key ID <span className="text-rose-500">*</span>
+              </label>
               <input
+                id="aws-access-key"
+                type="text"
+                required
+                autoComplete="off"
+                spellCheck={false}
+                placeholder="AKIAIOSFODNN7EXAMPLE"
+                value={accessKey}
+                onChange={(e) => setAccessKey(e.target.value)}
+                className="field-input font-mono"
+              />
+            </div>
+
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between">
+                <label htmlFor="aws-secret-key" className="text-xs font-medium text-slate-700">
+                  Secret access key <span className="text-rose-500">*</span>
+                </label>
+                <button
+                  type="button"
+                  onClick={() => setShowSecret(!showSecret)}
+                  className="text-2xs text-brand-600 hover:text-brand-700 font-medium inline-flex items-center gap-1"
+                >
+                  {showSecret ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3" />}
+                  {showSecret ? "Hide" : "Show"}
+                </button>
+              </div>
+              <input
+                id="aws-secret-key"
                 type={showSecret ? "text" : "password"}
                 required
+                autoComplete="off"
+                spellCheck={false}
                 placeholder="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
                 value={secretKey}
                 onChange={(e) => setSecretKey(e.target.value)}
-                className="w-full px-3.5 py-2.5 rounded-xl bg-white border border-slate-200/90 text-slate-900 placeholder:text-slate-400 text-xs font-mono shadow-2xs focus:border-brand-600 focus:ring-3 focus:ring-brand-500/15 outline-none transition-all"
+                className="field-input font-mono"
               />
             </div>
           </div>
-        </div>
 
-        {/* Session Token, Region & IaC Engine */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           <div className="space-y-1.5">
-            <label className="text-xs font-medium text-slate-700 flex items-center gap-1">
-              <span>AWS Session Token</span>
-              <span className="text-[10px] text-slate-400 font-normal">(Optional STS)</span>
+            <label htmlFor="aws-session-token" className="text-xs font-medium text-slate-700 flex items-center gap-1.5">
+              Session token <span className="text-2xs text-slate-400 font-normal">optional, for STS credentials</span>
             </label>
             <input
+              id="aws-session-token"
               type="password"
-              placeholder="AQoDYXdzEJr1... (optional)"
+              autoComplete="off"
+              placeholder="AQoDYXdzEJr1..."
               value={sessionToken}
               onChange={(e) => setSessionToken(e.target.value)}
-              className="w-full px-3.5 py-2.5 rounded-xl bg-white border border-slate-200/90 text-slate-900 placeholder:text-slate-400 text-xs font-mono shadow-2xs focus:border-brand-600 focus:ring-3 focus:ring-brand-500/15 outline-none transition-all"
+              className="field-input font-mono"
             />
           </div>
+        </FormSection>
 
-          <div className="space-y-1.5">
-            <label className="text-xs font-medium text-slate-700 flex items-center gap-1.5">
-              <Globe className="w-3.5 h-3.5 text-brand-600" />
-              <span>Target Region <span className="text-rose-500">*</span></span>
-            </label>
-            <select
-              value={region}
-              onChange={(e) => setRegion(e.target.value)}
-              className="w-full px-3.5 py-2.5 rounded-xl bg-white border border-slate-200/90 text-slate-900 text-xs shadow-2xs focus:border-brand-600 focus:ring-3 focus:ring-brand-500/15 outline-none transition-all cursor-pointer"
-            >
-              {AWS_REGIONS.map((r) => (
-                <option key={r.value} value={r.value}>
-                  {r.label}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div className="space-y-1.5">
-            <label className="text-xs font-medium text-slate-700 flex items-center gap-1.5">
-              <Layers className="w-3.5 h-3.5 text-brand-600" />
-              <span>IaC Engine</span>
-            </label>
-            <select
-              value={terraformBinary}
-              onChange={(e) => setTerraformBinary(e.target.value as "terraform" | "tofu")}
-              className="w-full px-3.5 py-2.5 rounded-xl bg-white border border-slate-200/90 text-slate-900 text-xs shadow-2xs focus:border-brand-600 focus:ring-3 focus:ring-brand-500/15 outline-none transition-all cursor-pointer"
-            >
-              <option value="terraform">Terraform</option>
-              <option value="tofu">OpenTofu</option>
-            </select>
-          </div>
-        </div>
-      </div>
-
-      {/* Operation Mode */}
-      <div className="space-y-2.5">
-        <label className="text-xs font-bold uppercase tracking-wider text-slate-500 flex items-center gap-1.5">
-          <Sparkles className="w-3.5 h-3.5 text-brand-600" />
-          <span>Pipeline Mode</span>
-        </label>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-          {OPERATION_MODES.map((op) => {
-            const Icon = op.icon;
-            const isSelected = operation === op.id;
-            return (
-              <label
-                key={op.id}
-                onClick={() => setOperation(op.id)}
-                className={`relative flex flex-col p-3.5 rounded-xl border text-left cursor-pointer transition-all ${
-                  isSelected
-                    ? "bg-brand-50/60 border-brand-500 ring-2 ring-brand-500/20 shadow-xs"
-                    : "bg-white border-slate-200/90 hover:border-slate-300 hover:bg-slate-50/50 shadow-2xs"
-                }`}
-              >
-                <div className="flex items-center justify-between mb-2">
-                  <div className={`p-2 rounded-lg ${isSelected ? "bg-brand-600 text-white" : "bg-slate-100 text-slate-600"}`}>
-                    <Icon className="w-4 h-4" />
-                  </div>
-                  <div className={`w-3.5 h-3.5 rounded-full border flex items-center justify-center ${isSelected ? "border-brand-600 bg-brand-600" : "border-slate-300"}`}>
-                    {isSelected && <div className="w-1.5 h-1.5 rounded-full bg-white" />}
-                  </div>
-                </div>
-                <span className={`text-xs font-bold ${isSelected ? "text-brand-900" : "text-slate-800"}`}>
-                  {op.title}
-                </span>
-                <span className="text-[11px] text-slate-500 mt-0.5 leading-snug">
-                  {op.desc}
-                </span>
+        {/* 2. Target */}
+        <FormSection
+          step={2}
+          icon={Globe}
+          title="Target & engine"
+          description="Where to scan, and which IaC dialect to validate against."
+        >
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="space-y-1.5">
+              <label htmlFor="aws-region" className="text-xs font-medium text-slate-700 block">
+                Region <span className="text-rose-500">*</span>
               </label>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* Resource Filters */}
-      <div className="space-y-2.5">
-        <div className="flex items-center justify-between">
-          <label className="text-xs font-bold uppercase tracking-wider text-slate-500 flex items-center gap-1.5">
-            <Layers className="w-3.5 h-3.5 text-brand-600" />
-            <span>Target AWS Resource Types</span>
-          </label>
-          <button
-            type="button"
-            onClick={handleSelectAllResources}
-            className="text-xs text-brand-600 hover:text-brand-700 font-semibold"
-          >
-            {selectedResources.length === RESOURCE_OPTIONS.length ? "Deselect All" : "Select All"}
-          </button>
-        </div>
-
-        <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-          {RESOURCE_OPTIONS.map((res) => {
-            const Icon = res.icon;
-            const isChecked = selectedResources.includes(res.id);
-            return (
-              <button
-                type="button"
-                key={res.id}
-                onClick={() => toggleResource(res.id)}
-                className={`flex items-center gap-3 p-3 rounded-xl border text-left transition-all ${
-                  isChecked
-                    ? "bg-brand-50/50 border-brand-500/70 text-slate-900 shadow-2xs"
-                    : "bg-white border-slate-200/90 text-slate-500 hover:border-slate-300 shadow-2xs"
-                }`}
+              <select
+                id="aws-region"
+                value={region}
+                onChange={(e) => setRegion(e.target.value)}
+                className="field-input cursor-pointer"
               >
-                <div
-                  className={`w-4 h-4 rounded-md flex items-center justify-center border text-[10px] font-bold shrink-0 transition-colors ${
-                    isChecked
-                      ? "bg-brand-600 border-brand-600 text-white"
-                      : "border-slate-300 bg-white"
+                <option value={AUTO_REGION}>Auto: find my resources (Resource Explorer)</option>
+                {AWS_REGIONS.map((r) => (
+                  <option key={r.value} value={r.value}>
+                    {r.label}
+                  </option>
+                ))}
+              </select>
+              {region === AUTO_REGION && (
+                <p className="text-2xs text-slate-500 leading-relaxed">
+                  Scans the region that holds the most supported resources. Falls back to us-east-1 if Resource
+                  Explorer isn&apos;t turned on in the account.
+                </p>
+              )}
+            </div>
+
+            <div className="space-y-1.5">
+              <span className="text-xs font-medium text-slate-700 block">IaC engine</span>
+              <div className="grid grid-cols-2 gap-1 p-1 rounded-xl bg-slate-100">
+                {(
+                  [
+                    { id: "terraform", label: "Terraform" },
+                    { id: "tofu", label: "OpenTofu" },
+                  ] as const
+                ).map((engine) => (
+                  <button
+                    key={engine.id}
+                    type="button"
+                    onClick={() => setTerraformBinary(engine.id)}
+                    aria-pressed={terraformBinary === engine.id}
+                    className={`py-2 rounded-lg text-xs font-semibold transition-all ${
+                      terraformBinary === engine.id
+                        ? "bg-white text-slate-900 shadow-xs"
+                        : "text-slate-500 hover:text-slate-800"
+                    }`}
+                  >
+                    {engine.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <label className="flex items-start gap-3 p-3.5 rounded-xl border border-slate-200 bg-slate-50/60 cursor-pointer">
+            <input
+              type="checkbox"
+              className="mt-0.5 h-4 w-4 accent-brand-600"
+              checked={useResourceExplorer || region === AUTO_REGION}
+              disabled={region === AUTO_REGION}
+              onChange={(e) => setUseResourceExplorer(e.target.checked)}
+            />
+            <span className="text-xs text-slate-700 leading-relaxed">
+              <span className="font-semibold text-slate-900">All-region inventory with AWS Resource Explorer</span>
+              <span className="block text-2xs text-slate-500 mt-0.5">
+                Read-only (<code className="font-mono">ListIndexes</code>, <code className="font-mono">Search</code>).
+                Resource Explorer must already be turned on in the account. TerraAgent never turns it on for you.
+              </span>
+            </span>
+          </label>
+        </FormSection>
+
+        {/* 3. Mode */}
+        <FormSection step={3} icon={Sparkles} title="Pipeline mode" description="How far the agent pipeline should go.">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3" role="radiogroup" aria-label="Pipeline mode">
+            {OPERATION_MODES.map((op) => {
+              const Icon = op.icon;
+              const isSelected = operation === op.id;
+              return (
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={isSelected}
+                  key={op.id}
+                  onClick={() => setOperation(op.id)}
+                  className={`flex items-start gap-3 p-3.5 rounded-xl border text-left transition-all ${
+                    isSelected
+                      ? "bg-brand-50/60 border-brand-500 ring-3 ring-brand-500/15"
+                      : "bg-white border-slate-200 hover:border-slate-300 hover:bg-slate-50/60"
                   }`}
                 >
-                  {isChecked && "✓"}
-                </div>
-                <div className="min-w-0">
-                  <div className="font-bold text-xs text-slate-800 truncate">{res.id}</div>
-                  <div className="text-[10px] text-slate-500 truncate">{res.label}</div>
-                </div>
-              </button>
-            );
-          })}
-        </div>
+                  <div
+                    className={`p-2 rounded-lg shrink-0 ${
+                      isSelected ? "bg-brand-600 text-white" : "bg-slate-100 text-slate-600"
+                    }`}
+                  >
+                    <Icon className="w-4 h-4" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className={`text-xs font-bold ${isSelected ? "text-brand-900" : "text-slate-800"}`}>
+                      {op.title}
+                    </div>
+                    <div className="text-2xs text-slate-500 mt-0.5 leading-snug">{op.desc}</div>
+                  </div>
+                  <div
+                    className={`w-4 h-4 mt-0.5 rounded-full border flex items-center justify-center shrink-0 ${
+                      isSelected ? "border-brand-600 bg-brand-600" : "border-slate-300"
+                    }`}
+                  >
+                    {isSelected && <div className="w-1.5 h-1.5 rounded-full bg-white" />}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </FormSection>
+
+        {/* 4. Resources */}
+        <FormSection
+          step={4}
+          icon={Layers}
+          title="Resource types"
+          description="Only these services will be inventoried."
+          action={
+            <button
+              type="button"
+              onClick={handleSelectAllResources}
+              className="text-xs text-brand-600 hover:text-brand-700 font-semibold shrink-0"
+            >
+              {selectedResources.length === RESOURCE_OPTIONS.length ? "Deselect all" : "Select all"}
+            </button>
+          }
+        >
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+            {RESOURCE_OPTIONS.map((res) => {
+              const Icon = res.icon;
+              const isChecked = selectedResources.includes(res.id);
+              return (
+                <button
+                  type="button"
+                  key={res.id}
+                  onClick={() => toggleResource(res.id)}
+                  aria-pressed={isChecked}
+                  className={`flex items-center gap-3 p-3 rounded-xl border text-left transition-all ${
+                    isChecked
+                      ? "bg-white border-brand-500/70 ring-3 ring-brand-500/10"
+                      : "bg-slate-50/60 border-slate-200 opacity-70 hover:opacity-100"
+                  }`}
+                >
+                  <div
+                    className={`p-1.5 rounded-lg shrink-0 ${
+                      isChecked ? `${res.bg} ${res.color}` : "bg-slate-100 text-slate-400"
+                    }`}
+                  >
+                    <Icon className="w-4 h-4" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="font-bold text-xs text-slate-800 truncate">{res.id}</div>
+                    <div className="text-3xs text-slate-500 truncate">{res.label}</div>
+                  </div>
+                  <div
+                    className={`w-4 h-4 rounded-md flex items-center justify-center border text-3xs font-bold shrink-0 transition-colors ${
+                      isChecked ? "bg-brand-600 border-brand-600 text-white" : "border-slate-300 bg-white"
+                    }`}
+                  >
+                    {isChecked && "✓"}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </FormSection>
       </div>
 
-      {/* Submit Action */}
-      <div className="pt-2">
-        <button
-          type="submit"
-          disabled={isLoading || !accessKey || !secretKey}
-          className="w-full py-3.5 px-6 rounded-xl bg-gradient-to-r from-brand-600 to-indigo-600 hover:from-brand-500 hover:to-indigo-500 active:scale-[0.99] disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none text-white font-bold shadow-lg shadow-brand-500/25 flex items-center justify-center gap-2.5 text-sm transition-all"
-        >
-          {isLoading ? (
-            <div className="flex items-center gap-2">
-              <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-              <span>Orchestrating 8-Agent Pipeline...</span>
-            </div>
-          ) : (
-            <>
-              <span>Launch TerraAgent Scan</span>
-              <ArrowRight className="w-4 h-4 group-hover:translate-x-0.5 transition-transform" />
-            </>
-          )}
-        </button>
-      </div>
+      {/* Summary + launch */}
+      <aside className="xl:col-span-4 xl:sticky xl:top-8 space-y-4">
+        <div className="card overflow-hidden">
+          <div className="card-header">
+            <h3 className="text-sm font-bold text-slate-900">Scan summary</h3>
+          </div>
+          <dl className="p-5 space-y-3 text-xs">
+            <SummaryRow label="Credentials" ok={hasCredentials}>
+              {hasCredentials ? `Provided${sessionToken ? " (STS)" : ""}` : "Not provided"}
+            </SummaryRow>
+            <SummaryRow label="Region" ok>
+              {region === AUTO_REGION ? "Auto (Resource Explorer)" : <span className="font-mono">{region}</span>}
+            </SummaryRow>
+            <SummaryRow label="Engine" ok>
+              {terraformBinary === "tofu" ? "OpenTofu" : "Terraform"}
+            </SummaryRow>
+            <SummaryRow label="Mode" ok>
+              {selectedMode?.title}
+            </SummaryRow>
+            <SummaryRow label="Resources" ok={selectedResources.length > 0}>
+              {selectedResources.length === 0
+                ? "None selected"
+                : selectedResources.length === RESOURCE_OPTIONS.length
+                ? "All types"
+                : selectedResources.join(", ")}
+            </SummaryRow>
+          </dl>
+
+          <div className="p-5 pt-0 space-y-3">
+            {error && (
+              <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-800 flex items-start gap-2.5 animate-fade-in">
+                <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                <span className="font-medium">{error}</span>
+              </div>
+            )}
+            <button type="submit" disabled={!canSubmit} className="btn-primary w-full py-3 text-sm group">
+              {isLoading ? (
+                <>
+                  <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                  <span>Starting pipeline...</span>
+                </>
+              ) : (
+                <>
+                  <span>Launch scan</span>
+                  <ArrowRight className="w-4 h-4 group-hover:translate-x-0.5 transition-transform" />
+                </>
+              )}
+            </button>
+            <p className="text-3xs text-slate-400 text-center leading-relaxed">
+              Nothing in your AWS account is created, changed, or deleted.
+            </p>
+          </div>
+        </div>
+
+        <div className="card p-4 flex items-start gap-3">
+          <div className="p-2 rounded-lg bg-slate-100 text-slate-600 shrink-0">
+            <Cpu className="w-4 h-4" />
+          </div>
+          <p className="text-2xs text-slate-500 leading-relaxed">
+            HCL is generated by a local Ollama model, then checked with <code className="font-mono">fmt</code>,{" "}
+            <code className="font-mono">validate</code>, tfsec, Checkov, Trivy and OPA before anything is packaged.
+          </p>
+        </div>
+      </aside>
     </form>
+  );
+}
+
+function FormSection({
+  step,
+  icon: Icon,
+  title,
+  description,
+  action,
+  children,
+}: {
+  step: number;
+  icon: React.ComponentType<{ className?: string }>;
+  title: string;
+  description?: string;
+  action?: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className="card">
+      <div className="card-header">
+        <div className="flex items-center gap-3 min-w-0">
+          <span className="w-6 h-6 rounded-full bg-slate-900 text-white text-2xs font-bold flex items-center justify-center shrink-0">
+            {step}
+          </span>
+          <div className="min-w-0">
+            <h2 className="text-sm font-bold text-slate-900 flex items-center gap-1.5">
+              <Icon className="w-3.5 h-3.5 text-brand-600" />
+              {title}
+            </h2>
+            {description && <p className="text-2xs text-slate-500 mt-0.5">{description}</p>}
+          </div>
+        </div>
+        {action}
+      </div>
+      <div className="p-5 space-y-4">{children}</div>
+    </section>
+  );
+}
+
+function SummaryRow({ label, ok, children }: { label: string; ok: boolean; children: React.ReactNode }) {
+  return (
+    <div className="flex items-start justify-between gap-3">
+      <dt className="text-slate-500 flex items-center gap-1.5 shrink-0">
+        <span className={`w-1.5 h-1.5 rounded-full ${ok ? "bg-emerald-500" : "bg-slate-300"}`} />
+        {label}
+      </dt>
+      <dd className="text-slate-800 font-medium text-right min-w-0 break-words">{children}</dd>
+    </div>
   );
 }

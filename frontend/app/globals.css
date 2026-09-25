@@ -4,15 +4,44 @@
 
 :root {
   --foreground-rgb: 4, 7, 15;
-  --background-start-rgb: 255, 255, 255;
-  --background-end-rgb: 247, 248, 251;
 }
 
 body {
   color: rgb(var(--foreground-rgb));
-  background: radial-gradient(circle at 50% 0%, #ffffff 0%, #f7f8fb 70%);
+  background: #f7f8fb;
   min-height: 100vh;
   font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+@layer components {
+  /* Shared primitives - keep page markup short and every surface consistent. */
+  .card {
+    @apply rounded-2xl border border-slate-200/90 bg-white shadow-card;
+  }
+  .card-header {
+    @apply px-5 py-4 border-b border-slate-100 flex items-center justify-between gap-3;
+  }
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-xs font-semibold transition-all disabled:opacity-60 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-brand-500/25;
+  }
+  .btn-primary {
+    @apply btn bg-brand-600 hover:bg-brand-700 text-white shadow-sm shadow-brand-600/20;
+  }
+  .btn-secondary {
+    @apply btn bg-white hover:bg-slate-50 text-slate-700 border border-slate-200 shadow-2xs;
+  }
+  .btn-dark {
+    @apply btn bg-slate-900 hover:bg-slate-800 text-white shadow-sm;
+  }
+  .field-label {
+    @apply text-2xs font-bold text-slate-600 uppercase tracking-wider;
+  }
+  .field-input {
+    @apply w-full px-3.5 py-2.5 rounded-xl bg-white border border-slate-200 text-slate-900 placeholder:text-slate-400 text-xs shadow-2xs outline-none transition-all focus:border-brand-600 focus:ring-3 focus:ring-brand-500/15;
+  }
+  .section-title {
+    @apply text-2xs font-bold uppercase tracking-wider text-slate-500 flex items-center gap-1.5;
+  }
 }
 
 /* Custom Scrollbars */
@@ -22,14 +51,14 @@ body {
 }
 
 ::-webkit-scrollbar-track {
-  background: #f7f8fb;
+  background: transparent;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #c7d2fe;
+  background: #cbd5e1;
   border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #a3b3fd;
+  background: #94a3b8;
 }

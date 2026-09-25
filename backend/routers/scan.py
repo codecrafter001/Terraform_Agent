@@ -23,6 +23,10 @@ router = APIRouter(prefix="/scan", tags=["scan"], dependencies=[Depends(require_
 # has no other way to know which agents ran (repair_agent is conditional and
 # was previously missing from this list even before classification_agent
 # existed; keep both in sync with the graph rather than repeating this list).
+# Must match agents/graph.py::ALL_STAGES (not imported, to keep LangGraph out
+# of API startup).
+ALL_STAGES = ("discovery", "composer", "verifier", "repair", "package")
+
 _FULL_AGENT_PIPELINE = (
     "intent_router", "cloud_discovery", "graph_agent", "classification_agent",
     "adoption_planning_agent", "terraform_composer", "validation_agent", "drift_reconciliation_agent",
@@ -55,6 +59,7 @@ async def start_scan(request: Request, scan_request: ScanRequest):
         "zip_password": scan_request.zip_password.get_secret_value() if scan_request.zip_password else None,
         "terraform_binary": scan_request.terraform_binary,
         "run_plan_equivalence": scan_request.run_plan_equivalence,
+        "use_resource_explorer": scan_request.use_resource_explorer,
         "created_at": created_at
     }
 
@@ -94,56 +99,11 @@ async def start_scan(request: Request, scan_request: ScanRequest):
 
 
 async def run_scan_inline(job_id: str, request_dict: dict):
-    from agents.graph import build_graph
+    from agents.graph import build_graph, build_initial_state
     from routers.metrics import record_job_outcome
     try:
         app = build_graph()
-        initial_state = {
-            "job_id": job_id,
-            "created_at": request_dict.get("created_at", datetime.utcnow().isoformat()),
-            "operation": request_dict.get("operation", "generate"),
-            "region": request_dict.get("region", "us-east-1"),
-            "resource_filters": request_dict.get("resource_filters", ["EC2", "VPC", "S3", "RDS", "IAM", "SG"]),
-            "aws_credentials": {
-                "access_key": request_dict.get("aws_access_key"),
-                "secret_key": request_dict.get("aws_secret_key"),
-                "session_token": request_dict.get("aws_session_token")
-            },
-            "aws_endpoint_url": request_dict.get("aws_endpoint_url"),
-            "role_arn": request_dict.get("role_arn"),
-            "webhook_url": request_dict.get("webhook_url"),
-            "zip_password": request_dict.get("zip_password"),
-            "terraform_binary": request_dict.get("terraform_binary", "terraform"),
-            "run_plan_equivalence": request_dict.get("run_plan_equivalence", False),
-            "intent": {},
-            "resources": [],
-            "classification_results": {},
-            "dependency_graph": {},
-            "adoption_plan": {},
-            "terraform_files": {},
-            "generation_manifest": {},
-            "validation_results": {},
-            "drift_results": {},
-            "plan_equivalence_results": {},
-            "security_results": {},
-            "cost_results": {},
-            "repair_attempts": 0,
-            "repair_risk_tier": None,
-            "pending_approval": None,
-            "approval_decision": None,
-            "documentation": {},
-            "github_pr": None,
-            "github_wave_prs": {},
-            "zip_path": None,
-            "zip_sha256": None,
-            "zip_manifest": [],
-            "errors": [],
-            "status": "RUNNING",
-            "completed_agents": [],
-            "current_agent": "intent_router",
-            "progress_percentage": 0,
-            "agent_timings": {}
-        }
+        initial_state = build_initial_state(job_id, request_dict)
         final_state = await app.ainvoke(initial_state)
         await redis_service.set_job_state(job_id, final_state)
         mark_job_complete(job_id, final_state)
@@ -164,7 +124,12 @@ async def run_scan_inline(job_id: str, request_dict: dict):
         from tools.credential_scrubber import CredentialScrubber
         error_msg = CredentialScrubber.scrub_text(str(e))
         await redis_service.publish_log(job_id, f"Pipeline error: {error_msg}", "error")
+        # Merge into the last published (already scrubbed) state rather than
+        # replacing it, so the UI can still show which agent failed and
+        # everything that ran before it.
+        previous = await redis_service.get_job_state(job_id) or {}
         await redis_service.set_job_state(job_id, {
+            **previous,
             "job_id": job_id,
             "status": JobStatus.FAILED.value,
             "error": error_msg
@@ -204,6 +169,8 @@ async def get_scan_status(job_id: str):
                 progress_percentage=100 if is_terminal else 50,
                 current_agent="documentation_agent" if ran_full_pipeline else None,
                 completed_agents=list(_FULL_AGENT_PIPELINE) if ran_full_pipeline else [],
+                current_stage="complete" if ran_full_pipeline else None,
+                completed_stages=list(ALL_STAGES) if ran_full_pipeline else [],
                 created_at=rec.created_at or datetime.utcnow().isoformat(),
                 error=rec.error
             )
@@ -215,6 +182,13 @@ async def get_scan_status(job_id: str):
         progress_percentage=state.get("progress_percentage", 50 if state.get("status") == "RUNNING" else 100),
         current_agent=state.get("current_agent"),
         completed_agents=state.get("completed_agents", []),
+        current_stage=state.get("current_stage"),
+        completed_stages=state.get("completed_stages", []) or [],
+        stage_summaries=state.get("stage_summaries", {}) or {},
+        verification_iterations=state.get("verification_iterations", []) or [],
+        repair_attempts=state.get("repair_attempts", 0) or 0,
+        max_repair_iterations=state.get("max_repair_iterations"),
+        migration_confidence=state.get("migration_confidence"),
         created_at=state.get("created_at", datetime.utcnow().isoformat()),
         error=state.get("error")
     )
@@ -280,11 +254,14 @@ async def get_scan_results(job_id: str):
         classification_results=state.get("classification_results", {}),
         dependency_graph=state.get("dependency_graph", {}),
         adoption_plan=state.get("adoption_plan", {}),
+        resource_inventory=state.get("resource_inventory") or {},
+        requested_region=state.get("requested_region"),
         generation_manifest=state.get("generation_manifest"),
         validation_results=state.get("validation_results", {}),
         drift_results=state.get("drift_results", {}),
         plan_equivalence_results=state.get("plan_equivalence_results", {}),
         security_results=state.get("security_results", {}),
+        migration_confidence=state.get("migration_confidence"),
         pending_approval=state.get("pending_approval"),
         approval_decision=state.get("approval_decision"),
         github_pr=state.get("github_pr"),
@@ -342,9 +319,8 @@ async def _resume_after_decision(job_id: str, state: Dict[str, Any], approved: b
     task from approve_scan/reject_scan so the HTTP request returns
     immediately - cost_agent/documentation_agent can take real time (Infracost
     subprocess, an LLM call, ZIP packaging)."""
-    from agents.cost_agent import cost_agent_node
     from agents.documentation_agent import documentation_agent_node
-    from agents.graph import _timed
+    from agents.graph import _timed, package_outputs
     from routers.metrics import record_job_outcome
 
     # _timed wraps each node the exact same way build_graph() does for every
@@ -353,7 +329,6 @@ async def _resume_after_decision(job_id: str, state: Dict[str, Any], approved: b
     # documentation_agent_node directly (as this function did before) meant
     # neither ever showed up in agent_timings for a resumed job, and a
     # failure here never incremented scan_errors_total.
-    cost_node = _timed("cost_agent", cost_agent_node)
     documentation_node = _timed("documentation_agent", documentation_agent_node)
 
     state = dict(state)
@@ -384,11 +359,11 @@ async def _resume_after_decision(job_id: str, state: Dict[str, Any], approved: b
                 job_id, "[AGENT:system] Human approval received - resuming pipeline.", agent_name="system"
             )
 
-            result = await cost_node(state)
-            state = {**state, **result}
-
-            result = await documentation_node(state)
-            state = {**state, **result}  # sets status back to COMPLETE
+            # The same output step the graph runs on an unblocked job: cost
+            # estimate + documentation + ZIP, each step _timed.
+            state["current_stage"] = "package"
+            result = await package_outputs(state)
+            state = {**state, **result}  # documentation sets status back to COMPLETE
         else:
             state["status"] = "REJECTED"
             await redis_service.set_job_state(job_id, state)

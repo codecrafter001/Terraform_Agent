@@ -8,6 +8,7 @@ from typing import Any, Dict, List
 
 from services.ollama_client import ollama_client
 from services.redis_client import redis_service
+from tools.confidence_scorer import MigrationConfidenceScorer
 from tools.naming import unique_clean_name
 from tools.zip_builder import ZipBuilder
 
@@ -413,12 +414,30 @@ Verify that Terraform reports: `No changes. Your infrastructure matches the conf
     is_rejected = bool(approval_decision) and approval_decision.get("decision") == "rejected"
     adoption_section = REJECTED_SECTION if is_rejected else ADOPTION_INSTRUCTIONS
 
+    # Calculate Migration Confidence & Blast Radius
+    confidence_data = MigrationConfidenceScorer.calculate_score(
+        drift_results=drift_res,
+        plan_equivalence_results=state.get("plan_equivalence_results"),
+        validation_results=val_res,
+        security_results=sec_res,
+        generation_manifest=state.get("generation_manifest"),
+        dependency_graph=dep_graph,
+    )
+    confidence_line = (
+        f"- **Migration Confidence Score**: {confidence_data['score']} / 100 "
+        f"({confidence_data['tier']} CONFIDENCE - {confidence_data['verdict']})\n"
+        f"- **Blast-Radius Breakdown**: {confidence_data['blast_radius']['no_op_count']} No-Op, "
+        f"{confidence_data['blast_radius']['behavior_changing_count']} Behavior-Changing, "
+        f"{confidence_data['blast_radius']['destructive_count']} Destructive"
+    )
+
     readme_fallback = f"""# TerraAgent Generated Infrastructure Bundle
 
 - **Generated For Job**: `{job_id}`
 - **AWS Region**: `{region}`
 - **Discovered Resources**: {len(resources)}
 - **Validation Status**: {'PASSED' if val_res.get('passed') else 'COMPLETED'}
+{confidence_line}
 {security_score_line}
 {cost_line}{approval_line}
 
@@ -471,6 +490,7 @@ Verify that Terraform reports: `No changes. Your infrastructure matches the conf
         pending_approval=pending_approval,
         drift_results=drift_res,
         generation_manifest=state.get("generation_manifest"),
+        migration_confidence=confidence_data,
         docs=docs,
         output_dir=output_dir,
         password=state.get("zip_password")
@@ -488,6 +508,7 @@ Verify that Terraform reports: `No changes. Your infrastructure matches the conf
 
     return {
         "documentation": docs,
+        "migration_confidence": confidence_data,
         "zip_path": zip_info["zip_path"],
         "zip_sha256": zip_info["sha256"],
         "zip_manifest": zip_info["manifest"],

@@ -147,12 +147,13 @@ class ZipBuilder:
         pending_approval: Optional[Dict[str, Any]] = None,
         drift_results: Optional[Dict[str, Any]] = None,
         generation_manifest: Optional[Dict[str, Any]] = None,
+        migration_confidence: Optional[Dict[str, Any]] = None,
         docs: Optional[Dict[str, str]] = None,
         output_dir: Optional[str] = None,
         password: Optional[str] = None
     ) -> Dict[str, Any]:
         """Package Terraform HCL, discovery inventory, dependency graph, security/validation
-        reports, generation manifest, and documentation into a single downloadable ZIP bundle.
+        reports, generation manifest, migration confidence score, and documentation into a single downloadable ZIP bundle.
 
         If `password` is given, the bundle is AES-256 encrypted (via pyzipper -
         the stdlib zipfile module can only produce the legacy, trivially-crackable
@@ -176,11 +177,12 @@ class ZipBuilder:
                 zf.setpassword(password.encode("utf-8"))
 
             for filename, content in tf_files.items():
-                zf.writestr(os.path.join("terraform", filename), content)
+                zip_entry = os.path.join("terraform", filename).replace("\\", "/")
+                zf.writestr(zip_entry, content)
 
             if docs:
                 for filename, content in docs.items():
-                    zf.writestr(filename, content)
+                    zf.writestr(filename.replace("\\", "/"), content)
 
             zf.writestr("inventory.json", json.dumps(inventory, indent=2, default=str))
             zf.writestr("inventory.csv", _build_inventory_csv(inventory))
@@ -193,6 +195,8 @@ class ZipBuilder:
             zf.writestr("reports/drift_results.json", json.dumps(drift_results or {}, indent=2, default=str))
             if generation_manifest:
                 zf.writestr("reports/generation_manifest.json", json.dumps(generation_manifest, indent=2, default=str))
+            if migration_confidence:
+                zf.writestr("reports/migration_confidence.json", json.dumps(migration_confidence, indent=2, default=str))
 
         manifest: List[Dict[str, Any]] = []
         with zip_cls(zip_path, "r") as zf:

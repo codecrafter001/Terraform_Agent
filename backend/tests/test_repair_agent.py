@@ -119,7 +119,7 @@ async def test_destructive_finding_never_reaches_llm_and_lands_in_pending_approv
     assert result["pending_approval"]["findings"][0]["tier"] == "destructive"
     assert result["repair_risk_tier"] == "destructive"
     # current_agent must point at the "awaiting_approval" halt hint (matching
-    # graph.py::repair_or_done's own routing to END), not validation_agent -
+    # graph.py::route_after_repair's routing to END), not validation_agent -
     # re-validating would just rediscover the same untouched finding - and
     # not cost_agent either, since the pipeline no longer silently continues
     # past an unresolved destructive finding.
@@ -171,7 +171,7 @@ async def test_no_findings_means_no_pending_approval():
 
     result = await repair_agent_node(state)
     # Nothing escalated - current_agent must correctly point back at
-    # validation_agent (matching repair_or_done's own routing), not stay
+    # validation_agent (matching route_after_repair's routing), not stay
     # stuck on whatever policy_agent had already set.
     assert result["current_agent"] == "validation_agent"
 
@@ -213,26 +213,31 @@ async def test_safe_auto_finding_is_the_only_tier_that_reaches_the_llm(monkeypat
     assert result["repair_risk_tier"] is None
 
 
-def test_repair_or_done_routes_to_halt_when_pending_approval_set():
-    from agents.graph import repair_or_done
+def test_route_after_repair_halts_when_pending_approval_set():
+    from agents.graph import route_after_repair
 
     # Regardless of how many attempts remain, escalated findings were never
-    # touched - looping back to validation_agent would just rediscover the
-    # exact same findings, and continuing on to cost_agent would ship a
-    # "COMPLETE" bundle nobody has actually approved. "halt" is mapped to
-    # END in build_graph()'s conditional edges.
+    # touched - looping back to the verifier would just rediscover the exact
+    # same findings, and packaging would ship a "COMPLETE" bundle nobody has
+    # actually approved. "halt" is mapped to END in build_graph().
     state = {"pending_approval": {"reason": "repair_requires_human_approval", "findings": []}, "repair_attempts": 1}
-    assert repair_or_done(state) == "halt"
+    assert route_after_repair(state) == "halt"
 
 
-def test_repair_or_done_still_loops_when_nothing_escalated():
-    from agents.graph import repair_or_done
+def test_route_after_repair_reverifies_when_nothing_escalated():
+    from agents.graph import route_after_repair
 
-    state = {"pending_approval": None, "repair_attempts": 1}
-    assert repair_or_done(state) == "validation_agent"
+    # Every repair is re-verified; the iteration bound lives in
+    # route_after_verify (see the next test).
+    assert route_after_repair({"pending_approval": None, "repair_attempts": 1}) == "verifier"
 
-    state = {"pending_approval": None, "repair_attempts": 3}
-    assert repair_or_done(state) == "cost_agent"
+
+def test_route_after_verify_bounds_the_repair_loop():
+    from agents.graph import route_after_verify
+
+    failing = {"pending_approval": None, "validation_results": {"passed": False, "checks": []}, "max_repair_iterations": 2}
+    assert route_after_verify({**failing, "repair_attempts": 1}) == "repair"
+    assert route_after_verify({**failing, "repair_attempts": 2}) == "package"
 
 
 def test_actionable_findings_still_filters_severity_and_tool():
@@ -250,59 +255,18 @@ def test_actionable_findings_still_filters_severity_and_tool():
     assert actionable[0]["resource"] == "aws_iam_role.x"
 
 
-def test_plan_gate_halts_when_plan_equivalence_set_pending_approval():
-    from agents.graph import plan_gate
+def test_route_after_verify_halts_on_plan_equivalence_or_drift_approval():
+    # Replaces the old plan_gate/drift_gate edges: the verifier stops its pass
+    # the moment either step sets pending_approval, and routing sends it
+    # straight to END - never to repair, never to package.
+    from agents.graph import route_after_verify
 
-    state = {"pending_approval": {"reason": "plan_equivalence_requires_human_approval", "findings": []}}
-    assert plan_gate(state) == "halt"
+    for reason in ("plan_equivalence_requires_human_approval", "drift_reconciliation_requires_human_approval"):
+        state = {
+            "pending_approval": {"reason": reason, "findings": []},
+            "validation_results": {"passed": False, "checks": []},
+            "repair_attempts": 0,
+        }
+        assert route_after_verify(state) == "halt"
 
-    assert plan_gate({"pending_approval": None}) == "policy_agent"
-
-
-def test_drift_gate_halts_when_drift_reconciliation_set_pending_approval():
-    from agents.graph import drift_gate
-
-    state = {"pending_approval": {"reason": "drift_reconciliation_requires_human_approval", "findings": []}}
-    assert drift_gate(state) == "halt"
-
-    assert drift_gate({"pending_approval": None}) == "plan_equivalence_agent"
-
-
-@pytest.mark.asyncio
-async def test_repair_agent_merges_into_existing_pending_approval_from_plan_equivalence(monkeypatch):
-    # plan_equivalence_agent now runs BEFORE policy_agent/repair_agent in the
-    # pipeline, so by the time repair_agent runs, state["pending_approval"]
-    # may already carry a plan-diff finding nobody has reviewed yet. A
-    # repair-cycle escalation must extend that list, never silently replace
-    # it - losing an earlier, unrelated finding would be a real regression.
-    import agents.repair_agent as repair_module
-    monkeypatch.setattr(repair_module, "_repair_block_via_llm", lambda *a, **k: (_ for _ in ()).throw(AssertionError()))
-
-    tf_files = {"data.tf": 'resource "aws_db_instance" "mydb" {\n  publicly_accessible = true\n}'}
-    plan_finding = {
-        "tool": "terraform_plan", "rule_id": "plan-equivalence", "severity": "HIGH",
-        "description": "terraform plan reports a `destroy` action against `aws_vpc.old`.",
-        "resource": "aws_vpc.old", "tier": "destructive",
-    }
-    state = {
-        "job_id": "test",
-        "terraform_files": tf_files,
-        "security_results": {
-            "findings": [
-                _finding(description="RDS instance should not be publicly accessible", resource="aws_db_instance.mydb")
-            ]
-        },
-        "repair_attempts": 0,
-        "completed_agents": [],
-        "pending_approval": {"reason": "plan_equivalence_requires_human_approval", "findings": [plan_finding]},
-        "repair_risk_tier": "destructive",
-    }
-
-    result = await repair_agent_node(state)
-
-    findings = result["pending_approval"]["findings"]
-    assert len(findings) == 2
-    assert plan_finding in findings
-    assert any(f["resource"] == "aws_db_instance.mydb" for f in findings)
-    assert result["repair_risk_tier"] == "destructive"
-    assert result["current_agent"] == "awaiting_approval"
+    assert route_after_verify({"pending_approval": None, "validation_results": {"passed": True, "checks": []}}) == "package"

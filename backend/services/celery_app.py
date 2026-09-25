@@ -107,7 +107,7 @@ def sweep_stale_jobs():
 @celery_app.task(name="run_scan_task")
 def run_scan_task(job_id: str, scan_request_dict: dict):
     """Celery background worker task that orchestrates the LangGraph pipeline."""
-    from agents.graph import build_graph
+    from agents.graph import build_graph, build_initial_state
     from routers.metrics import record_job_outcome
     from services.database import mark_job_complete, mark_job_failed
     from services.redis_client import redis_service
@@ -120,52 +120,7 @@ def run_scan_task(job_id: str, scan_request_dict: dict):
 
         # Build state graph
         app = build_graph()
-        initial_state = {
-            "job_id": job_id,
-            "created_at": scan_request_dict.get("created_at", datetime.utcnow().isoformat()),
-            "operation": scan_request_dict.get("operation", "generate"),
-            "region": scan_request_dict.get("region", "us-east-1"),
-            "resource_filters": scan_request_dict.get("resource_filters", ["EC2", "VPC", "S3", "RDS", "IAM", "SG"]),
-            "aws_credentials": {
-                "access_key": scan_request_dict.get("aws_access_key"),
-                "secret_key": scan_request_dict.get("aws_secret_key"),
-                "session_token": scan_request_dict.get("aws_session_token")
-            },
-            "aws_endpoint_url": scan_request_dict.get("aws_endpoint_url"),
-            "role_arn": scan_request_dict.get("role_arn"),
-            "webhook_url": scan_request_dict.get("webhook_url"),
-            "zip_password": scan_request_dict.get("zip_password"),
-            "terraform_binary": scan_request_dict.get("terraform_binary", "terraform"),
-            "run_plan_equivalence": scan_request_dict.get("run_plan_equivalence", False),
-            "intent": {},
-            "resources": [],
-            "classification_results": {},
-            "dependency_graph": {},
-            "adoption_plan": {},
-            "terraform_files": {},
-            "generation_manifest": {},
-            "validation_results": {},
-            "drift_results": {},
-            "plan_equivalence_results": {},
-            "security_results": {},
-            "cost_results": {},
-            "repair_attempts": 0,
-            "repair_risk_tier": None,
-            "pending_approval": None,
-            "approval_decision": None,
-            "documentation": {},
-            "github_pr": None,
-            "github_wave_prs": {},
-            "zip_path": None,
-            "zip_sha256": None,
-            "zip_manifest": [],
-            "errors": [],
-            "status": "RUNNING",
-            "completed_agents": [],
-            "current_agent": "intent_router",
-            "progress_percentage": 0,
-            "agent_timings": {}
-        }
+        initial_state = build_initial_state(job_id, scan_request_dict)
 
         # Run pipeline
         try:
@@ -182,7 +137,12 @@ def run_scan_task(job_id: str, scan_request_dict: dict):
             error_msg = CredentialScrubber.scrub_text(str(e))
             logger.error(f"[{job_id}] Pipeline execution failed: {error_msg}")
             await redis_service.publish_log(job_id, f"Pipeline error: {error_msg}", "error")
+            # Merge into the last published (already scrubbed) state rather than
+            # replacing it, so the UI can still show which agent failed and
+            # everything that ran before it.
+            previous = await redis_service.get_job_state(job_id) or {}
             await redis_service.set_job_state(job_id, {
+                **previous,
                 "job_id": job_id,
                 "status": "FAILED",
                 "error": error_msg

@@ -23,6 +23,8 @@ interface DependencyGraphProps {
     nodes: GraphNode[];
     links: GraphLink[];
   };
+  // Full-screen page: fill most of the viewport instead of a fixed 480px.
+  tall?: boolean;
 }
 
 const TYPE_COLORS: Record<string, string> = {
@@ -44,7 +46,7 @@ interface TooltipState {
   node: GraphNode;
 }
 
-export default function DependencyGraph({ data }: DependencyGraphProps) {
+export default function DependencyGraph({ data, tall = false }: DependencyGraphProps) {
   const svgRef = useRef<SVGSVGElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [tooltip, setTooltip] = useState<TooltipState | null>(null);
@@ -211,43 +213,59 @@ export default function DependencyGraph({ data }: DependencyGraphProps) {
     img.src = url;
   };
 
+  const presentTypes = Array.from(new Set((data?.nodes ?? []).map((n) => n.type)));
+  const legend = presentTypes
+    .filter((t) => t in TYPE_COLORS)
+    .sort()
+    .map((t) => ({ label: t.replace("aws_", "").replace(/_/g, " "), color: TYPE_COLORS[t] }));
+  if (presentTypes.some((t) => !(t in TYPE_COLORS))) {
+    legend.push({ label: "other", color: TYPE_COLORS.default });
+  }
+
   return (
-    <div className="rounded-2xl border border-border bg-surface shadow-md overflow-hidden relative">
-      <div className="p-4 border-b border-border flex items-center justify-between bg-surface-light/60">
-        <h3 className="text-sm font-bold text-ink">
-          Interactive D3 Dependency Graph
-        </h3>
-        <div className="flex items-center gap-4">
-          <div className="flex items-center gap-3 text-[11px]">
-            {Object.entries(TYPE_COLORS).filter(([k]) => k !== "default").map(([type, color]) => (
-              <span key={type} className="flex items-center gap-1.5 text-gray-600">
-                <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: color }} />
-                {type.replace("aws_", "").toUpperCase()}
+    <div className="card overflow-hidden relative">
+      <div className="px-4 py-3 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div className="flex items-center gap-x-3 gap-y-1.5 flex-wrap text-2xs">
+          {legend.length === 0 ? (
+            <span className="text-slate-400">No resources to plot</span>
+          ) : (
+            legend.map((l) => (
+              <span key={l.label} className="flex items-center gap-1.5 text-slate-600 capitalize">
+                <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: l.color }} />
+                {l.label}
               </span>
-            ))}
-          </div>
-          <button
-            onClick={exportPng}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white hover:bg-border text-gray-600 border border-border text-[11px] font-semibold transition-all"
-          >
-            <Download className="w-3.5 h-3.5" />
-            Export PNG
-          </button>
+            ))
+          )}
         </div>
+        <button onClick={exportPng} className="btn-secondary py-1.5 px-3 text-2xs self-start sm:self-auto shrink-0">
+          <Download className="w-3.5 h-3.5" />
+          Export PNG
+        </button>
       </div>
 
-      <div ref={containerRef} className="w-full h-[480px] bg-[#090d16] flex items-center justify-center relative">
+      <div
+        ref={containerRef}
+        className={`w-full bg-[#090d16] flex items-center justify-center relative ${
+          tall ? "h-[calc(100vh-15rem)] min-h-[480px]" : "h-[480px]"
+        }`}
+      >
+        {!data?.nodes?.length && (
+          <div className="absolute inset-0 flex items-center justify-center text-xs text-slate-500">
+            No dependency data for this job.
+          </div>
+        )}
         <svg ref={svgRef} viewBox="0 0 800 480" className="w-full h-full" />
 
         {tooltip && (
           <div
-            className="absolute z-10 pointer-events-none px-3 py-2 rounded-lg bg-[#0d121c] border border-border shadow-xl text-[11px] max-w-xs"
+            className="absolute z-10 pointer-events-none px-3 py-2 rounded-lg bg-[#0d121c] border border-slate-700 shadow-xl text-2xs max-w-xs"
             style={{ left: tooltip.x + 16, top: tooltip.y + 16 }}
           >
-            <div className="font-mono text-brand-400 font-semibold">{tooltip.node.id}</div>
+            <div className="font-semibold text-slate-100">{tooltip.node.name || tooltip.node.id}</div>
+            <div className="font-mono text-brand-400">{tooltip.node.id}</div>
             <div className="text-slate-400">{tooltip.node.type}</div>
             {tooltip.node.tags && tooltip.node.tags.length > 0 && (
-              <div className="mt-1 pt-1 border-t border-border/60 space-y-0.5">
+              <div className="mt-1 pt-1 border-t border-slate-700/60 space-y-0.5">
                 {tooltip.node.tags.map((tag) => (
                   <div key={tag.Key} className="text-slate-300">
                     <span className="text-slate-500">{tag.Key}:</span> {tag.Value}

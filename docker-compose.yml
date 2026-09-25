@@ -19,6 +19,7 @@ services:
     # a different X-Forwarded-For per request was treated as a new client
     # every time). terraagent-frontend/nginx reach this over terraagent-net.
     volumes:
+      - ./backend:/app
       - ./security:/app/security:ro
       - terraagent_output:/tmp/terraagent
       - terraform_plugin_cache:/home/agent/.terraform.d/plugin-cache
@@ -53,7 +54,7 @@ services:
     container_name: terraagent-frontend
     restart: unless-stopped
     ports:
-      - "3000:3000"
+      - "3002:3000"
     environment:
       # Through Nginx (port 80), not the backend container directly - :8000 is
       # no longer published to the host (see terraagent-api's comment above),
@@ -95,6 +96,7 @@ services:
     restart: unless-stopped
     command: celery -A services.celery_app worker --beat --loglevel=info
     volumes:
+      - ./backend:/app
       - ./security:/app/security:ro
       - terraagent_output:/tmp/terraagent
       - terraform_plugin_cache:/home/agent/.terraform.d/plugin-cache

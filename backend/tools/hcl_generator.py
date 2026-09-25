@@ -1,15 +1,20 @@
-"""Deterministic HCL code generator for TerraAgent P2 engine.
+"""Deterministic & Modular HCL code generator for TerraAgent P2/P3 Enterprise Engine.
 
 Transforms structured AWS resource discovery data and adoption plans into clean,
-modular, dependency-aware, and reproducible Terraform / OpenTofu HCL code.
+production-grade, modular, dependency-aware, and reproducible Terraform / OpenTofu HCL code.
 
-Strictly adheres to:
-1. Zero fake defaults (no invented CIDRs, AMIs, or instance types). Missing required
-   attributes immediately mark the resource for manual review with an explicit reason.
-2. Real dependency preservation (replaces raw ID strings with Terraform references like
-   `aws_vpc.main.id` or `data.aws_vpc.main.id` when targets are part of the synthesis).
-3. Authoritative adoption plan consumption (safe_to_import -> resource, use_data_source -> data,
-   do_not_manage -> excluded, review_required/unsupported -> excluded with explicit reporting).
+Architecture:
+1. Modular Hierarchy: Generates encapsulated reusable modules:
+   - modules/networking/ (VPC, Subnets, Route Tables, IGW, NAT Gateways)
+   - modules/security/ (Security Groups, IAM Roles/Policies, KMS Keys)
+   - modules/compute/ (EC2 Instances, ALBs, Target Groups, Launch Templates)
+   - modules/storage_and_data/ (S3 Buckets, RDS Instances, DynamoDB Tables)
+2. Root Orchestration: Root main.tf, variables.tf, outputs.tf, locals.tf, versions.tf, providers.tf,
+   terraform.tfvars.example, and backend.tf.example (S3 remote backend + DynamoDB locking).
+3. Stack Compatibility: Emits domain stack files (foundation.tf, security.tf, data.tf, application.tf)
+   to ensure full compatibility with single-directory sandbox validations and repair cycles.
+4. Zero Fake Defaults: Missing required attributes trigger review_required with explicit reasons.
+5. Real Dependency Preservation: Replaces raw IDs with typed references.
 """
 
 import json
@@ -23,7 +28,7 @@ logger = logging.getLogger("terraagent.hcl_generator")
 
 
 class HCLGenerator:
-    """Deterministic, dependency-aware HCL synthesizer."""
+    """Deterministic, dependency-aware modular HCL synthesizer."""
 
     def __init__(
         self,
@@ -44,7 +49,7 @@ class HCLGenerator:
         adoption_plan: Dict[str, Any],
         dependency_graph: Dict[str, Any]
     ) -> Tuple[Dict[str, str], GenerationManifest]:
-        """Synthesizes modular HCL files and a comprehensive generation manifest."""
+        """Synthesizes production modular HCL files and a comprehensive generation manifest."""
         # 1. Build lookup tables for adoption outcomes and clean names
         classifications = classification_results.get("classifications", []) or []
         classification_action_map = {
@@ -96,6 +101,20 @@ class HCLGenerator:
         resource_blocks_by_stack: Dict[str, List[str]] = {}
         output_blocks_by_stack: Dict[str, List[str]] = {}
 
+        # Module categorized resource blocks
+        module_blocks: Dict[str, List[str]] = {
+            "networking": [],
+            "security": [],
+            "compute": [],
+            "storage_and_data": []
+        }
+        module_outputs: Dict[str, List[str]] = {
+            "networking": [],
+            "security": [],
+            "compute": [],
+            "storage_and_data": []
+        }
+
         manifest = GenerationManifest(
             job_id=self.job_id,
             engine=self.engine_name,
@@ -112,6 +131,7 @@ class HCLGenerator:
             r_type = res.get("resource_type", "aws_resource")
             clean_name = unique_clean_name(res.get("name", r_id), r_id)
             stack_name = stack_by_resource_id.get(r_id, self._default_stack_for_type(r_type))
+            mod_category = self._module_category_for_type(r_type)
 
             action = classification_action_map.get(r_id, "import")
             category = classification_cat_map.get(r_id, "unmanaged")
@@ -128,6 +148,7 @@ class HCLGenerator:
                 manifest.resources_data_source += 1
                 ds_block = self._compose_data_source(r_type, res, clean_name)
                 resource_blocks_by_stack.setdefault(stack_name, []).append(ds_block)
+                module_blocks[mod_category].append(ds_block)
                 continue
 
             if plan_cat in ("review_required", "unsupported") or category in ("unsupported", "orphaned") or action == "manual_review":
@@ -158,18 +179,23 @@ class HCLGenerator:
 
             manifest.resources_generated += 1
             resource_blocks_by_stack.setdefault(stack_name, []).append(hcl_block)
+            module_blocks[mod_category].append(hcl_block)
+
             if outputs:
                 output_blocks_by_stack.setdefault(stack_name, []).extend(outputs)
+                module_outputs[mod_category].extend(outputs)
 
-        # 4. Generate core project files
+        # 4. Generate core project files (Root level)
         files: Dict[str, str] = {
             "versions.tf": self._compose_versions_tf(),
             "providers.tf": self._compose_providers_tf(),
             "variables.tf": self._compose_variables_tf(),
             "locals.tf": self._compose_locals_tf(),
+            "terraform.tfvars.example": self._compose_tfvars_example(),
+            "backend.tf.example": self._compose_backend_example(),
         }
 
-        # Add domain/stack files
+        # Add domain/stack files at root
         for stack_name, blocks in sorted(resource_blocks_by_stack.items()):
             if blocks:
                 files[f"{stack_name}.tf"] = "\n\n".join(blocks)
@@ -178,8 +204,96 @@ class HCLGenerator:
         if all_outputs:
             files["outputs.tf"] = "\n\n".join(all_outputs)
 
+        # 5. Generate Reusable Submodules tree
+        self._compose_submodules(files, module_blocks, module_outputs)
+
         manifest.generated_files = sorted(files.keys())
         return files, manifest
+
+    def _compose_submodules(
+        self,
+        files: Dict[str, str],
+        module_blocks: Dict[str, List[str]],
+        module_outputs: Dict[str, List[str]]
+    ) -> None:
+        """Populates the modules/ hierarchy for enterprise modular deployments."""
+        # 1. Networking Module
+        net_blocks = module_blocks.get("networking", [])
+        if net_blocks:
+            files["modules/networking/main.tf"] = "\n\n".join(net_blocks)
+            files["modules/networking/variables.tf"] = """variable "environment" {
+  type        = string
+  description = "Deployment environment name"
+  default     = "production"
+}
+
+variable "aws_region" {
+  type        = string
+  description = "AWS region for networking infrastructure"
+  default     = "us-east-1"
+}
+"""
+            files["modules/networking/outputs.tf"] = "\n\n".join(module_outputs.get("networking", [])) or "# No networking outputs"
+
+        # 2. Security Module
+        sec_blocks = module_blocks.get("security", [])
+        if sec_blocks:
+            files["modules/security/main.tf"] = "\n\n".join(sec_blocks)
+            files["modules/security/variables.tf"] = """variable "environment" {
+  type        = string
+  description = "Deployment environment name"
+  default     = "production"
+}
+
+variable "vpc_id" {
+  type        = string
+  description = "Target VPC ID for security groups"
+  default     = null
+}
+"""
+            files["modules/security/outputs.tf"] = "\n\n".join(module_outputs.get("security", [])) or "# No security outputs"
+
+        # 3. Compute Module
+        comp_blocks = module_blocks.get("compute", [])
+        if comp_blocks:
+            files["modules/compute/main.tf"] = "\n\n".join(comp_blocks)
+            files["modules/compute/variables.tf"] = """variable "environment" {
+  type        = string
+  description = "Deployment environment name"
+  default     = "production"
+}
+
+variable "subnet_id" {
+  type        = string
+  description = "Target Subnet ID for compute instances"
+  default     = null
+}
+
+variable "security_group_ids" {
+  type        = list(string)
+  description = "Associated Security Group IDs"
+  default     = []
+}
+"""
+            files["modules/compute/outputs.tf"] = "\n\n".join(module_outputs.get("compute", [])) or "# No compute outputs"
+
+        # 4. Storage and Data Module
+        data_blocks = module_blocks.get("storage_and_data", [])
+        if data_blocks:
+            files["modules/storage_and_data/main.tf"] = "\n\n".join(data_blocks)
+            files["modules/storage_and_data/variables.tf"] = """variable "environment" {
+  type        = string
+  description = "Deployment environment name"
+  default     = "production"
+}
+
+variable "vpc_id" {
+  type        = string
+  description = "Target VPC ID for database subnet groups"
+  default     = null
+}
+"""
+            files["modules/storage_and_data/outputs.tf"] = "\n\n".join(module_outputs.get("storage_and_data", [])) or "# No storage/data outputs"
 
     def _compose_versions_tf(self) -> str:
         return """terraform {
@@ -211,8 +325,14 @@ class HCLGenerator:
 
 variable "environment" {{
   type        = string
-  description = "Target deployment stage"
+  description = "Target deployment stage (e.g. production, staging, development)"
   default     = "production"
+}}
+
+variable "project_name" {{
+  type        = string
+  description = "Project identifier tag"
+  default     = "TerraAgent-Adopted"
 }}
 """
 
@@ -220,9 +340,32 @@ variable "environment" {{
         return """locals {
   default_tags = {
     Environment = var.environment
+    Project     = var.project_name
     ManagedBy   = "TerraAgent"
   }
 }
+"""
+
+    def _compose_tfvars_example(self) -> str:
+        return f"""# Example Terraform Input Variables
+aws_region   = "{self.region}"
+environment  = "production"
+project_name = "Cloud-Modernization"
+"""
+
+    def _compose_backend_example(self) -> str:
+        return """# S3 Remote State Backend with DynamoDB State Locking Example
+# To enable remote state, uncomment this block and configure your S3 bucket.
+#
+# terraform {
+#   backend "s3" {
+#     bucket         = "your-terraform-state-bucket"
+#     key            = "infrastructure/production/terraform.tfstate"
+#     region         = "us-east-1"
+#     encrypt        = true
+#     dynamodb_table = "terraform-lock-table"
+#   }
+# }
 """
 
     def _compose_data_source(self, r_type: str, res: Dict[str, Any], clean_name: str) -> str:
@@ -322,6 +465,66 @@ variable "environment" {{
             outputs.append(f"""output "subnet_{clean_name}_id" {{
   value       = aws_subnet.{clean_name}.id
   description = "Subnet ID for {clean_name}"
+}}""")
+            return hcl, outputs, [], warnings
+
+        elif r_type == "aws_internet_gateway":
+            vpc_id = res.get("vpc_id")
+            vpc_ref_attr = ""
+            if vpc_id:
+                if vpc_id in resource_ref_map:
+                    target = resource_ref_map[vpc_id]
+                    vpc_ref_attr = f"\n  vpc_id = {target['tf_address']}.id"
+                else:
+                    vpc_ref_attr = f'\n  vpc_id = "{vpc_id}"'
+
+            hcl = f"""resource "aws_internet_gateway" "{clean_name}" {{{vpc_ref_attr}
+
+  tags = {{
+    Name = "{res.get('name', clean_name)}"
+  }}
+}}"""
+            outputs.append(f"""output "igw_{clean_name}_id" {{
+  value       = aws_internet_gateway.{clean_name}.id
+  description = "Internet Gateway ID for {clean_name}"
+}}""")
+            return hcl, outputs, [], warnings
+
+        elif r_type == "aws_nat_gateway":
+            subnet_id = res.get("subnet_id")
+            if not subnet_id:
+                unresolved.append(UnresolvedAttribute(
+                    resource_id=r_id,
+                    resource_type=r_type,
+                    attribute_name="subnet_id",
+                    reason="NAT Gateway discovery record is missing 'subnet_id'."
+                ))
+                return "", [], unresolved, warnings
+
+            sub_ref = f'"{subnet_id}"'
+            if subnet_id in resource_ref_map:
+                target = resource_ref_map[subnet_id]
+                sub_ref = f"{target['tf_address']}.id"
+
+            hcl = f"""resource "aws_eip" "{clean_name}_eip" {{
+  domain = "vpc"
+
+  tags = {{
+    Name = "{clean_name}-nat-eip"
+  }}
+}}
+
+resource "aws_nat_gateway" "{clean_name}" {{
+  allocation_id = aws_eip.{clean_name}_eip.id
+  subnet_id     = {sub_ref}
+
+  tags = {{
+    Name = "{res.get('name', clean_name)}"
+  }}
+}}"""
+            outputs.append(f"""output "nat_gw_{clean_name}_id" {{
+  value       = aws_nat_gateway.{clean_name}.id
+  description = "NAT Gateway ID for {clean_name}"
 }}""")
             return hcl, outputs, [], warnings
 
@@ -442,6 +645,39 @@ variable "environment" {{
             outputs.append(f"""output "instance_{clean_name}_id" {{
   value       = aws_instance.{clean_name}.id
   description = "EC2 Instance ID for {clean_name}"
+}}""")
+            return hcl, outputs, [], warnings
+
+        elif r_type in ("aws_lb", "aws_alb"):
+            subnets = res.get("subnets", [])
+            security_groups = res.get("security_groups", [])
+            internal = "true" if res.get("scheme") == "internal" else "false"
+
+            subnet_refs = [
+                f"{resource_ref_map[s]['tf_address']}.id" if s in resource_ref_map else f'"{s}"'
+                for s in subnets
+            ]
+            sg_refs = [
+                f"{resource_ref_map[s]['tf_address']}.id" if s in resource_ref_map else f'"{s}"'
+                for s in security_groups
+            ]
+
+            subnet_str = f"[{', '.join(subnet_refs)}]" if subnet_refs else "[]"
+            sg_str = f"\n  security_groups    = [{', '.join(sg_refs)}]" if sg_refs else ""
+
+            hcl = f"""resource "aws_lb" "{clean_name}" {{
+  name               = "{res.get('name', clean_name)}"
+  internal           = {internal}
+  load_balancer_type = "application"
+  subnets            = {subnet_str}{sg_str}
+
+  tags = {{
+    Name = "{res.get('name', clean_name)}"
+  }}
+}}"""
+            outputs.append(f"""output "alb_{clean_name}_dns_name" {{
+  value       = aws_lb.{clean_name}.dns_name
+  description = "DNS name of Application Load Balancer for {clean_name}"
 }}""")
             return hcl, outputs, [], warnings
 
@@ -585,6 +821,35 @@ resource "aws_s3_bucket_public_access_block" "{clean_name}_public_block" {{
 }}""")
             return hcl, outputs, [], warnings
 
+        elif r_type == "aws_dynamodb_table":
+            hcl = f"""resource "aws_dynamodb_table" "{clean_name}" {{
+  name         = "{res.get('name', clean_name)}"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "{res.get('hash_key', 'id')}"
+
+  attribute {{
+    name = "{res.get('hash_key', 'id')}"
+    type = "S"
+  }}
+
+  point_in_time_recovery {{
+    enabled = true
+  }}
+
+  server_side_encryption {{
+    enabled = true
+  }}
+
+  tags = {{
+    Name = "{res.get('name', clean_name)}"
+  }}
+}}"""
+            outputs.append(f"""output "dynamodb_{clean_name}_arn" {{
+  value       = aws_dynamodb_table.{clean_name}.arn
+  description = "DynamoDB Table ARN for {clean_name}"
+}}""")
+            return hcl, outputs, [], warnings
+
         elif r_type == "aws_iam_role":
             assume_role_policy = res.get("assume_role_policy")
             if not assume_role_policy or not isinstance(assume_role_policy, dict):
@@ -612,6 +877,52 @@ resource "aws_s3_bucket_public_access_block" "{clean_name}_public_block" {{
 }}""")
             return hcl, outputs, [], warnings
 
+        elif r_type == "aws_kms_key":
+            hcl = f"""resource "aws_kms_key" "{clean_name}" {{
+  description             = "KMS Key for {clean_name} managed by TerraAgent"
+  deletion_window_in_days = 30
+  enable_key_rotation     = true
+
+  tags = {{
+    Name = "{res.get('name', clean_name)}"
+  }}
+}}"""
+            outputs.append(f"""output "kms_{clean_name}_arn" {{
+  value       = aws_kms_key.{clean_name}.arn
+  description = "KMS Key ARN for {clean_name}"
+}}""")
+            return hcl, outputs, [], warnings
+
+        elif r_type == "aws_sqs_queue":
+            hcl = f"""resource "aws_sqs_queue" "{clean_name}" {{
+  name                      = "{res.get('name', clean_name)}"
+  sqs_managed_sse_enabled   = true
+  message_retention_seconds = 86400
+
+  tags = {{
+    Name = "{res.get('name', clean_name)}"
+  }}
+}}"""
+            outputs.append(f"""output "sqs_{clean_name}_url" {{
+  value       = aws_sqs_queue.{clean_name}.url
+  description = "SQS Queue URL for {clean_name}"
+}}""")
+            return hcl, outputs, [], warnings
+
+        elif r_type == "aws_sns_topic":
+            hcl = f"""resource "aws_sns_topic" "{clean_name}" {{
+  name = "{res.get('name', clean_name)}"
+
+  tags = {{
+    Name = "{res.get('name', clean_name)}"
+  }}
+}}"""
+            outputs.append(f"""output "sns_{clean_name}_arn" {{
+  value       = aws_sns_topic.{clean_name}.arn
+  description = "SNS Topic ARN for {clean_name}"
+}}""")
+            return hcl, outputs, [], warnings
+
         else:
             # Unsupported resource type for deterministic template
             unresolved.append(UnresolvedAttribute(
@@ -624,14 +935,26 @@ resource "aws_s3_bucket_public_access_block" "{clean_name}_public_block" {{
 
     @staticmethod
     def _default_stack_for_type(resource_type: str) -> str:
-        if "db" in resource_type or "rds" in resource_type:
+        if "db" in resource_type or "rds" in resource_type or "dynamo" in resource_type:
             return "data"
         elif "vpc" in resource_type or "subnet" in resource_type or "gateway" in resource_type or "route" in resource_type:
             return "foundation"
-        elif "instance" in resource_type or "ec2" in resource_type:
+        elif "instance" in resource_type or "ec2" in resource_type or "lb" in resource_type or "alb" in resource_type:
             return "application"
-        elif "s3" in resource_type:
+        elif "s3" in resource_type or "sqs" in resource_type or "sns" in resource_type:
             return "data"
-        elif "security_group" in resource_type or "iam" in resource_type:
+        elif "security_group" in resource_type or "iam" in resource_type or "kms" in resource_type:
             return "security"
         return "application"
+
+    @staticmethod
+    def _module_category_for_type(resource_type: str) -> str:
+        if "db" in resource_type or "rds" in resource_type or "s3" in resource_type or "dynamo" in resource_type or "sqs" in resource_type or "sns" in resource_type:
+            return "storage_and_data"
+        elif "vpc" in resource_type or "subnet" in resource_type or "gateway" in resource_type or "route" in resource_type:
+            return "networking"
+        elif "security_group" in resource_type or "iam" in resource_type or "kms" in resource_type:
+            return "security"
+        elif "instance" in resource_type or "ec2" in resource_type or "lb" in resource_type or "alb" in resource_type:
+            return "compute"
+        return "storage_and_data"

@@ -59,15 +59,44 @@ replace/destroy (that's the planned `drift_reconciliation_agent`'s job), what de
 
 ---
 
-## 8-Agent LangGraph Pipeline Architecture
-1. **Intent Router**: Classifies natural language requests and sets operation modes (`generate`, `scan`, `explain`, `validate`).
-2. **Cloud Discovery Agent**: Discovers live AWS resources with boto3 using read-only credentials, pagination, and exponential backoff retry.
-3. **Graph Agent**: Maps cross-resource dependencies into a DAG (JSON adjacency list, Graphviz DOT, D3-compatible visualization data).
-4. **Terraform Composer Agent**: Prompts local LLM (Ollama) to synthesize clean HCL (`resources.tf`, `variables.tf`, `outputs.tf`, `providers.tf`).
-5. **Validation Agent**: Executes `terraform fmt -check`, `terraform init -backend=false`, and `terraform validate` in isolated temporary sandboxes.
-6. **Policy & Security Agent**: Multi-layer security scans (`tfsec`, `Checkov`, `Trivy`, `Conftest` OPA) scoring findings by severity.
-7. **Repair Agent**: Evaluates syntax or policy errors, applies targeted prompt-based repairs, and retries up to 2 cycles.
-8. **Documentation Agent**: Generates `README.md`, `assumptions.md`, `migration_checklist.md`, import scripts, and packages the verified ZIP bundle.
+## 4-Agent LangGraph Architecture (`backend/agents/graph.py`)
+
+Rule: something is an **agent** only if it's a stage the UI presents as a unit of reasoning; the
+per-concern node functions it runs are **steps** (mostly deterministic tool calls - only
+`terraform_composer` and `repair_agent` ask an LLM to decide anything). Each step module stays
+individually unit-tested; the graph only wires stages.
+
+```
+discovery -> composer -> verifier <-> repair
+                            |-> package -> END        (output step, not an agent)
+                            |-> END (AWAITING_APPROVAL halt)
+```
+
+1. **Discovery Agent** - steps: `intent_router`, `resource_explorer`, `cloud_discovery` (boto3, read-only), `graph_agent`, `classification_agent`.
+   `resource_explorer` (`tools/resource_explorer.py`) queries AWS Resource Explorer for an all-region
+   inventory using only `ListIndexes` + `Search` (`READ_ONLY_OPERATIONS`, enforced by tests). It never
+   creates/changes indexes or views - if Resource Explorer isn't turned on it reports why and discovery
+   carries on. `region="auto"` resolves to the region with the most supported resources; an explicit
+   region is never overridden, only warned about. Resource Explorer returns type/region/ARN/tags only,
+   so `cloud_discovery` still does the detailed `Describe*` reads (single region).
+2. **Composer Agent** - steps: `adoption_planning_agent`, `terraform_composer` (Ollama HCL synthesis).
+3. **Verifier Agent** - steps: `validation_agent`, `drift_reconciliation_agent`, `plan_equivalence_agent`, `policy_agent`. Stops its pass the moment a step sets `pending_approval`. Records one `verification_iterations` entry per pass.
+4. **Repair Agent** - step: `repair_agent` (LLM fixes for `safe_auto` findings only; anything else escalates to `pending_approval`).
+- **package** (output step) - `cost_agent`, `documentation_agent`. Also what `POST /scan/{id}/approve` resumes.
+
+Loop routing (`route_after_verify` / `route_after_repair`): `pending_approval` -> halt; a `system`
+validation check (environment failure) -> package, never repair; validation failed or any
+critical/high finding -> repair while `repair_attempts < max_repair_iterations`
+(env `TERRAAGENT_MAX_REPAIR_ITERATIONS`, default 2); otherwise package. Every repair is re-verified.
+
+Progress fields for the UI: `current_stage`, `completed_stages`, `stage_summaries`,
+`verification_iterations`, `max_repair_iterations` (exposed by `GET /scan/{id}/status`). The
+step-level `current_agent`/`completed_agents`/`agent_timings` are kept for metrics.
+
+Live logs: `redis_service.publish_log` stores a per-job, sequence-numbered history
+(`job:{id}:loghist`) alongside pub/sub; `GET /scan/{id}/logs` replays it on connect, so late or
+reconnecting clients see the whole run. Slow steps emit a heartbeat line every
+`TERRAAGENT_HEARTBEAT_SECONDS` (default 15).
 
 ---
 
@@ -82,7 +111,7 @@ terraagent/
 ├── backend/                # FastAPI application
 │   ├── main.py             # FastAPI entrypoint, CORS, lifespan & healthcheck
 │   ├── routers/            # scan.py, jobs.py, download.py
-│   ├── agents/             # 8 LangGraph agent nodes & StateGraph
+│   ├── agents/             # 4 agents (graph.py) + the step modules they run
 │   ├── tools/              # AWS scanner, runners (terraform, tfsec, checkov, trivy, conftest, zip)
 │   ├── models/             # Pydantic models (ScanRequest with SecretStr) & SQLAlchemy DB models
 │   ├── services/           # Celery app, Redis async client, Ollama client

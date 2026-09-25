@@ -13,6 +13,15 @@ class JobProgress(BaseModel):
     progress_percentage: int = 0
     current_agent: Optional[str] = None
     completed_agents: List[str] = []
+    # Agent-level progress (discovery / composer / verifier / repair, plus
+    # the "package" output step) - see agents/graph.py.
+    current_stage: Optional[str] = None
+    completed_stages: List[str] = []
+    stage_summaries: Dict[str, str] = {}
+    verification_iterations: List[Dict[str, Any]] = []
+    repair_attempts: int = 0
+    max_repair_iterations: Optional[int] = None
+    migration_confidence: Optional[Dict[str, Any]] = None
     created_at: str
     updated_at: Optional[str] = None
     error: Optional[str] = None
@@ -28,11 +37,14 @@ class JobResults(BaseModel):
     classification_results: Dict[str, Any] = {}
     dependency_graph: Dict[str, Any] = {}
     adoption_plan: Dict[str, Any] = {}
+    resource_inventory: Dict[str, Any] = {}
+    requested_region: Optional[str] = None
     generation_manifest: Optional[Dict[str, Any]] = None
     validation_results: Dict[str, Any] = {}
     drift_results: Dict[str, Any] = {}
     plan_equivalence_results: Dict[str, Any] = {}
     security_results: Dict[str, Any] = {}
+    migration_confidence: Optional[Dict[str, Any]] = None
     pending_approval: Optional[Dict[str, Any]] = None
     approval_decision: Optional[Dict[str, Any]] = None
     github_pr: Optional[Dict[str, Any]] = None

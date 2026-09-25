@@ -14,11 +14,16 @@ from tools.sandbox_registry import create_sandbox, release_sandbox
 
 logger = logging.getLogger("terraagent.terraform_runner")
 
+# Upper bound on any single terraform/tofu invocation. Generous by default: a
+# first `init` may legitimately download a large provider.
+TERRAFORM_COMMAND_TIMEOUT_SECONDS = float(os.getenv("TERRAAGENT_TF_COMMAND_TIMEOUT", "600"))
+
 
 class TerraformRunner:
     @staticmethod
     async def run_command(
-        cmd: List[str], cwd: str, env: Optional[Dict[str, str]] = None
+        cmd: List[str], cwd: str, env: Optional[Dict[str, str]] = None,
+        timeout_seconds: Optional[float] = None,
     ) -> Tuple[int, str, str]:
         """Safely execute a CLI command in the specified working directory.
 
@@ -37,11 +42,22 @@ class TerraformRunner:
         process = await asyncio.create_subprocess_exec(
             *cmd,
             cwd=cwd,
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env
         )
-        stdout, stderr = await process.communicate()
+        # Without a bound, one stuck command (e.g. `init` downloading a large
+        # provider over a slow link) hung the whole job silently. Raising
+        # lets callers' existing exception handling report it - validate_hcl
+        # turns it into a "system" check, which the graph never sends to repair.
+        timeout = timeout_seconds if timeout_seconds is not None else TERRAFORM_COMMAND_TIMEOUT_SECONDS
+        try:
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
+            raise TimeoutError(f"'{' '.join(cmd[:2])}' timed out after {int(timeout)}s")
         return (
             process.returncode or 0,
             stdout.decode("utf-8", errors="replace"),
@@ -61,7 +77,9 @@ class TerraformRunner:
         sandbox_dir = create_sandbox(prefix="terraagent_fmt_")
         try:
             for filename, content in hcl_files.items():
-                with open(os.path.join(sandbox_dir, filename), "w", encoding="utf-8") as f:
+                file_path = os.path.join(sandbox_dir, filename)
+                os.makedirs(os.path.dirname(file_path), exist_ok=True)
+                with open(file_path, "w", encoding="utf-8") as f:
                     f.write(content)
 
             code, _, err = await cls.run_command([binary, "fmt"], cwd=sandbox_dir)
@@ -95,6 +113,7 @@ class TerraformRunner:
             # Write HCL files to sandbox
             for filename, content in hcl_files.items():
                 file_path = os.path.join(sandbox_dir, filename)
+                os.makedirs(os.path.dirname(file_path), exist_ok=True)
                 with open(file_path, "w", encoding="utf-8") as f:
                     f.write(content)
 
@@ -108,7 +127,7 @@ class TerraformRunner:
 
             # 2. Init (backend=false)
             code, out, err = await cls.run_command(
-                [binary, "init", "-backend=false"],
+                [binary, "init", "-backend=false", "-input=false"],
                 cwd=sandbox_dir
             )
             init_passed = code == 0
@@ -214,7 +233,9 @@ class TerraformRunner:
 
         try:
             for filename, content in hcl_files.items():
-                with open(os.path.join(sandbox_dir, filename), "w", encoding="utf-8") as f:
+                file_path = os.path.join(sandbox_dir, filename)
+                os.makedirs(os.path.dirname(file_path), exist_ok=True)
+                with open(file_path, "w", encoding="utf-8") as f:
                     f.write(content)
 
             code, out, err = await cls.run_command(

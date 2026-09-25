@@ -8,6 +8,34 @@ const config: Config = {
   ],
   theme: {
     extend: {
+      // The components were written against Tailwind v4 utility names
+      // (shadow-xs/2xs, text-2xs/3xs, ring-3, backdrop-blur-xs). This project
+      // runs Tailwind 3.4, which silently drops unknown classes - define them
+      // here so that styling actually renders.
+      fontSize: {
+        "3xs": ["0.625rem", { lineHeight: "0.875rem" }],
+        "2xs": ["0.6875rem", { lineHeight: "1rem" }],
+      },
+      boxShadow: {
+        "2xs": "0 1px 0 0 rgb(15 23 42 / 0.03)",
+        xs: "0 1px 2px 0 rgb(15 23 42 / 0.05)",
+        card: "0 1px 2px 0 rgb(15 23 42 / 0.04), 0 1px 3px 0 rgb(15 23 42 / 0.03)",
+      },
+      ringWidth: {
+        3: "3px",
+      },
+      backdropBlur: {
+        xs: "2px",
+      },
+      keyframes: {
+        "fade-in": {
+          from: { opacity: "0", transform: "translateY(4px)" },
+          to: { opacity: "1", transform: "translateY(0)" },
+        },
+      },
+      animation: {
+        "fade-in": "fade-in 200ms ease-out",
+      },
       colors: {
         // Light theme: white/near-white surfaces, brand blue accents.
         background: "#ffffff",

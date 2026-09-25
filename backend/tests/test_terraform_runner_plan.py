@@ -133,3 +133,22 @@ async def test_plan_json_never_inherits_parent_process_env(monkeypatch):
     assert "TF_LOG" not in env
     assert "TF_LOG_PATH" not in env
     assert env["AWS_ACCESS_KEY_ID"] == _creds()["access_key"]
+
+
+async def test_run_command_times_out_instead_of_hanging(tmp_path):
+    import sys
+
+    from tools.terraform_runner import TerraformRunner
+
+    with pytest.raises(TimeoutError):
+        await TerraformRunner.run_command(
+            [sys.executable, "-c", "import time; time.sleep(5)"], cwd=str(tmp_path), timeout_seconds=0.2
+        )
+
+
+async def test_run_command_still_blocks_mutating_verbs_before_spawning(tmp_path):
+    from tools.terraform_runner import TerraformRunner
+
+    for verb in ("apply", "destroy", "import"):
+        with pytest.raises(ValueError):
+            await TerraformRunner.run_command(["terraform", verb], cwd=str(tmp_path), timeout_seconds=1)

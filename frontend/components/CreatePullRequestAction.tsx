@@ -115,7 +115,7 @@ export default function CreatePullRequestAction({
         </div>
       ))}
 
-      <div className="rounded-2xl border border-slate-200/90 bg-white shadow-sm overflow-hidden">
+      <div className="card overflow-hidden">
         <button
           onClick={() => setExpanded((v) => !v)}
           className="w-full p-5 flex items-center justify-between gap-4 hover:bg-slate-50/60 transition-colors"

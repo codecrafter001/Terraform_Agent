@@ -26,9 +26,31 @@ export interface JobProgress {
   progress_percentage: number;
   current_agent?: string;
   completed_agents: string[];
+  // Agent-level progress - see backend/agents/graph.py
+  current_stage?: StageId | 'awaiting_approval' | 'complete' | null;
+  completed_stages?: StageId[];
+  stage_summaries?: Partial<Record<StageId, string>>;
+  verification_iterations?: VerificationIteration[];
+  repair_attempts?: number;
+  max_repair_iterations?: number | null;
   created_at: string;
   updated_at?: string;
   error?: string;
+}
+
+export type StageId = 'discovery' | 'composer' | 'verifier' | 'repair' | 'package';
+
+export interface VerificationIteration {
+  iteration: number;
+  validation_passed: boolean;
+  system_failure: boolean;
+  high_findings: number;
+  total_findings: number;
+  plan_changes: number | null;
+  drift_findings: number;
+  halted_for_approval: boolean;
+  passed: boolean;
+  at: string;
 }
 
 export interface LogMessage {
@@ -196,6 +218,8 @@ export interface JobResults {
   resources: Array<Record<string, unknown>>;
   dependency_graph: DependencyGraphData;
   adoption_plan?: AdoptionPlan;
+  resource_inventory?: ResourceInventory;
+  requested_region?: string | null;
   validation_results: ValidationReportData;
   plan_equivalence_results?: PlanEquivalenceResult;
   security_results: SecurityReport;
@@ -207,4 +231,30 @@ export interface JobResults {
   download_url?: string;
   zip_sha256?: string;
   zip_manifest: ZipManifestEntry[];
+}
+
+// AWS Resource Explorer inventory - backend/tools/resource_explorer.py
+export interface InventoryResource {
+  arn: string;
+  type: string;
+  region: string;
+  name?: string | null;
+  supported: boolean;
+}
+
+export interface ResourceInventory {
+  available: boolean;
+  reason?: string;
+  aggregated?: boolean;
+  index_region?: string;
+  total?: number;
+  truncated?: boolean;
+  returned?: number;
+  supported_total?: number;
+  unsupported_total?: number;
+  by_region?: Record<string, number>;
+  by_type?: Record<string, number>;
+  supported_by_region?: Record<string, number>;
+  suggested_region?: string | null;
+  resources?: InventoryResource[];
 }

@@ -1,80 +1,153 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import type { LucideIcon } from "lucide-react";
 import {
   AlertTriangle,
+  ArrowRight,
   CheckCircle2,
   Circle,
-  Loader2,
-  Terminal,
-  ArrowRight,
-  Shield,
-  Activity,
   Cpu,
-  Layers,
-  Sparkles,
+  Loader2,
+  Package,
+  PauseCircle,
+  RefreshCw,
   Search,
-  CheckCheck,
-  FileCode,
+  ShieldCheck,
+  Terminal,
   Wrench,
-  Tags,
-  ClipboardList,
-  DollarSign,
-  GitCommitHorizontal,
-  GitCompare,
-  XCircle
+  XCircle,
 } from "lucide-react";
 import { fetchJobResults, fetchJobStatus } from "@/lib/api";
 import PendingApprovalPanel from "./PendingApprovalPanel";
-import { ApprovalDecision, PendingApproval, PlanEquivalenceResult } from "@/lib/types";
+import {
+  ApprovalDecision,
+  JobProgress,
+  PendingApproval,
+  PlanEquivalenceResult,
+  StageId,
+  VerificationIteration,
+} from "@/lib/types";
 
 interface ScanProgressProps {
   jobId: string;
 }
 
-// Must stay in sync with the actual LangGraph node order in
-// backend/agents/graph.py::build_graph() - an agent id missing from this list
-// breaks the log-driven progress logic below (AGENT_STEPS.findIndex returns
-// -1 for an unlisted id, which fails the `idx > 0` check and silently skips
-// marking earlier steps done while that agent runs).
-const AGENT_STEPS = [
-  { id: "intent_router", name: "Intent Router", desc: "Classify request & pipeline parameters", icon: Sparkles },
-  { id: "cloud_discovery", name: "Cloud Discovery", desc: "Read-only inventory scan (boto3)", icon: Search },
-  { id: "graph_agent", name: "Graph Agent", desc: "Cross-resource DAG adjacency builder", icon: Layers },
-  { id: "classification_agent", name: "Classification Agent", desc: "Managed/unmanaged/shared resource triage", icon: Tags },
-  { id: "adoption_planning_agent", name: "Adoption Planning Agent", desc: "Migration plan, risk score & import order", icon: ClipboardList },
-  { id: "terraform_composer", name: "Terraform Composer", desc: "Local LLM modular HCL synthesis", icon: Cpu },
-  { id: "validation_agent", name: "Validation Agent", desc: "fmt, init & sandbox validation", icon: CheckCheck },
-  { id: "drift_reconciliation_agent", name: "Drift Reconciliation Agent", desc: "Live AWS attributes vs. generated HCL", icon: GitCompare },
-  { id: "plan_equivalence_agent", name: "Plan Equivalence Agent", desc: "Real terraform plan diff vs. live AWS", icon: GitCommitHorizontal },
-  { id: "policy_agent", name: "Policy & Security", desc: "tfsec, Checkov, Trivy, OPA policies", icon: Shield },
-  { id: "repair_agent", name: "Repair Agent", desc: "Automated syntax & policy error repair", icon: Wrench },
-  { id: "cost_agent", name: "Cost Agent", desc: "Infracost monthly cost estimation", icon: DollarSign },
-  { id: "documentation_agent", name: "Documentation Agent", desc: "README, import plan & bundle packaging", icon: FileCode },
+interface StageDef {
+  id: StageId;
+  name: string;
+  desc: string;
+  icon: LucideIcon;
+  usesLlm: boolean;
+  // Underlying step ids (backend/agents/graph.py) - used to show which tool
+  // the agent is currently running.
+  steps: { id: string; label: string }[];
+}
+
+// Must stay in sync with backend/agents/graph.py::ALL_STAGES and the steps
+// each stage node runs.
+const STAGES: StageDef[] = [
+  {
+    id: "discovery",
+    name: "Discovery Agent",
+    desc: "Read-only AWS inventory, dependency graph and ownership triage",
+    icon: Search,
+    usesLlm: false,
+    steps: [
+      { id: "intent_router", label: "Request routing" },
+      { id: "resource_explorer", label: "All-region inventory (Resource Explorer)" },
+      { id: "cloud_discovery", label: "AWS discovery (Describe/Get/List)" },
+      { id: "graph_agent", label: "Dependency graph" },
+      { id: "classification_agent", label: "Ownership classification" },
+    ],
+  },
+  {
+    id: "composer",
+    name: "Composer Agent",
+    desc: "Adoption plan and import order, then HCL from the local LLM",
+    icon: Cpu,
+    usesLlm: true,
+    steps: [
+      { id: "adoption_planning_agent", label: "Adoption plan & import order" },
+      { id: "terraform_composer", label: "HCL synthesis (Ollama)" },
+    ],
+  },
+  {
+    id: "verifier",
+    name: "Verifier Agent",
+    desc: "validate, drift check, plan equivalence and security policies",
+    icon: ShieldCheck,
+    usesLlm: false,
+    steps: [
+      { id: "validation_agent", label: "fmt / init / validate" },
+      { id: "drift_reconciliation_agent", label: "Drift vs. live AWS" },
+      { id: "plan_equivalence_agent", label: "Plan equivalence" },
+      { id: "policy_agent", label: "tfsec · Checkov · Trivy · OPA" },
+    ],
+  },
+  {
+    id: "repair",
+    name: "Repair Agent",
+    desc: "LLM fixes for safe findings; risky ones go to a human",
+    icon: Wrench,
+    usesLlm: true,
+    steps: [{ id: "repair_agent", label: "Targeted HCL repair" }],
+  },
 ];
+
+const PACKAGE_STEPS = [
+  { id: "cost_agent", label: "Cost estimate" },
+  { id: "documentation_agent", label: "Docs, import plan & ZIP" },
+];
+
+// Log line tag -> stage, for coloring the live log. Covers both the stage
+// agents' own lines and the underlying steps' [AGENT:step] lines.
+const STEP_TO_STAGE: Record<string, StageId> = {
+  ...Object.fromEntries(STAGES.flatMap((s) => [[s.id, s.id], ...s.steps.map((st) => [st.id, s.id])])),
+  ...Object.fromEntries(PACKAGE_STEPS.map((s) => [s.id, "package"])),
+  package: "package",
+};
+
+const STAGE_TAG: Record<StageId | "system", { label: string; cls: string }> = {
+  discovery: { label: "discovery", cls: "text-sky-300" },
+  composer: { label: "composer", cls: "text-violet-300" },
+  verifier: { label: "verifier", cls: "text-amber-300" },
+  repair: { label: "repair", cls: "text-rose-300" },
+  package: { label: "package", cls: "text-emerald-300" },
+  system: { label: "system", cls: "text-slate-500" },
+};
+
+const TERMINAL = new Set(["COMPLETE", "FAILED", "REJECTED"]);
+
+type StageState = "pending" | "active" | "done" | "halted" | "failed" | "skipped";
+
+interface LogLine {
+  key: string;
+  seq: number | null;
+  text: string;
+  stage: StageId | "system";
+}
 
 export default function ScanProgress({ jobId }: ScanProgressProps) {
   const router = useRouter();
-  const [logs, setLogs] = useState<Array<{ id: number; text: string; agent: string }>>([]);
-  const [currentAgent, setCurrentAgent] = useState<string>("intent_router");
-  const [completedAgents, setCompletedAgents] = useState<string[]>([]);
-  const [isCompleted, setIsCompleted] = useState<boolean>(false);
-  const [failureMessage, setFailureMessage] = useState<string | null>(null);
-  const [progressPercentage, setProgressPercentage] = useState<number>(0);
-  const [isAwaitingApproval, setIsAwaitingApproval] = useState<boolean>(false);
-  const [isRejected, setIsRejected] = useState<boolean>(false);
+  const [status, setStatus] = useState<JobProgress | null>(null);
+  const [logs, setLogs] = useState<LogLine[]>([]);
+  const [streamState, setStreamState] = useState<"connecting" | "open" | "reconnecting" | "closed">("connecting");
   const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
   const [planEquivalenceResults, setPlanEquivalenceResults] = useState<PlanEquivalenceResult | null>(null);
   const [approvalDecision, setApprovalDecision] = useState<ApprovalDecision | null>(null);
   const logContainerRef = useRef<HTMLDivElement>(null);
+  const eventSourceRef = useRef<EventSource | null>(null);
+  const stickToBottom = useRef(true);
+
+  const jobStatus = status?.status ?? "RUNNING";
+  const isTerminal = TERMINAL.has(jobStatus);
 
   // /status doesn't carry pending_approval/plan_equivalence_results (that's
-  // in /results) - fetched once, event-driven, the moment the job actually
-  // halts, rather than polled continuously alongside /status. Returns
-  // whether it actually succeeded, so the caller only marks this "done" on
-  // a real success - otherwise the next 1s poll retries.
-  const fetchApprovalDetails = async (): Promise<boolean> => {
+  // in /results) - fetched when the job halts. Returns whether it actually
+  // succeeded, so the caller only marks this "done" on a real success.
+  const fetchApprovalDetails = useCallback(async (): Promise<boolean> => {
     try {
       const results = await fetchJobResults(jobId);
       setPendingApproval(results.pending_approval ?? null);
@@ -84,340 +157,597 @@ export default function ScanProgress({ jobId }: ScanProgressProps) {
     } catch {
       return false;
     }
-  };
+  }, [jobId]);
 
+  // Status polling - the source of truth for stage progress.
   useEffect(() => {
     let cancelled = false;
-    // Only true once fetchApprovalDetails has actually SUCCEEDED - unlike a
-    // plain "have we seen this status before" flag, this correctly retries
-    // on the next 1s poll if the fetch itself failed (a transient network
-    // blip), instead of permanently giving up after the first attempt.
     let approvalDetailsFetched = false;
+    let interval: ReturnType<typeof setInterval> | null = null;
 
-    const checkStatus = async () => {
+    const check = async () => {
       try {
-        const status = await fetchJobStatus(jobId);
+        const next = await fetchJobStatus(jobId);
         if (cancelled) return;
-
-        if (status.current_agent) {
-          setCurrentAgent(status.current_agent);
-        }
-        if (status.completed_agents && status.completed_agents.length > 0) {
-          setCompletedAgents((prev) => Array.from(new Set([...prev, ...status.completed_agents])));
-        }
-        if (typeof status.progress_percentage === "number") {
-          // Never let a stale/late poll response move the bar backwards -
-          // the SSE stream can already have pushed completedAgents further
-          // ahead than the last /status snapshot.
-          setProgressPercentage((prev) => Math.max(prev, status.progress_percentage));
-        }
-
-        if (status.status === "COMPLETE") {
-          setCompletedAgents(AGENT_STEPS.map((s) => s.id));
-          setIsCompleted(true);
-          setIsAwaitingApproval(false);
-          setProgressPercentage(100);
-        } else if (status.status === "FAILED") {
-          setFailureMessage(status.error || "The pipeline failed. See logs for details.");
-          setIsAwaitingApproval(false);
-        } else if (status.status === "AWAITING_APPROVAL") {
-          setIsAwaitingApproval(true);
-          if (!approvalDetailsFetched) {
-            fetchApprovalDetails().then((ok) => {
-              if (ok) approvalDetailsFetched = true;
-            });
-          }
-        } else if (status.status === "REJECTED") {
-          setIsRejected(true);
-          setIsAwaitingApproval(false);
-          if (!approvalDetailsFetched) {
-            fetchApprovalDetails().then((ok) => {
-              if (ok) approvalDetailsFetched = true;
-            });
-          }
-        } else if (status.status === "RUNNING") {
-          // Resumed after an approval - the awaiting-approval panel is no
-          // longer the active state, even though pendingApproval/
-          // approvalDecision stay populated for the eventual results view.
-          setIsAwaitingApproval(false);
-        }
-      } catch {
-        // Retry silently on next interval
-      }
-    };
-
-    checkStatus();
-    const interval = setInterval(checkStatus, 1000);
-
-    return () => {
-      cancelled = true;
-      clearInterval(interval);
-    };
-  }, [jobId]);
-
-  useEffect(() => {
-    // SSE Stream Subscription
-    const eventSource = new EventSource(`/api/scan/${jobId}/logs`);
-
-    eventSource.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        const msg = data.message || event.data;
-        const agent = data.agent || "system";
-
-        setLogs((prev) => [...prev, { id: Date.now() + Math.random(), text: msg, agent }]);
-
-        // Extract agent name if tagged [AGENT:name]
-        const match = msg.match(/\[AGENT:([a-zA-Z_]+)\]/);
-        if (match && match[1]) {
-          const detectedAgent = match[1];
-          setCurrentAgent(detectedAgent);
-          setCompletedAgents((prev) => {
-            const idx = AGENT_STEPS.findIndex((s) => s.id === detectedAgent);
-            if (idx > 0) {
-              const previousSteps = AGENT_STEPS.slice(0, idx).map((s) => s.id);
-              return Array.from(new Set([...prev, ...previousSteps]));
-            }
-            return prev;
+        setStatus((prev) => ({
+          ...next,
+          // Never let a stale poll move the bar backwards.
+          progress_percentage: Math.max(prev?.progress_percentage ?? 0, next.progress_percentage ?? 0),
+        }));
+        if ((next.status === "AWAITING_APPROVAL" || next.status === "REJECTED") && !approvalDetailsFetched) {
+          fetchApprovalDetails().then((ok) => {
+            if (ok) approvalDetailsFetched = true;
           });
         }
-
-        if (msg.includes("COMPLETE") || msg.includes("Output ZIP bundle created")) {
-          setCompletedAgents(AGENT_STEPS.map((s) => s.id));
-          setIsCompleted(true);
-          setProgressPercentage(100);
-        } else if (agent === "error" || msg.startsWith("Pipeline error:")) {
-          setFailureMessage(msg);
+        if (TERMINAL.has(next.status) && interval) {
+          clearInterval(interval);
+          interval = null;
+          if (next.status === "COMPLETE") fetchApprovalDetails();
         }
       } catch {
-        setLogs((prev) => [...prev, { id: Date.now(), text: event.data, agent: "system" }]);
+        // Retry on next interval
       }
     };
 
-    eventSource.onerror = () => {
-      eventSource.close();
+    check();
+    interval = setInterval(check, 1000);
+    return () => {
+      cancelled = true;
+      if (interval) clearInterval(interval);
+    };
+  }, [jobId, fetchApprovalDetails]);
+
+  // Live log stream. The server replays the job's history on every connect,
+  // so a late or re-connecting client sees every line; "seq" de-duplicates.
+  // EventSource reconnects on its own after an error - don't close it then.
+  useEffect(() => {
+    const seen = new Set<number>();
+    const es = new EventSource(`/api/scan/${jobId}/logs`);
+    eventSourceRef.current = es;
+
+    es.onopen = () => setStreamState("open");
+    es.onerror = () => setStreamState(es.readyState === EventSource.CLOSED ? "closed" : "reconnecting");
+    es.onmessage = (event) => {
+      let text = event.data as string;
+      let agent = "system";
+      let seq: number | null = null;
+      try {
+        const data = JSON.parse(event.data);
+        text = data.message ?? event.data;
+        agent = data.agent ?? "system";
+        seq = typeof data.seq === "number" ? data.seq : null;
+      } catch {
+        // plain-text line
+      }
+      if (seq !== null) {
+        if (seen.has(seq)) return;
+        seen.add(seq);
+      }
+      const tag = text.match(/^\[AGENT:([a-zA-Z_]+)\]\s*/);
+      const stage = STEP_TO_STAGE[tag?.[1] ?? agent] ?? "system";
+      const clean = tag ? text.slice(tag[0].length) : text;
+      setLogs((prev) => {
+        const next = [...prev, { key: seq !== null ? `s${seq}` : `r${prev.length}-${Date.now()}`, seq, text: clean, stage }];
+        return seq !== null ? next.sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0)) : next;
+      });
     };
 
     return () => {
-      eventSource.close();
+      es.close();
+      eventSourceRef.current = null;
     };
   }, [jobId]);
 
-  // Auto scroll logs
+  // Stop the stream a few seconds after the job finishes (the final lines are
+  // published just after the status flips).
   useEffect(() => {
-    if (logContainerRef.current) {
-      logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight;
-    }
+    if (!isTerminal) return;
+    const t = setTimeout(() => {
+      eventSourceRef.current?.close();
+      setStreamState("closed");
+    }, 4000);
+    return () => clearTimeout(t);
+  }, [isTerminal]);
+
+  // Auto-scroll unless the user scrolled up to read.
+  useEffect(() => {
+    const el = logContainerRef.current;
+    if (el && stickToBottom.current) el.scrollTop = el.scrollHeight;
   }, [logs]);
 
+  const onLogScroll = () => {
+    const el = logContainerRef.current;
+    if (el) stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+  };
+
+  // ---------------------------------------------------------------------
+  // Derived stage view
+  // ---------------------------------------------------------------------
+  const completedStages = status?.completed_stages ?? [];
+  const currentStage = status?.current_stage ?? (isTerminal ? null : "discovery");
+  const summaries = status?.stage_summaries ?? {};
+  const iterations = status?.verification_iterations ?? [];
+  const maxRepairs = status?.max_repair_iterations ?? 2;
+  const repairAttempts = status?.repair_attempts ?? 0;
+  const failed = jobStatus === "FAILED";
+  const awaiting = jobStatus === "AWAITING_APPROVAL" || currentStage === "awaiting_approval";
+  const rejected = jobStatus === "REJECTED";
+  const complete = jobStatus === "COMPLETE";
+  const currentStep = status?.current_agent ?? null;
+
+  // The stage that was running when the job stopped (failed or halted).
+  const lastActive: StageId | null =
+    currentStage && currentStage !== "awaiting_approval" && currentStage !== "complete"
+      ? (currentStage as StageId)
+      : null;
+  const haltedStage: StageId | null = awaiting || rejected
+    ? (iterations.length > 0 && iterations[iterations.length - 1].halted_for_approval ? "verifier" : "repair")
+    : null;
+
+  const stageState = (id: StageId): StageState => {
+    if (failed && lastActive === id) return "failed";
+    if ((awaiting || rejected) && haltedStage === id) return "halted";
+    if (!failed && !awaiting && !rejected && lastActive === id) return "active";
+    if (completedStages.includes(id)) return "done";
+    if (id === "repair" && (complete || (completedStages.includes("package") && !completedStages.includes("repair"))))
+      return "skipped";
+    return "pending";
+  };
+
+  const loopActive = currentStage === "verifier" || currentStage === "repair";
+  // Count the pass that's running now, not just the finished ones.
+  const passNo = iterations.length + (currentStage === "verifier" && !isTerminal ? 1 : 0);
+  const doneAgents = STAGES.filter((s) => stageState(s.id) === "done" || stageState(s.id) === "skipped").length;
+  const progress = Math.min(100, Math.max(0, status?.progress_percentage ?? 0));
+
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
-      {(isAwaitingApproval || isRejected || (isCompleted && approvalDecision)) && pendingApproval && (
+    <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+      {(awaiting || rejected || (complete && approvalDecision)) && pendingApproval && (
         <div className="lg:col-span-12">
           <PendingApprovalPanel
             jobId={jobId}
             pendingApproval={pendingApproval}
             planEquivalenceResults={planEquivalenceResults}
             approvalDecision={approvalDecision}
-            mode={isAwaitingApproval ? "actionable" : "readonly"}
+            mode={jobStatus === "AWAITING_APPROVAL" ? "actionable" : "readonly"}
             onDecision={() => {
-              setIsAwaitingApproval(false);
               fetchApprovalDetails();
             }}
           />
         </div>
       )}
 
-      {/* 8-Agent Stepper */}
-      <div className="lg:col-span-5 space-y-4">
-        <div className="p-6 rounded-2xl border border-slate-200/90 bg-white shadow-sm">
-          <div className="flex items-center justify-between pb-4 border-b border-slate-100 mb-5">
-            <div className="flex items-center gap-2">
-              <Activity className="w-4 h-4 text-brand-600" />
-              <h2 className="text-sm font-bold text-slate-900">LangGraph Agent Pipeline</h2>
+      {/* Outcome banners */}
+      {complete && (
+        <OutcomeBanner
+          tone="emerald"
+          icon={CheckCircle2}
+          title="Pipeline complete"
+          body={
+            iterations.length > 1
+              ? `Verified after ${iterations.length} passes and ${repairAttempts} repair cycle${repairAttempts === 1 ? "" : "s"}. The bundle and reports are ready.`
+              : "The Terraform bundle, dependency graph and verification reports are ready."
+          }
+          action={
+            <button
+              onClick={() => router.push(`/results/${jobId}`)}
+              className="btn bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm shrink-0"
+            >
+              View results
+              <ArrowRight className="w-4 h-4" />
+            </button>
+          }
+        />
+      )}
+      {failed && (
+        <OutcomeBanner
+          tone="rose"
+          icon={AlertTriangle}
+          title={`Pipeline failed${lastActive ? ` in the ${STAGES.find((s) => s.id === lastActive)?.name ?? lastActive}` : ""}`}
+          body={status?.error || "The pipeline failed. See the log for details."}
+          action={
+            <button onClick={() => router.push("/scan")} className="btn-secondary shrink-0">
+              Start a new scan
+              <ArrowRight className="w-3.5 h-3.5" />
+            </button>
+          }
+        />
+      )}
+      {rejected && (
+        <OutcomeBanner
+          tone="slate"
+          icon={XCircle}
+          title="Rejected, pipeline stopped"
+          body="A human rejected the pending findings above. This job will not produce an adoptable bundle."
+          action={
+            <button onClick={() => router.push("/scan")} className="btn-secondary shrink-0">
+              Start a new scan
+              <ArrowRight className="w-3.5 h-3.5" />
+            </button>
+          }
+        />
+      )}
+
+      {/* Agents */}
+      <div className="lg:col-span-7 space-y-4">
+        <div className="card p-4 sm:p-5">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-xs font-semibold text-slate-700">
+              {doneAgents}/{STAGES.length} agents finished
+            </span>
+            <span className="text-xs font-bold text-slate-900 tabular-nums">{Math.round(progress)}%</span>
+          </div>
+          <div className="h-1.5 rounded-full bg-slate-100 overflow-hidden">
+            <div
+              className={`h-full rounded-full transition-all duration-500 ease-out ${
+                failed ? "bg-rose-500" : complete ? "bg-emerald-500" : awaiting ? "bg-amber-500" : "bg-brand-600"
+              }`}
+              style={{ width: `${progress}%` }}
+            />
+          </div>
+        </div>
+
+        <StageCard
+          def={STAGES[0]}
+          state={stageState("discovery")}
+          summary={summaries.discovery}
+          currentStep={currentStep}
+          index={1}
+        />
+        <StageCard
+          def={STAGES[1]}
+          state={stageState("composer")}
+          summary={summaries.composer}
+          currentStep={currentStep}
+          index={2}
+        />
+
+        {/* The self-correcting loop */}
+        <div
+          className={`rounded-2xl border-2 border-dashed p-3 sm:p-4 space-y-3 transition-colors ${
+            loopActive ? "border-brand-300 bg-brand-50/30" : "border-slate-200"
+          }`}
+        >
+          <div className="flex items-center justify-between gap-3 px-1">
+            <div className="flex items-center gap-2 text-xs font-bold text-slate-700">
+              <RefreshCw className={`w-3.5 h-3.5 text-brand-600 ${loopActive && !awaiting ? "animate-spin [animation-duration:3s]" : ""}`} />
+              Verify ⇄ repair loop
             </div>
-            <span className="text-[11px] px-2.5 py-0.5 rounded-full bg-slate-100 text-slate-700 font-mono font-medium border border-slate-200">
-              {jobId.slice(0, 12)}
+            <span className="text-2xs font-semibold text-slate-500 tabular-nums">
+              {passNo === 0
+                ? `up to ${maxRepairs} repair cycles`
+                : `Pass ${passNo}/${maxRepairs + 1} · repairs ${repairAttempts}/${maxRepairs}`}
             </span>
           </div>
 
-          <div className="mb-5">
-            <div className="flex items-center justify-between mb-1.5">
-              <span className="text-[11px] font-bold text-slate-600 uppercase tracking-wider">Overall Progress</span>
-              <span className="text-xs font-bold text-brand-700 font-mono">{Math.round(progressPercentage)}%</span>
-            </div>
-            <div className="h-2 rounded-full bg-slate-100 overflow-hidden">
-              <div
-                className={`h-full rounded-full transition-all duration-500 ease-out ${
-                  failureMessage && !isCompleted
-                    ? "bg-rose-500"
-                    : "bg-gradient-to-r from-brand-500 to-brand-600"
-                }`}
-                style={{ width: `${Math.min(100, Math.max(0, progressPercentage))}%` }}
-              />
-            </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <StageCard
+              def={STAGES[2]}
+              state={stageState("verifier")}
+              summary={summaries.verifier}
+              currentStep={currentStep}
+              index={3}
+              compact
+            />
+            <StageCard
+              def={STAGES[3]}
+              state={stageState("repair")}
+              summary={stageState("repair") === "skipped" ? "Not needed: verification passed first time" : summaries.repair}
+              currentStep={currentStep}
+              index={4}
+              compact
+            />
           </div>
 
-          <div className="space-y-3.5">
-            {AGENT_STEPS.map((step, idx) => {
-              const isDone = completedAgents.includes(step.id);
-              const isCurrent = currentAgent === step.id && !isDone;
+          {iterations.length > 0 && <IterationTimeline iterations={iterations} maxRepairs={maxRepairs} />}
+        </div>
 
-              return (
-                <div
-                  key={step.id}
-                  className={`flex items-start gap-3.5 p-2.5 rounded-xl transition-all ${
-                    isCurrent
-                      ? "bg-brand-50/80 border border-brand-200/80 shadow-2xs"
-                      : isDone
-                      ? "bg-slate-50/50"
-                      : "opacity-60"
-                  }`}
-                >
-                  <div className="mt-0.5 shrink-0">
-                    {isDone ? (
-                      <CheckCircle2 className="w-5 h-5 text-emerald-600" />
-                    ) : isCurrent ? (
-                      <div className="relative">
-                        <Loader2 className="w-5 h-5 text-brand-600 animate-spin" />
-                      </div>
-                    ) : (
-                      <Circle className="w-5 h-5 text-slate-300" />
-                    )}
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center justify-between gap-2">
-                      <span
-                        className={`text-xs font-bold truncate ${
-                          isDone
-                            ? "text-slate-900"
-                            : isCurrent
-                            ? "text-brand-900"
-                            : "text-slate-500"
-                        }`}
-                      >
-                        {idx + 1}. {step.name}
-                      </span>
-                      {isCurrent && (
-                        <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-brand-600 text-white uppercase tracking-wider animate-pulse shrink-0">
-                          Active
-                        </span>
-                      )}
-                    </div>
-                    <p className="text-[11px] text-slate-500 truncate mt-0.5">{step.desc}</p>
-                  </div>
-                </div>
-              );
-            })}
+        {/* Output step - not an agent */}
+        <div
+          className={`card px-4 py-3 flex items-center gap-3 ${
+            completedStages.includes("package") ? "" : currentStage === "package" ? "ring-2 ring-brand-500/20" : "opacity-60"
+          }`}
+        >
+          <div
+            className={`p-2 rounded-lg shrink-0 ${
+              completedStages.includes("package")
+                ? "bg-emerald-50 text-emerald-600"
+                : currentStage === "package"
+                ? "bg-brand-600 text-white"
+                : "bg-slate-100 text-slate-400"
+            }`}
+          >
+            {currentStage === "package" && !completedStages.includes("package") ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <Package className="w-4 h-4" />
+            )}
           </div>
-
-          {failureMessage && !isCompleted && (
-            <div className="mt-6 pt-5 border-t border-slate-100 space-y-3">
-              <div className="p-4 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-800 flex items-start gap-3 shadow-2xs">
-                <AlertTriangle className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
-                <div>
-                  <span className="font-bold block text-rose-900">Pipeline Failed</span>
-                  <p className="mt-0.5 leading-relaxed">{failureMessage}</p>
-                </div>
-              </div>
-              <button
-                onClick={() => router.push("/scan")}
-                className="w-full py-3 rounded-xl bg-white hover:bg-slate-50 text-slate-800 border border-slate-200 font-bold flex items-center justify-center gap-2 text-xs shadow-2xs transition-all"
-              >
-                <span>Start a New Scan</span>
-                <ArrowRight className="w-3.5 h-3.5" />
-              </button>
+          <div className="min-w-0 flex-1">
+            <div className="text-xs font-semibold text-slate-800">Package outputs</div>
+            <div className="text-2xs text-slate-500 truncate">
+              {summaries.package ?? "Cost estimate, README, import plan, reports and ZIP bundle"}
             </div>
-          )}
-
-          {isRejected && (
-            <div className="mt-6 pt-5 border-t border-slate-100 space-y-3">
-              <div className="p-4 rounded-xl bg-slate-100 border border-slate-200 text-xs text-slate-700 flex items-start gap-3 shadow-2xs">
-                <XCircle className="w-5 h-5 text-slate-500 shrink-0 mt-0.5" />
-                <div>
-                  <span className="font-bold block text-slate-900">Rejected - Pipeline Halted Permanently</span>
-                  <p className="mt-0.5 leading-relaxed">
-                    A human rejected the pending findings above. This job will not produce an adoptable bundle.
-                  </p>
-                </div>
-              </div>
-              <button
-                onClick={() => router.push("/scan")}
-                className="w-full py-3 rounded-xl bg-white hover:bg-slate-50 text-slate-800 border border-slate-200 font-bold flex items-center justify-center gap-2 text-xs shadow-2xs transition-all"
-              >
-                <span>Start a New Scan</span>
-                <ArrowRight className="w-3.5 h-3.5" />
-              </button>
-            </div>
-          )}
-
-          {isCompleted && (
-            <div className="mt-6 pt-5 border-t border-slate-100">
-              <button
-                onClick={() => router.push(`/results/${jobId}`)}
-                className="w-full py-3.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 active:scale-[0.99] text-white font-bold flex items-center justify-center gap-2 text-xs shadow-lg shadow-emerald-600/25 transition-all"
-              >
-                <span>View Full Results & Graph</span>
-                <ArrowRight className="w-4 h-4" />
-              </button>
-            </div>
-          )}
+          </div>
+          <span className="text-3xs font-semibold uppercase tracking-wider text-slate-400 shrink-0">Output step</span>
         </div>
       </div>
 
-      {/* Real-time Streaming Terminal */}
-      <div className="lg:col-span-7 flex flex-col h-[580px] rounded-2xl border border-slate-800 bg-[#090d16] shadow-2xl overflow-hidden">
-        {/* Terminal Header */}
+      {/* Live log */}
+      <div className="lg:col-span-5 lg:sticky lg:top-8 flex flex-col h-[520px] lg:h-[calc(100vh-8rem)] lg:max-h-[760px] rounded-2xl border border-slate-800 bg-[#090d16] shadow-xl overflow-hidden">
         <div className="px-4 py-3 bg-[#0f1422] border-b border-slate-800 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="flex items-center gap-1.5">
-              <span className="w-3 h-3 rounded-full bg-rose-500/80 inline-block" />
-              <span className="w-3 h-3 rounded-full bg-amber-500/80 inline-block" />
-              <span className="w-3 h-3 rounded-full bg-emerald-500/80 inline-block" />
-            </div>
-            <div className="flex items-center gap-2 text-xs font-mono text-slate-300 font-medium">
-              <Terminal className="w-3.5 h-3.5 text-brand-400" />
-              <span>Live Agent Stream (SSE)</span>
-            </div>
+          <div className="flex items-center gap-2 text-xs font-mono text-slate-300 font-medium">
+            <Terminal className="w-3.5 h-3.5 text-brand-400" />
+            <span>Agent log</span>
+            <span className="text-slate-600">·</span>
+            <span className="text-slate-500 tabular-nums">{logs.length} lines</span>
           </div>
-          <div className="flex items-center gap-2">
-            <span className="relative flex h-2 w-2">
-              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
-              <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500" />
-            </span>
-            <span className="text-[10px] text-emerald-400 font-mono font-bold tracking-wider">LIVE</span>
-          </div>
+          <StreamBadge jobStatus={jobStatus} stream={streamState} />
         </div>
 
-        {/* Logs Scroll Area */}
         <div
           ref={logContainerRef}
-          className="flex-1 p-4 font-mono text-xs text-slate-300 overflow-y-auto space-y-1.5 leading-relaxed selection:bg-brand-600 selection:text-white"
+          onScroll={onLogScroll}
+          className="flex-1 py-3 font-mono overflow-y-auto leading-relaxed selection:bg-brand-600 selection:text-white"
         >
           {logs.length === 0 ? (
-            <div className="text-slate-500 italic py-4">Connecting to live agent SSE event stream...</div>
+            <div className="px-4 text-slate-500 italic py-2 flex items-center gap-2 text-xs">
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              {streamState === "open" ? "Connected. Waiting for the first log line..." : "Connecting to the log stream..."}
+            </div>
           ) : (
-            logs.map((l) => (
-              <div key={l.id} className="flex items-start gap-2.5 font-mono text-[11px]">
-                <span className="text-slate-600 select-none text-[10px] mt-0.5">❯</span>
-                <span
-                  className={
-                    l.text.includes("COMPLETE") || l.text.includes("Passed")
-                      ? "text-emerald-400 font-semibold"
-                      : l.text.includes("error") || l.text.includes("Failed")
-                      ? "text-rose-400 font-semibold"
-                      : l.text.includes("[AGENT:")
-                      ? "text-brand-300 font-semibold"
-                      : "text-slate-300"
-                  }
-                >
-                  {l.text}
-                </span>
-              </div>
-            ))
+            logs.map((l, i) => {
+              const tag = STAGE_TAG[l.stage];
+              const isError = /error|failed|✗/i.test(l.text) && !/0 failed/i.test(l.text);
+              const isGood = /✓|passed\.|complete|Bundle ready/i.test(l.text);
+              return (
+                <div key={l.key} className="flex items-start gap-2.5 px-4 py-px hover:bg-white/[0.03] text-2xs">
+                  <span className="text-slate-600 select-none tabular-nums w-7 text-right shrink-0">{i + 1}</span>
+                  <span className={`shrink-0 w-[4.5rem] ${tag.cls}`}>{tag.label}</span>
+                  <span
+                    className={`break-words min-w-0 ${
+                      isError ? "text-rose-400" : isGood ? "text-emerald-400" : "text-slate-300"
+                    }`}
+                  >
+                    {l.text}
+                  </span>
+                </div>
+              );
+            })
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+
+function OutcomeBanner({
+  tone,
+  icon: Icon,
+  title,
+  body,
+  action,
+}: {
+  tone: "emerald" | "rose" | "slate";
+  icon: LucideIcon;
+  title: string;
+  body: string;
+  action: React.ReactNode;
+}) {
+  const styles = {
+    emerald: { wrap: "border-emerald-200 bg-emerald-50/60", icon: "bg-emerald-600", title: "text-emerald-900", body: "text-emerald-800/80" },
+    rose: { wrap: "border-rose-200 bg-rose-50/60", icon: "bg-rose-600", title: "text-rose-900", body: "text-rose-800/90" },
+    slate: { wrap: "bg-slate-50", icon: "bg-slate-500", title: "text-slate-900", body: "text-slate-600" },
+  }[tone];
+  return (
+    <div
+      className={`lg:col-span-12 card p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4 animate-fade-in ${styles.wrap}`}
+    >
+      <div className="flex items-start gap-3 min-w-0">
+        <div className={`p-2 rounded-xl text-white shrink-0 ${styles.icon}`}>
+          <Icon className="w-5 h-5" />
+        </div>
+        <div className="min-w-0">
+          <div className={`text-sm font-bold ${styles.title}`}>{title}</div>
+          <p className={`text-xs leading-relaxed break-words ${styles.body}`}>{body}</p>
+        </div>
+      </div>
+      {action}
+    </div>
+  );
+}
+
+function StageCard({
+  def,
+  state,
+  summary,
+  currentStep,
+  index,
+  compact = false,
+}: {
+  def: StageDef;
+  state: StageState;
+  summary?: string;
+  currentStep: string | null;
+  index: number;
+  compact?: boolean;
+}) {
+  const Icon = def.icon;
+  const activeStep = state === "active" ? def.steps.find((s) => s.id === currentStep) : undefined;
+
+  const badge = {
+    pending: { text: "Waiting", cls: "bg-slate-100 text-slate-500" },
+    active: { text: "Running", cls: "bg-brand-600 text-white" },
+    done: { text: "Done", cls: "bg-emerald-50 text-emerald-700" },
+    halted: { text: "Needs approval", cls: "bg-amber-100 text-amber-800" },
+    failed: { text: "Failed", cls: "bg-rose-100 text-rose-700" },
+    skipped: { text: "Skipped", cls: "bg-slate-100 text-slate-500" },
+  }[state];
+
+  const iconCls = {
+    pending: "bg-slate-100 text-slate-400",
+    active: "bg-brand-600 text-white",
+    done: "bg-emerald-50 text-emerald-600",
+    halted: "bg-amber-50 text-amber-600",
+    failed: "bg-rose-50 text-rose-600",
+    skipped: "bg-slate-100 text-slate-400",
+  }[state];
+
+  return (
+    <div
+      className={`card p-4 transition-all ${
+        state === "active"
+          ? "ring-2 ring-brand-500/25 border-brand-300"
+          : state === "failed"
+          ? "border-rose-200"
+          : state === "halted"
+          ? "border-amber-300"
+          : state === "pending"
+          ? "opacity-70"
+          : ""
+      }`}
+    >
+      <div className="flex items-start gap-3">
+        <div className={`p-2 rounded-xl shrink-0 ${iconCls}`}>
+          {state === "active" ? (
+            <Loader2 className="w-4 h-4 animate-spin" />
+          ) : state === "done" ? (
+            <CheckCircle2 className="w-4 h-4" />
+          ) : state === "failed" ? (
+            <XCircle className="w-4 h-4" />
+          ) : state === "halted" ? (
+            <PauseCircle className="w-4 h-4" />
+          ) : (
+            <Icon className="w-4 h-4" />
+          )}
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-start justify-between gap-2">
+            <div className="min-w-0">
+              <div className="text-sm font-bold text-slate-900 flex items-center gap-1.5 flex-wrap">
+                <span className="text-slate-400 font-semibold tabular-nums">{index}.</span>
+                {def.name}
+                {def.usesLlm && (
+                  <span className="text-3xs font-semibold px-1.5 py-px rounded bg-violet-50 text-violet-700 border border-violet-100">
+                    LLM
+                  </span>
+                )}
+              </div>
+              {!compact && <p className="text-2xs text-slate-500 mt-0.5">{def.desc}</p>}
+            </div>
+            <span className={`text-3xs font-bold uppercase tracking-wider px-2 py-0.5 rounded-md shrink-0 ${badge.cls}`}>
+              {badge.text}
+            </span>
+          </div>
+
+          {summary && state !== "active" && (
+            <p className={`text-xs mt-2 font-medium ${state === "failed" ? "text-rose-700" : "text-slate-700"}`}>{summary}</p>
+          )}
+          {state === "active" && (
+            <p className="text-xs mt-2 text-brand-800 font-medium">{activeStep ? `${activeStep.label}…` : "Starting…"}</p>
+          )}
+
+          {!compact && (
+            <div className="flex flex-wrap gap-1.5 mt-2.5">
+              {def.steps.map((s) => (
+                <span
+                  key={s.id}
+                  className={`text-3xs px-2 py-0.5 rounded-md border ${
+                    activeStep?.id === s.id
+                      ? "border-brand-300 bg-brand-50 text-brand-800 font-semibold"
+                      : "border-slate-200 text-slate-500"
+                  }`}
+                >
+                  {s.label}
+                </span>
+              ))}
+            </div>
+          )}
+          {compact && (
+            <p className="text-3xs text-slate-400 mt-1.5 leading-relaxed">{def.steps.map((s) => s.label).join(" · ")}</p>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function IterationTimeline({ iterations, maxRepairs }: { iterations: VerificationIteration[]; maxRepairs: number }) {
+  return (
+    <ol className="rounded-xl bg-white border border-slate-200 divide-y divide-slate-100">
+      {iterations.map((it, i) => {
+        const last = i === iterations.length - 1;
+        const outcome = it.passed
+          ? { text: "Passed", cls: "text-emerald-700", icon: CheckCircle2 }
+          : it.halted_for_approval
+          ? { text: "Needs approval", cls: "text-amber-700", icon: PauseCircle }
+          : it.system_failure
+          ? { text: "Environment error", cls: "text-rose-700", icon: AlertTriangle }
+          : { text: last && i >= maxRepairs ? "Still failing" : "Repair", cls: "text-rose-700", icon: Wrench };
+        const OutcomeIcon = outcome.icon;
+        return (
+          <li key={it.iteration} className="px-3 py-2 flex items-center gap-3 text-2xs">
+            <span className="font-bold text-slate-900 tabular-nums w-12 shrink-0">Pass {it.iteration}</span>
+            <div className="flex-1 min-w-0 flex flex-wrap gap-x-3 gap-y-0.5 text-slate-600">
+              <Check ok={it.validation_passed} label={it.system_failure ? "validate (env)" : "validate"} />
+              <span className={it.high_findings > 0 ? "text-rose-700 font-semibold" : ""}>
+                {it.high_findings} high/critical
+              </span>
+              <span>
+                {it.plan_changes === null ? "plan skipped" : `plan: ${it.plan_changes} change${it.plan_changes === 1 ? "" : "s"}`}
+              </span>
+              {it.drift_findings > 0 && <span className="text-amber-700">{it.drift_findings} drift</span>}
+            </div>
+            <span className={`flex items-center gap-1 font-semibold shrink-0 ${outcome.cls}`}>
+              <OutcomeIcon className="w-3 h-3" />
+              {outcome.text}
+            </span>
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
+function Check({ ok, label }: { ok: boolean; label: string }) {
+  return (
+    <span className={`inline-flex items-center gap-1 ${ok ? "text-emerald-700" : "text-rose-700"}`}>
+      {ok ? <CheckCircle2 className="w-3 h-3" /> : <Circle className="w-3 h-3" />}
+      {label}
+    </span>
+  );
+}
+
+function StreamBadge({
+  jobStatus,
+  stream,
+}: {
+  jobStatus: string;
+  stream: "connecting" | "open" | "reconnecting" | "closed";
+}) {
+  const s =
+    jobStatus === "FAILED"
+      ? { label: "FAILED", dot: "bg-rose-500", text: "text-rose-400", ping: false }
+      : jobStatus === "COMPLETE"
+      ? { label: "DONE", dot: "bg-emerald-500", text: "text-emerald-400", ping: false }
+      : jobStatus === "REJECTED"
+      ? { label: "HALTED", dot: "bg-slate-400", text: "text-slate-400", ping: false }
+      : jobStatus === "AWAITING_APPROVAL"
+      ? { label: "PAUSED", dot: "bg-amber-500", text: "text-amber-400", ping: false }
+      : stream === "open"
+      ? { label: "LIVE", dot: "bg-emerald-500", text: "text-emerald-400", ping: true }
+      : stream === "reconnecting"
+      ? { label: "RECONNECTING", dot: "bg-amber-500", text: "text-amber-400", ping: true }
+      : { label: "CONNECTING", dot: "bg-slate-500", text: "text-slate-400", ping: true };
+  return (
+    <div className="flex items-center gap-2">
+      <span className="relative flex h-2 w-2">
+        {s.ping && <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${s.dot}`} />}
+        <span className={`relative inline-flex rounded-full h-2 w-2 ${s.dot}`} />
+      </span>
+      <span className={`text-3xs font-mono font-bold tracking-wider ${s.text}`}>{s.label}</span>
     </div>
   );
 }

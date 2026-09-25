@@ -93,6 +93,9 @@ def mark_job_complete(job_id: str, final_state: Dict[str, Any]) -> None:
         record.security_findings_count = len(findings)
         record.zip_generated = bool(final_state.get("zip_path"))
         record.status = final_state.get("status") or "COMPLETE"
+        # region="auto" is resolved during discovery - store the region actually scanned.
+        if final_state.get("region"):
+            record.region = final_state["region"]
 
         # Audit-trail summaries for the adoption pipeline (Phase 1 Increments 1/2/5) -
         # empty/None until those agents are built and start populating these state

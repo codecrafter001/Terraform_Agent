@@ -30,7 +30,11 @@ class ScanRequest(BaseModel):
     aws_access_key: SecretStr = Field(..., description="AWS Access Key ID (never logged or exposed)")
     aws_secret_key: SecretStr = Field(..., description="AWS Secret Access Key (never logged or exposed)")
     aws_session_token: Optional[SecretStr] = Field(None, description="Optional AWS Session Token for STS assumed roles")
-    region: str = Field(default="us-east-1", description="Target AWS region")
+    region: str = Field(default="us-east-1", description="Target AWS region, or \"auto\" to let Resource Explorer pick")
+    use_resource_explorer: bool = Field(
+        default=True,
+        description="Query AWS Resource Explorer (read-only) for an all-region inventory before discovery",
+    )
     operation: OperationType = Field(default=OperationType.GENERATE, description="Pipeline operation mode")
     resource_filters: List[str] = Field(
         default_factory=lambda: ["EC2", "VPC", "S3", "RDS", "IAM", "SG"],

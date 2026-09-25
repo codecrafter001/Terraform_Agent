@@ -22,6 +22,7 @@ class TrivyRunner:
         try:
             for filename, content in hcl_files.items():
                 file_path = os.path.join(sandbox_dir, filename)
+                os.makedirs(os.path.dirname(file_path), exist_ok=True)
                 with open(file_path, "w", encoding="utf-8") as f:
                     f.write(content)
 

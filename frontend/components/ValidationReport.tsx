@@ -35,7 +35,7 @@ export default function ValidationReport({
   const scannersSkipped = securityResults?.scanners_skipped || [];
 
   return (
-    <div className="rounded-2xl border border-slate-200/90 bg-white shadow-sm overflow-hidden">
+    <div className="card overflow-hidden">
       {/* Header & Segmented Tabs */}
       <div className="p-4 sm:p-5 border-b border-slate-100 bg-slate-50/70 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>

@@ -1,7 +1,8 @@
-import Link from "next/link";
-import { ArrowLeft } from "lucide-react";
+import { AlertTriangle } from "lucide-react";
 import DependencyGraph from "@/components/DependencyGraph";
+import { PageHeader } from "@/components/ui";
 import { fetchJobResults } from "@/lib/api";
+import { DEMO_DEPENDENCY_GRAPH } from "@/lib/demo";
 import { DependencyGraphData } from "@/lib/types";
 
 interface FullGraphPageProps {
@@ -15,50 +16,46 @@ export const dynamic = "force-dynamic";
 export default async function FullGraphPage({ params }: FullGraphPageProps) {
   const { id } = await params;
   let dependencyGraph: DependencyGraphData;
+  let isDemo = false;
   try {
     const results = await fetchJobResults(id);
     dependencyGraph = results.dependency_graph;
   } catch {
-    dependencyGraph = {
-      nodes: [
-        { id: "vpc-0a1b2c3d4e5f", name: "prod-main-vpc", type: "aws_vpc", category: "Networking" },
-        { id: "subnet-0123456789abcdef", name: "prod-public-subnet-1", type: "aws_subnet", category: "Networking" },
-        { id: "sg-0feebda1234", name: "web-tier-sg", type: "aws_security_group", category: "Security" },
-        { id: "i-0987654321fedcba0", name: "api-gateway-node", type: "aws_instance", category: "Compute" },
-        { id: "app-production-assets-2026", name: "app-production-assets-2026", type: "aws_s3_bucket", category: "Storage" }
-      ],
-      links: [
-        { source: "subnet-0123456789abcdef", target: "vpc-0a1b2c3d4e5f", relation: "contains" },
-        { source: "i-0987654321fedcba0", target: "subnet-0123456789abcdef", relation: "hosted_in" },
-        { source: "i-0987654321fedcba0", target: "sg-0feebda1234", relation: "secured_by" }
-      ],
-      is_dag: true,
-      node_count: 5,
-      edge_count: 3,
-      topological_order: [
-        "vpc-0a1b2c3d4e5f",
-        "subnet-0123456789abcdef",
-        "sg-0feebda1234",
-        "i-0987654321fedcba0",
-        "app-production-assets-2026"
-      ]
-    };
+    dependencyGraph = DEMO_DEPENDENCY_GRAPH;
+    isDemo = true;
   }
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <Link
-          href={`/results/${id}`}
-          className="inline-flex items-center gap-1.5 text-xs text-gray-500 hover:text-ink transition-colors"
-        >
-          <ArrowLeft className="w-3.5 h-3.5" />
-          Back to Results
-        </Link>
-        <span className="font-mono text-xs text-brand-600">Job: {id}</span>
-      </div>
+    <div className="space-y-5">
+      <PageHeader
+        breadcrumbs={[
+          { label: "Dashboard", href: "/" },
+          { label: "Results", href: `/results/${id}#topology` },
+          { label: "Dependency graph" },
+        ]}
+        title={
+          <>
+            <span>Dependency graph</span>
+            <span className="font-mono text-xs font-semibold text-brand-700 bg-brand-50 px-2.5 py-1 rounded-lg border border-brand-200">
+              {id}
+            </span>
+          </>
+        }
+        description={`${dependencyGraph.node_count ?? dependencyGraph.nodes.length} resources, ${
+          dependencyGraph.edge_count ?? dependencyGraph.links.length
+        } dependencies`}
+      />
 
-      <DependencyGraph data={dependencyGraph} />
+      {isDemo && (
+        <div className="p-3.5 rounded-xl border border-amber-200 bg-amber-50 text-xs text-amber-900 flex items-start gap-2.5">
+          <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+          <span>
+            <span className="font-bold">Demo data.</span> The API could not be reached, so this is a sample graph.
+          </span>
+        </div>
+      )}
+
+      <DependencyGraph data={dependencyGraph} tall />
     </div>
   );
 }
