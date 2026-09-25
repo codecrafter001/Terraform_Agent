@@ -1,4 +1,11 @@
-"""Policy Agent: Multi-layer security scans (tfsec, Checkov, Trivy, Conftest OPA)."""
+"""Policy step: security scans (Checkov, Trivy, Conftest/OPA).
+
+tfsec is not run: its rule set now lives in Trivy (`trivy config`). Findings are
+reported for the Security Posture score / a separate hardening PR - they never
+drive the repair loop. Fail closed: a scanner that crashed, timed out or
+produced unparseable output is listed in scanners_failed, and the verifier
+treats the scan as incomplete rather than clean.
+"""
 
 import asyncio
 import logging
@@ -7,7 +14,6 @@ from typing import Any, Dict
 from services.redis_client import redis_service
 from tools.checkov_runner import CheckovRunner
 from tools.conftest_runner import ConftestRunner
-from tools.tfsec_runner import TfsecRunner
 from tools.trivy_runner import TrivyRunner
 
 logger = logging.getLogger(__name__)
@@ -19,20 +25,18 @@ async def policy_agent_node(state: Dict[str, Any]) -> Dict[str, Any]:
 
     await redis_service.publish_log(
         job_id,
-        "[AGENT:policy_agent] Executing multi-layer security scans (tfsec + Checkov + Trivy + OPA)...",
+        "[AGENT:policy_agent] Running security scans (Checkov + Trivy + OPA) - report only, never auto-fixed...",
         agent_name="policy_agent"
     )
 
     # Run security tools concurrently (each manages its own sandboxed temp dir)
-    tfsec_res, checkov_res, trivy_res, conftest_res = await asyncio.gather(
-        TfsecRunner.scan_hcl(tf_files),
+    checkov_res, trivy_res, conftest_res = await asyncio.gather(
         CheckovRunner.scan_hcl(tf_files),
         TrivyRunner.scan_hcl(tf_files),
         ConftestRunner.scan_hcl(tf_files)
     )
 
     all_findings = (
-        tfsec_res.get("findings", []) +
         checkov_res.get("findings", []) +
         trivy_res.get("findings", []) +
         conftest_res.get("findings", [])
@@ -43,8 +47,9 @@ async def policy_agent_node(state: Dict[str, Any]) -> Dict[str, Any]:
     # a scan on a box missing all 4 scanner binaries reports the exact same
     # "passed: true, risk_score: 0" as a genuinely clean scan - a false assurance
     # for a tool whose whole value proposition is safety validation.
-    tool_results = {"tfsec": tfsec_res, "checkov": checkov_res, "trivy": trivy_res, "conftest": conftest_res}
+    tool_results = {"checkov": checkov_res, "trivy": trivy_res, "conftest": conftest_res}
     scanners_skipped = [name for name, res in tool_results.items() if res.get("tool_skipped")]
+    scanners_failed = {name: res["tool_error"] for name, res in tool_results.items() if res.get("tool_error")}
 
     critical_count = sum(1 for f in all_findings if f.get("severity") == "CRITICAL")
     high_count = sum(1 for f in all_findings if f.get("severity") == "HIGH")
@@ -60,6 +65,12 @@ async def policy_agent_node(state: Dict[str, Any]) -> Dict[str, Any]:
             job_id,
             f"[AGENT:policy_agent] WARNING: {', '.join(scanners_skipped)} not found on PATH - "
             f"skipped entirely, not scanned clean. Risk score below does not reflect these tools.",
+            agent_name="policy_agent"
+        )
+    for name, error in scanners_failed.items():
+        await redis_service.publish_log(
+            job_id,
+            f"[AGENT:policy_agent] FAILED: {name} did not complete ({error}) - scan is incomplete, not clean.",
             agent_name="policy_agent"
         )
 
@@ -83,6 +94,7 @@ async def policy_agent_node(state: Dict[str, Any]) -> Dict[str, Any]:
             "low_count": low_count,
             "findings": all_findings,
             "scanners_skipped": scanners_skipped,
+            "scanners_failed": scanners_failed,
             "compliance_summary": {
                 "checkov": {
                     "passed": checkov_res.get("passed", 0),

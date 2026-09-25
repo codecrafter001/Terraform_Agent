@@ -21,7 +21,7 @@ export default async function ScanProgressPage({ params }: ScanProgressPageProps
             </span>
           </>
         }
-        description="Four agents, with a verify ⇄ repair loop that re-checks every fix."
+        description="Four agents. The verifier only judges; fixes come from IaC Engineering and are re-checked every time."
       />
 
       <ScanProgress jobId={id} />

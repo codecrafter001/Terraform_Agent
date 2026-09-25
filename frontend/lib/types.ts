@@ -33,15 +33,30 @@ export interface JobProgress {
   verification_iterations?: VerificationIteration[];
   repair_attempts?: number;
   max_repair_iterations?: number | null;
+  verification_verdict?: VerificationVerdict | null;
+  repair_history?: RepairEntry[];
   created_at: string;
   updated_at?: string;
   error?: string;
 }
 
-export type StageId = 'discovery' | 'composer' | 'verifier' | 'repair' | 'package';
+export type StageId = 'infrastructure' | 'iac_engineering' | 'verification' | 'delivery';
+
+export type VerificationVerdict = 'PASS' | 'FAIL' | 'INCOMPLETE' | 'NEEDS_APPROVAL';
+
+export interface RepairEntry {
+  cycle: number;
+  errors: number;
+  fixed: string[];
+  rejected: { address: string; violations: string[] }[];
+  unresolved: string[];
+}
 
 export interface VerificationIteration {
   iteration: number;
+  verdict: VerificationVerdict;
+  checks_run: string[];
+  incomplete_reasons: string[];
   validation_passed: boolean;
   system_failure: boolean;
   high_findings: number;

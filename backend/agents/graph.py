@@ -1,25 +1,26 @@
-"""LangGraph StateGraph: four agents and a self-correcting verify/repair loop.
+"""LangGraph StateGraph: four agents with a repair loop and a risk gate.
 
-    discovery -> composer -> verifier <-> repair
-                                 |
-                                 +--> package -> END   (docs + cost + ZIP; not an agent)
-                                 +--> END              (halt: AWAITING_APPROVAL)
+    infrastructure -> iac_engineering -> verification --PASS/INCOMPLETE/NEEDS_APPROVAL--> delivery -> END
+                          ^                  |
+                          +------ FAIL ------+   (validation errors, max N repair cycles)
 
-Each of the four agent nodes runs an ordered set of *steps* - the original
-per-concern node functions (cloud_discovery, validation_agent, policy_agent,
-...), which stay individually unit-tested. Only two steps actually ask an LLM
-to decide something (terraform_composer's HCL synthesis and repair_agent's
-safe_auto fixes); the rest are deterministic tool calls. Grouping them this way
-is what the UI shows, and it makes the Verifier <-> Repair loop - the part of
-the system that actually reasons and self-corrects - the visible centerpiece.
+1. Infrastructure Agent - read-only discovery (Resource Explorer + boto3),
+   dependency graph, ownership classification.
+2. IaC Engineering Agent - adoption plan + Terraform generation; on a FAIL
+   verdict it repairs only the blocks that failed validation, and every fix
+   must pass deterministic invariant checks (tools/hcl_invariants.py).
+3. Verification & Risk Agent - judges, never edits. Validate first (stop there
+   if it fails), then drift, plan equivalence and policy scans. Security
+   findings are reported, never auto-fixed in adoption code. Fails closed: a
+   crash, timeout, missing tool or unparseable output makes the verdict
+   INCOMPLETE, never PASS.
+4. Delivery & Approval Agent - risk gate (pending_approval pauses the job at
+   AWAITING_APPROVAL until POST /scan/{id}/approve), then cost, docs and the
+   bundle.
 
-Safety invariants carried over unchanged from the previous 13-node graph:
-- A pending_approval (behavior_changing/destructive drift, plan, or repair
-  finding) halts the graph at END with status AWAITING_APPROVAL. Nothing
-  downstream runs until POST /scan/{id}/approve resumes the package step.
-- A "system" validation check (terraform binary missing, sandbox failure) is an
-  environment failure no HCL patch can fix, so it never triggers repair.
-- The repair loop is bounded by max_repair_iterations.
+Repair lives in IaC Engineering, not Verification, so the verifier never
+grades its own fix. Each agent runs *steps* - the original per-concern node
+functions, which stay individually unit-tested.
 """
 
 import asyncio
@@ -43,10 +44,10 @@ from .graph_agent import graph_agent_node
 from .intent_router import intent_router_node
 from .plan_equivalence_agent import plan_equivalence_agent_node
 from .policy_agent import policy_agent_node
-from .repair_agent import repair_agent_node
 from .resource_explorer_step import resource_explorer_node
 from .terraform_composer import terraform_composer_node
 from .validation_agent import validation_agent_node
+from .validation_repair import repair_validation_node
 
 # Previously hardcoded as `attempts < 2` in should_repair - same default.
 MAX_REPAIR_ITERATIONS = int(os.getenv("TERRAAGENT_MAX_REPAIR_ITERATIONS", "2"))
@@ -55,9 +56,9 @@ MAX_REPAIR_ITERATIONS = int(os.getenv("TERRAAGENT_MAX_REPAIR_ITERATIONS", "2"))
 # "still working" log line, so the live log never goes silent for minutes.
 HEARTBEAT_INTERVAL_SECONDS = float(os.getenv("TERRAAGENT_HEARTBEAT_SECONDS", "15"))
 
-# Display order. "package" is the output step, not an agent.
-AGENT_STAGES: Tuple[str, ...] = ("discovery", "composer", "verifier", "repair")
-ALL_STAGES: Tuple[str, ...] = AGENT_STAGES + ("package",)
+# Display order.
+AGENT_STAGES: Tuple[str, ...] = ("infrastructure", "iac_engineering", "verification", "delivery")
+ALL_STAGES: Tuple[str, ...] = AGENT_STAGES
 
 
 class TerraAgentState(TypedDict):
@@ -114,10 +115,12 @@ class TerraAgentState(TypedDict):
     agent_timings: Dict[str, float]  # step name -> duration in seconds
 
     # Agent-level progress - what the UI renders.
-    current_stage: str  # one of ALL_STAGES, "awaiting_approval", or "complete"
+    current_stage: str  # one of AGENT_STAGES, "awaiting_approval", or "complete"
     completed_stages: List[str]
     stage_summaries: Dict[str, str]  # stage -> one-line human summary of its latest run
-    verification_iterations: List[dict]  # one entry per verifier pass (see _record_iteration)
+    verification_iterations: List[dict]  # one entry per verification pass (see _record_iteration)
+    verification_verdict: str  # PASS | FAIL | INCOMPLETE | NEEDS_APPROVAL - latest pass
+    repair_history: List[dict]  # one entry per repair cycle: fixed / rejected (invariants) / unresolved
     max_repair_iterations: int
 
 
@@ -172,10 +175,12 @@ def build_initial_state(job_id: str, request: Dict[str, Any]) -> Dict[str, Any]:
         "current_agent": "intent_router",
         "progress_percentage": 0,
         "agent_timings": {},
-        "current_stage": "discovery",
+        "current_stage": "infrastructure",
         "completed_stages": [],
         "stage_summaries": {},
         "verification_iterations": [],
+        "verification_verdict": "",
+        "repair_history": [],
         "max_repair_iterations": MAX_REPAIR_ITERATIONS,
     }
 
@@ -317,13 +322,13 @@ def _plural(n: int, word: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Agent 1 - Discovery
+# Agent 1 - Infrastructure: discover, graph, classify
 # ---------------------------------------------------------------------------
 
-async def discovery_agent(state: Dict[str, Any]) -> Dict[str, Any]:
+async def infrastructure_agent(state: Dict[str, Any]) -> Dict[str, Any]:
     job_id = state.get("job_id", "")
-    await _log(job_id, "discovery", "Discovery Agent: read-only AWS inventory, dependency graph and ownership triage.")
-    delta, acc = await _run_steps("discovery", state, [
+    await _log(job_id, "infrastructure", "Infrastructure Agent: read-only discovery, dependency graph and ownership classification.")
+    delta, acc = await _run_steps("infrastructure", state, [
         ("intent_router", "classifying the request", intent_router_node),
         ("resource_explorer", "all-region inventory via Resource Explorer", resource_explorer_node),
         ("cloud_discovery", "read-only AWS discovery (Describe/Get/List)", cloud_discovery_node),
@@ -344,22 +349,49 @@ async def discovery_agent(state: Dict[str, Any]) -> Dict[str, Any]:
             f" · account-wide: {inv.get('total')}{'+' if inv.get('truncated') else ''} resources"
             f" in {len(inv.get('by_region') or {})} regions"
         )
-    await _log(job_id, "discovery", f"Done. {summary}.")
-    return _finish_stage("discovery", acc, delta, summary, 25)
+    await _log(job_id, "infrastructure", f"Done. {summary}.")
+    return _finish_stage("infrastructure", acc, delta, summary, 25)
 
 
 # ---------------------------------------------------------------------------
-# Agent 2 - Composer
+# Agent 2 - IaC Engineering: adoption plan + generation, and repair
 # ---------------------------------------------------------------------------
 
-async def composer_agent(state: Dict[str, Any]) -> Dict[str, Any]:
+def _repair_requested(state: Dict[str, Any]) -> bool:
+    iterations = state.get("verification_iterations") or []
+    return bool(iterations) and iterations[-1].get("verdict") == VERDICT_FAIL
+
+
+async def iac_engineering_agent(state: Dict[str, Any]) -> Dict[str, Any]:
+    """First visit: plan and generate. Later visits (sent back by the
+    verifier): repair only the blocks that failed validation. Repair lives here,
+    not in the verifier, so the verifier never grades its own fix."""
     job_id = state.get("job_id", "")
-    await _log(job_id, "composer", "Composer Agent: planning adoption order and generating HCL with the local LLM.")
-    delta, acc = await _run_steps("composer", state, [
+    max_iters = _max_iters(state)
+
+    if _repair_requested(state):
+        cycle = _attempts(state) + 1
+        await _log(job_id, "iac_engineering", f"IaC Engineering Agent: repair cycle {cycle}/{max_iters} on validation errors.")
+        delta, acc = await _run_steps("iac_engineering", state, [
+            ("repair_agent", "repairing failing blocks", repair_validation_node),
+        ])
+        entry = (acc.get("repair_history") or [{}])[-1]
+        fixed, rejected, unresolved = entry.get("fixed", []), entry.get("rejected", []), entry.get("unresolved", [])
+        summary = f"Repair {cycle}/{max_iters}: fixed {_plural(len(fixed), 'block')}"
+        if fixed:
+            summary += f" ({', '.join(fixed[:2])}{'…' if len(fixed) > 2 else ''})"
+        if rejected:
+            summary += f" · {len(rejected)} fix{'es' if len(rejected) != 1 else ''} rejected by invariant checks"
+        if unresolved:
+            summary += f" · {len(unresolved)} unresolved"
+        await _log(job_id, "iac_engineering", f"Done. {summary}. Sending back to verification.")
+        return _finish_stage("iac_engineering", acc, delta, summary, 55)
+
+    await _log(job_id, "iac_engineering", "IaC Engineering Agent: adoption plan, then Terraform generation.")
+    delta, acc = await _run_steps("iac_engineering", state, [
         ("adoption_planning_agent", "planning adoption waves and import order", adoption_planning_agent_node),
         ("terraform_composer", "generating Terraform HCL", terraform_composer_node),
     ])
-
     files = acc.get("terraform_files", {}) or {}
     manifest = acc.get("generation_manifest", {}) or {}
     waves = len((acc.get("adoption_plan", {}) or {}).get("waves", []) or [])
@@ -371,49 +403,81 @@ async def composer_agent(state: Dict[str, Any]) -> Dict[str, Any]:
     )
     if waves:
         summary += f" · {_plural(waves, 'wave')}"
-    await _log(job_id, "composer", f"Done. {summary}.")
-    return _finish_stage("composer", acc, delta, summary, 45)
+    await _log(job_id, "iac_engineering", f"Done. {summary}.")
+    return _finish_stage("iac_engineering", acc, delta, summary, 45)
 
 
 # ---------------------------------------------------------------------------
-# Agent 3 - Verifier
+# Agent 3 - Verification & Risk: judge only, never edit
 # ---------------------------------------------------------------------------
+
+VERDICT_PASS = "PASS"
+VERDICT_FAIL = "FAIL"  # validation errors - repairable by IaC Engineering
+VERDICT_INCOMPLETE = "INCOMPLETE"  # fail closed: something couldn't be checked
+VERDICT_NEEDS_APPROVAL = "NEEDS_APPROVAL"
+
 
 def _has_system_failure(state: Dict[str, Any]) -> bool:
     return any(c.get("check_name") == "system" for c in (state.get("validation_results", {}) or {}).get("checks", []))
 
 
-def _needs_fix(state: Dict[str, Any]) -> bool:
-    sec = state.get("security_results", {}) or {}
-    val = state.get("validation_results", {}) or {}
-    return (
-        not val.get("passed", True)
-        or sec.get("critical_count", 0) > 0
-        or sec.get("high_count", 0) > 0
-    )
+def _incomplete_reasons(acc: Dict[str, Any]) -> List[str]:
+    """Everything that stops us from claiming the code was verified. Any
+    crash, timeout, missing tool or unparseable output counts - never 'clean'."""
+    reasons: List[str] = []
+    if _has_system_failure(acc):
+        system = next(c for c in acc["validation_results"]["checks"] if c.get("check_name") == "system")
+        reasons.append(f"validation could not run ({str(system.get('output', ''))[:120]})")
+    sec = acc.get("security_results") or {}
+    for name in sec.get("scanners_skipped") or []:
+        reasons.append(f"{name} not installed")
+    for name, error in (sec.get("scanners_failed") or {}).items():
+        reasons.append(f"{name} failed: {error}")
+    plan = acc.get("plan_equivalence_results") or {}
+    if plan and not plan.get("skipped"):
+        init = next((c for c in plan.get("checks", []) or [] if c.get("check_name") == "init"), None)
+        if init and not init.get("passed"):
+            reasons.append("plan equivalence could not initialize")
+    return reasons
 
 
-def _record_iteration(acc: Dict[str, Any]) -> Dict[str, Any]:
+def _record_iteration(acc: Dict[str, Any], validation_only: bool) -> Dict[str, Any]:
     val = acc.get("validation_results", {}) or {}
     sec = acc.get("security_results", {}) or {}
     plan = acc.get("plan_equivalence_results", {}) or {}
     drift = acc.get("drift_results", {}) or {}
 
-    plan_ran = bool(plan) and not plan.get("skipped")
+    plan_ran = bool(plan) and not plan.get("skipped") and not validation_only
     plan_changes = (
         sum(int(plan.get(k, 0) or 0) for k in ("create", "update", "replace", "destroy")) if plan_ran else None
     )
+    incomplete = _incomplete_reasons(acc)
+    if acc.get("pending_approval"):
+        verdict = VERDICT_NEEDS_APPROVAL
+    elif _has_system_failure(acc):
+        verdict = VERDICT_INCOMPLETE
+    elif not val.get("passed", False):
+        verdict = VERDICT_FAIL
+    elif incomplete:
+        verdict = VERDICT_INCOMPLETE
+    else:
+        verdict = VERDICT_PASS
+
     high = int(sec.get("critical_count", 0) or 0) + int(sec.get("high_count", 0) or 0)
     return {
         "iteration": len(acc.get("verification_iterations", []) or []) + 1,
+        "verdict": verdict,
         "validation_passed": bool(val.get("passed", False)),
         "system_failure": _has_system_failure(acc),
-        "high_findings": high,
-        "total_findings": len(sec.get("findings", []) or []),
+        "checks_run": ["validate"] if validation_only else ["validate", "drift", "plan", "policy"],
+        # Findings are reported (Security Posture), never repaired in adoption code.
+        "high_findings": 0 if validation_only else high,
+        "total_findings": 0 if validation_only else len(sec.get("findings", []) or []),
         "plan_changes": plan_changes,
-        "drift_findings": len(drift.get("findings", []) or []),
-        "halted_for_approval": bool(acc.get("pending_approval")),
-        "passed": not _needs_fix(acc) and not acc.get("pending_approval"),
+        "drift_findings": 0 if validation_only else len(drift.get("findings", []) or []),
+        "incomplete_reasons": incomplete,
+        "halted_for_approval": verdict == VERDICT_NEEDS_APPROVAL,
+        "passed": verdict == VERDICT_PASS,
         "at": datetime.utcnow().isoformat(),
     }
 
@@ -421,152 +485,134 @@ def _record_iteration(acc: Dict[str, Any]) -> Dict[str, Any]:
 def _iteration_summary(it: Dict[str, Any], max_iters: int) -> str:
     parts = [f"Pass {it['iteration']}/{max_iters + 1}"]
     if it["system_failure"]:
-        parts.append("validation could not run (environment)")
+        parts.append("validation could not run")
     else:
         parts.append("validate ✓" if it["validation_passed"] else "validate ✗")
-    parts.append(f"{it['high_findings']} high/critical" if it["high_findings"] else "no high findings")
-    if it["plan_changes"] is not None:
-        parts.append(f"plan: {_plural(it['plan_changes'], 'change')}")
-    if it["halted_for_approval"]:
-        parts.append("needs human approval")
+    if "policy" in it["checks_run"]:
+        parts.append(f"{it['high_findings']} high/critical reported" if it["high_findings"] else "no high findings")
+        if it["plan_changes"] is not None:
+            parts.append(f"plan: {_plural(it['plan_changes'], 'change')}")
+    else:
+        parts.append("later checks skipped until it validates")
+    parts.append({
+        VERDICT_PASS: "verified",
+        VERDICT_FAIL: "sending back for repair",
+        VERDICT_INCOMPLETE: "INCOMPLETE",
+        VERDICT_NEEDS_APPROVAL: "needs human approval",
+    }[it["verdict"]])
     return " · ".join(parts)
 
 
-async def verifier_agent(state: Dict[str, Any]) -> Dict[str, Any]:
+async def verification_agent(state: Dict[str, Any]) -> Dict[str, Any]:
     job_id = state.get("job_id", "")
     max_iters = _max_iters(state)
     pass_no = len(state.get("verification_iterations", []) or []) + 1
-    await _log(
-        job_id, "verifier",
-        f"Verifier Agent pass {pass_no}: validate, drift check, plan equivalence, security policies.",
-    )
-    delta, acc = await _run_steps(
-        "verifier",
-        state,
-        [
-            ("validation_agent", "terraform fmt / init / validate", validation_agent_node),
-            ("drift_reconciliation_agent", "comparing generated HCL to live AWS", drift_reconciliation_agent_node),
-            ("plan_equivalence_agent", "terraform plan equivalence", plan_equivalence_agent_node),
-            ("policy_agent", "tfsec / Checkov / Trivy / OPA", policy_agent_node),
-        ],
-        # Same halts as the old drift_gate/plan_gate edges: a destructive or
-        # behavior-changing finding stops the pass before anything else runs.
-        stop_if=lambda s: bool(s.get("pending_approval")),
-    )
+    await _log(job_id, "verification", f"Verification & Risk Agent pass {pass_no}: validate first, then drift, plan and policy.")
 
-    iteration = _record_iteration(acc)
+    # Validate first; if it fails, nothing else is worth running - hand the
+    # errors straight back to IaC Engineering.
+    delta, acc = await _run_steps("verification", state, [
+        ("validation_agent", "terraform fmt / init / validate", validation_agent_node),
+    ])
+    validation_only = not (acc.get("validation_results") or {}).get("passed", False)
+    if not validation_only:
+        more, acc = await _run_steps(
+            "verification",
+            acc,
+            [
+                ("drift_reconciliation_agent", "comparing generated HCL to live AWS", drift_reconciliation_agent_node),
+                ("plan_equivalence_agent", "terraform plan equivalence", plan_equivalence_agent_node),
+                ("policy_agent", "Checkov / Trivy / OPA (report only)", policy_agent_node),
+            ],
+            # Same halts as before: a destructive or behavior-changing finding
+            # stops the pass before anything else runs.
+            stop_if=lambda s: bool(s.get("pending_approval")),
+        )
+        delta.update(more)
+
+    iteration = _record_iteration(acc, validation_only)
     iterations = list(acc.get("verification_iterations", []) or []) + [iteration]
     delta["verification_iterations"] = iterations
+    delta["verification_verdict"] = iteration["verdict"]
     acc["verification_iterations"] = iterations
 
     summary = _iteration_summary(iteration, max_iters)
-    verdict = (
-        "passed." if iteration["passed"]
-        else "halting for human approval." if iteration["halted_for_approval"]
-        else "issues found."
-    )
-    await _log(job_id, "verifier", f"{summary}: {verdict}")
-    return _finish_stage("verifier", acc, delta, summary, 75)
+    if iteration["incomplete_reasons"]:
+        await _log(job_id, "verification", "Not verified: " + "; ".join(iteration["incomplete_reasons"]) + ".")
+    await _log(job_id, "verification", summary + ".")
+    return _finish_stage("verification", acc, delta, summary, 75)
 
 
-def route_after_verify(state: Dict[str, Any]) -> str:
-    if state.get("pending_approval"):
-        return "halt"
-    # An environment failure no HCL patch can fix - never spend a repair
-    # cycle (or an LLM call) on it.
-    if _has_system_failure(state):
-        return "package"
-    max_iters = _max_iters(state)
-    if _needs_fix(state) and _attempts(state) < max_iters:
-        return "repair"
-    return "package"
+def route_after_verification(state: Dict[str, Any]) -> str:
+    iterations = state.get("verification_iterations") or []
+    verdict = iterations[-1].get("verdict") if iterations else VERDICT_INCOMPLETE
+    if verdict == VERDICT_FAIL and _attempts(state) < _max_iters(state):
+        return "iac_engineering"
+    # PASS, INCOMPLETE, NEEDS_APPROVAL, or out of repair budget: Delivery &
+    # Approval decides whether to pause for a human or package.
+    return "delivery"
 
 
 # ---------------------------------------------------------------------------
-# Agent 4 - Repair
+# Agent 4 - Delivery & Approval: risk gate, then package
 # ---------------------------------------------------------------------------
 
-async def repair_agent(state: Dict[str, Any]) -> Dict[str, Any]:
+async def delivery_agent(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Risk gate first: behavior-changing or destructive findings pause the job
+    at AWAITING_APPROVAL until a human decides. Also called directly by
+    routers/scan.py::_resume_after_decision once a human approves - with
+    approval_decision set, the gate lets it through to packaging."""
     job_id = state.get("job_id", "")
-    before = dict(state.get("terraform_files", {}) or {})
-    sec = state.get("security_results", {}) or {}
-    targets = sorted({
-        f.get("resource") for f in (sec.get("findings", []) or [])
-        if f.get("resource") and str(f.get("severity", "")).upper() in ("CRITICAL", "HIGH")
-    })
-    cycle = _attempts(state) + 1
-    max_iters = _max_iters(state)
-    target_note = f" Targets: {', '.join(targets[:3])}{'…' if len(targets) > 3 else ''}." if targets else ""
-    await _log(job_id, "repair", f"Repair Agent cycle {cycle}/{max_iters}.{target_note}")
+    decision = (state.get("approval_decision") or {}).get("decision")
 
-    delta, acc = await _run_steps("repair", state, [
-        ("repair_agent", "repairing HCL", repair_agent_node),
-    ])
+    if state.get("pending_approval") and decision != "approved":
+        findings = len((state.get("pending_approval") or {}).get("findings", []) or [])
+        await _log(job_id, "delivery", f"Risk gate: {_plural(findings, 'finding')} need a human decision. Pausing.")
+        summaries = dict(state.get("stage_summaries") or {})
+        summaries["delivery"] = f"Paused at the risk gate: {_plural(findings, 'finding')} awaiting approval"
+        return {
+            "status": "AWAITING_APPROVAL",
+            "current_stage": "awaiting_approval",
+            "current_agent": "awaiting_approval",
+            "stage_summaries": summaries,
+        }
 
-    after = acc.get("terraform_files", {}) or {}
-    patched = sum(1 for k, v in after.items() if before.get(k) != v)
-    summary = f"Cycle {cycle}/{max_iters}: patched {_plural(patched, 'file')}"
-    if targets:
-        summary += f" · {', '.join(targets[:2])}{'…' if len(targets) > 2 else ''}"
-    if acc.get("pending_approval"):
-        summary += " · escalated to human approval"
-    await _log(job_id, "repair", f"Done. {summary}." + ("" if acc.get("pending_approval") else " Re-verifying."))
-    return _finish_stage("repair", acc, delta, summary, 80)
-
-
-def route_after_repair(state: Dict[str, Any]) -> str:
-    # repair_agent_node escalates behavior_changing/destructive findings into
-    # pending_approval instead of auto-fixing them - that must halt, not
-    # re-verify (which would just rediscover the same findings) or package a
-    # "COMPLETE" bundle nobody approved.
-    if state.get("pending_approval"):
-        return "halt"
-    return "verifier"
-
-
-# ---------------------------------------------------------------------------
-# Output step (not an agent): cost estimate on the final HCL, docs, ZIP
-# ---------------------------------------------------------------------------
-
-async def package_outputs(state: Dict[str, Any]) -> Dict[str, Any]:
-    """Also called directly by routers/scan.py::_resume_after_decision when a
-    human approves a halted job - it's exactly the tail the graph never
-    reached."""
-    job_id = state.get("job_id", "")
-    await _log(job_id, "package", "Packaging: cost estimate, documentation, import plan and ZIP bundle.")
-    delta, acc = await _run_steps("package", state, [
+    await _log(job_id, "delivery", "Delivery & Approval Agent: cost estimate, documentation, import plan and bundle.")
+    delta, acc = await _run_steps("delivery", state, [
         ("cost_agent", "Infracost cost estimate", cost_agent_node),
         ("documentation_agent", "writing docs and packaging the bundle", documentation_agent_node),
     ])
     files = len(acc.get("zip_manifest", []) or [])
-    delta = _finish_stage("package", acc, delta, f"Bundle ready · {_plural(files, 'file')}", 100)
+    verdict = acc.get("verification_verdict") or VERDICT_INCOMPLETE
+    note = {
+        VERDICT_PASS: "verified",
+        VERDICT_FAIL: "NOT verified: validation still failing",
+        VERDICT_INCOMPLETE: "NOT fully verified: see verification",
+        VERDICT_NEEDS_APPROVAL: "approved by a human",
+    }.get(verdict, verdict)
+    delta = _finish_stage("delivery", acc, delta, f"Bundle ready · {_plural(files, 'file')} · {note}", 100)
     delta["current_stage"] = "complete"
     return delta
+
 
 
 def build_graph():
     """Compiles the four-agent LangGraph workflow."""
     workflow = StateGraph(TerraAgentState)
 
-    workflow.add_node("discovery", discovery_agent)
-    workflow.add_node("composer", composer_agent)
-    workflow.add_node("verifier", verifier_agent)
-    workflow.add_node("repair", repair_agent)
-    workflow.add_node("package", package_outputs)
+    workflow.add_node("infrastructure", infrastructure_agent)
+    workflow.add_node("iac_engineering", iac_engineering_agent)
+    workflow.add_node("verification", verification_agent)
+    workflow.add_node("delivery", delivery_agent)
 
-    workflow.set_entry_point("discovery")
-    workflow.add_edge("discovery", "composer")
-    workflow.add_edge("composer", "verifier")
+    workflow.set_entry_point("infrastructure")
+    workflow.add_edge("infrastructure", "iac_engineering")
+    workflow.add_edge("iac_engineering", "verification")
     workflow.add_conditional_edges(
-        "verifier",
-        route_after_verify,
-        {"repair": "repair", "package": "package", "halt": END},
+        "verification",
+        route_after_verification,
+        {"iac_engineering": "iac_engineering", "delivery": "delivery"},
     )
-    workflow.add_conditional_edges(
-        "repair",
-        route_after_repair,
-        {"verifier": "verifier", "halt": END},
-    )
-    workflow.add_edge("package", END)
+    workflow.add_edge("delivery", END)
 
     return workflow.compile()

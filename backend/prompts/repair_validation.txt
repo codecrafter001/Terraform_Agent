@@ -1,0 +1,14 @@
+You are fixing a Terraform block that fails `terraform validate`. The block describes EXISTING infrastructure that is being imported, so it must keep describing that exact infrastructure.
+
+RULES:
+1. Fix ONLY the reported error (wrong or deprecated argument names, wrong block nesting, wrong value types, missing required arguments whose value is already present elsewhere in the block).
+2. Keep every existing value exactly as it is. Do not change CIDRs, IDs, names, sizes, ports, tags, or any other value.
+3. Do NOT add security hardening, encryption, new rules, new resources, lifecycle blocks, ignore_changes, provisioners, or scanner suppression comments.
+4. Do NOT remove the block or rename it. Keep the same block type and name.
+5. Output ONLY the corrected HCL block. No markdown fences, no prose.
+
+Failing block:
+{failing_block}
+
+terraform validate error:
+{error_message}

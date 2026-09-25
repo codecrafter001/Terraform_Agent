@@ -118,8 +118,8 @@ async def test_destructive_finding_never_reaches_llm_and_lands_in_pending_approv
     assert result["pending_approval"] is not None
     assert result["pending_approval"]["findings"][0]["tier"] == "destructive"
     assert result["repair_risk_tier"] == "destructive"
-    # current_agent must point at the "awaiting_approval" halt hint (matching
-    # graph.py::route_after_repair's routing to END), not validation_agent -
+    # current_agent must point at the "awaiting_approval" halt hint (the
+    # Delivery & Approval Agent's risk gate), not validation_agent -
     # re-validating would just rediscover the same untouched finding - and
     # not cost_agent either, since the pipeline no longer silently continues
     # past an unresolved destructive finding.
@@ -171,7 +171,7 @@ async def test_no_findings_means_no_pending_approval():
 
     result = await repair_agent_node(state)
     # Nothing escalated - current_agent must correctly point back at
-    # validation_agent (matching route_after_repair's routing), not stay
+    # validation_agent, not stay
     # stuck on whatever policy_agent had already set.
     assert result["current_agent"] == "validation_agent"
 
@@ -213,31 +213,16 @@ async def test_safe_auto_finding_is_the_only_tier_that_reaches_the_llm(monkeypat
     assert result["repair_risk_tier"] is None
 
 
-def test_route_after_repair_halts_when_pending_approval_set():
-    from agents.graph import route_after_repair
-
-    # Regardless of how many attempts remain, escalated findings were never
-    # touched - looping back to the verifier would just rediscover the exact
-    # same findings, and packaging would ship a "COMPLETE" bundle nobody has
-    # actually approved. "halt" is mapped to END in build_graph().
-    state = {"pending_approval": {"reason": "repair_requires_human_approval", "findings": []}, "repair_attempts": 1}
-    assert route_after_repair(state) == "halt"
+def _iteration(verdict):
+    return {"verification_iterations": [{"verdict": verdict}]}
 
 
-def test_route_after_repair_reverifies_when_nothing_escalated():
-    from agents.graph import route_after_repair
+def test_route_after_verification_sends_fail_back_for_repair_within_budget():
+    from agents.graph import route_after_verification
 
-    # Every repair is re-verified; the iteration bound lives in
-    # route_after_verify (see the next test).
-    assert route_after_repair({"pending_approval": None, "repair_attempts": 1}) == "verifier"
-
-
-def test_route_after_verify_bounds_the_repair_loop():
-    from agents.graph import route_after_verify
-
-    failing = {"pending_approval": None, "validation_results": {"passed": False, "checks": []}, "max_repair_iterations": 2}
-    assert route_after_verify({**failing, "repair_attempts": 1}) == "repair"
-    assert route_after_verify({**failing, "repair_attempts": 2}) == "package"
+    assert route_after_verification({**_iteration("FAIL"), "repair_attempts": 1, "max_repair_iterations": 2}) == "iac_engineering"
+    # Out of budget: stop and deliver (clearly labelled unverified), never loop forever.
+    assert route_after_verification({**_iteration("FAIL"), "repair_attempts": 2, "max_repair_iterations": 2}) == "delivery"
 
 
 def test_actionable_findings_still_filters_severity_and_tool():
@@ -255,18 +240,11 @@ def test_actionable_findings_still_filters_severity_and_tool():
     assert actionable[0]["resource"] == "aws_iam_role.x"
 
 
-def test_route_after_verify_halts_on_plan_equivalence_or_drift_approval():
-    # Replaces the old plan_gate/drift_gate edges: the verifier stops its pass
-    # the moment either step sets pending_approval, and routing sends it
-    # straight to END - never to repair, never to package.
-    from agents.graph import route_after_verify
+def test_route_after_verification_never_repairs_approval_or_incomplete_verdicts():
+    # Replaces the old plan_gate/drift_gate edges: approval findings go to the
+    # Delivery & Approval Agent's risk gate (which pauses the job), and
+    # fail-closed INCOMPLETE verdicts aren't something repair could fix.
+    from agents.graph import route_after_verification
 
-    for reason in ("plan_equivalence_requires_human_approval", "drift_reconciliation_requires_human_approval"):
-        state = {
-            "pending_approval": {"reason": reason, "findings": []},
-            "validation_results": {"passed": False, "checks": []},
-            "repair_attempts": 0,
-        }
-        assert route_after_verify(state) == "halt"
-
-    assert route_after_verify({"pending_approval": None, "validation_results": {"passed": True, "checks": []}}) == "package"
+    for verdict in ("NEEDS_APPROVAL", "INCOMPLETE", "PASS"):
+        assert route_after_verification({**_iteration(verdict), "repair_attempts": 0}) == "delivery"

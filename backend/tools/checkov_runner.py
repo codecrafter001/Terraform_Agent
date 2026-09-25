@@ -4,9 +4,12 @@ import asyncio
 import json
 import logging
 import os
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from tools.sandbox_registry import create_sandbox, release_sandbox
+
+# Fail closed: a scanner that hangs must count as a failed scan, never a clean one.
+SCANNER_TIMEOUT_SECONDS = float(os.getenv("TERRAAGENT_SCANNER_TIMEOUT", "300"))
 
 logger = logging.getLogger("terraagent.checkov_runner")
 
@@ -22,6 +25,7 @@ class CheckovRunner:
         passed_count = 0
         skipped_count = 0
         tool_skipped = False
+        tool_error: Optional[str] = None
 
         try:
             for filename, content in hcl_files.items():
@@ -39,8 +43,16 @@ class CheckovRunner:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
-            stdout, stderr = await process.communicate()
+            try:
+                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=SCANNER_TIMEOUT_SECONDS)
+            except asyncio.TimeoutError:
+                process.kill()
+                await process.wait()
+                raise TimeoutError("checkov timed out after " + str(int(SCANNER_TIMEOUT_SECONDS)) + "s")
             output_str = stdout.decode("utf-8", errors="replace").strip()
+            if not output_str and process.returncode:
+                err_text = stderr.decode("utf-8", errors="replace").strip()[:200]
+                tool_error = f"exited {process.returncode} with no output" + (f": {err_text}" if err_text else "")
 
             if output_str:
                 try:
@@ -71,12 +83,14 @@ class CheckovRunner:
                             })
                 except json.JSONDecodeError:
                     logger.warning("Could not parse checkov json output")
+                    tool_error = "unparseable JSON output"
 
         except FileNotFoundError:
             logger.warning("checkov executable not found in PATH; skipping checkov scan.")
             tool_skipped = True
         except Exception as e:
             logger.error(f"checkov scan error: {e}")
+            tool_error = f"{type(e).__name__}: {e}"[:200]
         finally:
             release_sandbox(sandbox_dir)
 
@@ -87,5 +101,6 @@ class CheckovRunner:
             "passed": passed_count,
             "failed": len(findings),
             "skipped": skipped_count,
-            "tool_skipped": tool_skipped
+            "tool_skipped": tool_skipped,
+            "tool_error": tool_error,
         }

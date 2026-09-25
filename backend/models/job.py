@@ -13,14 +13,16 @@ class JobProgress(BaseModel):
     progress_percentage: int = 0
     current_agent: Optional[str] = None
     completed_agents: List[str] = []
-    # Agent-level progress (discovery / composer / verifier / repair, plus
-    # the "package" output step) - see agents/graph.py.
+    # Agent-level progress (infrastructure / iac_engineering / verification /
+    # delivery) - see agents/graph.py.
     current_stage: Optional[str] = None
     completed_stages: List[str] = []
     stage_summaries: Dict[str, str] = {}
     verification_iterations: List[Dict[str, Any]] = []
     repair_attempts: int = 0
     max_repair_iterations: Optional[int] = None
+    verification_verdict: Optional[str] = None
+    repair_history: List[Dict[str, Any]] = []
     migration_confidence: Optional[Dict[str, Any]] = None
     created_at: str
     updated_at: Optional[str] = None

@@ -26,6 +26,7 @@ import {
   JobProgress,
   PendingApproval,
   PlanEquivalenceResult,
+  RepairEntry,
   StageId,
   VerificationIteration,
 } from "@/lib/types";
@@ -49,9 +50,9 @@ interface StageDef {
 // each stage node runs.
 const STAGES: StageDef[] = [
   {
-    id: "discovery",
-    name: "Discovery Agent",
-    desc: "Read-only AWS inventory, dependency graph and ownership triage",
+    id: "infrastructure",
+    name: "Infrastructure Agent",
+    desc: "Read-only discovery, dependency graph and ownership classification",
     icon: Search,
     usesLlm: false,
     steps: [
@@ -63,58 +64,55 @@ const STAGES: StageDef[] = [
     ],
   },
   {
-    id: "composer",
-    name: "Composer Agent",
-    desc: "Adoption plan and import order, then HCL from the local LLM",
+    id: "iac_engineering",
+    name: "IaC Engineering Agent",
+    desc: "Adoption plan and Terraform generation; repairs blocks that fail validation",
     icon: Cpu,
     usesLlm: true,
     steps: [
       { id: "adoption_planning_agent", label: "Adoption plan & import order" },
-      { id: "terraform_composer", label: "HCL synthesis (Ollama)" },
+      { id: "terraform_composer", label: "HCL generation" },
+      { id: "repair_agent", label: "Repair (invariant-checked)" },
     ],
   },
   {
-    id: "verifier",
-    name: "Verifier Agent",
-    desc: "validate, drift check, plan equivalence and security policies",
+    id: "verification",
+    name: "Verification & Risk Agent",
+    desc: "Judges only, never edits. Validate first, then drift, plan and policy",
     icon: ShieldCheck,
     usesLlm: false,
     steps: [
       { id: "validation_agent", label: "fmt / init / validate" },
       { id: "drift_reconciliation_agent", label: "Drift vs. live AWS" },
       { id: "plan_equivalence_agent", label: "Plan equivalence" },
-      { id: "policy_agent", label: "tfsec · Checkov · Trivy · OPA" },
+      { id: "policy_agent", label: "Checkov · Trivy · OPA (report only)" },
     ],
   },
   {
-    id: "repair",
-    name: "Repair Agent",
-    desc: "LLM fixes for safe findings; risky ones go to a human",
-    icon: Wrench,
-    usesLlm: true,
-    steps: [{ id: "repair_agent", label: "Targeted HCL repair" }],
+    id: "delivery",
+    name: "Delivery & Approval Agent",
+    desc: "Risk gate for human approval, then docs, import plan and bundle",
+    icon: Package,
+    usesLlm: false,
+    steps: [
+      { id: "awaiting_approval", label: "Risk gate" },
+      { id: "cost_agent", label: "Cost estimate" },
+      { id: "documentation_agent", label: "Docs, import plan & bundle" },
+    ],
   },
 ];
 
-const PACKAGE_STEPS = [
-  { id: "cost_agent", label: "Cost estimate" },
-  { id: "documentation_agent", label: "Docs, import plan & ZIP" },
-];
-
-// Log line tag -> stage, for coloring the live log. Covers both the stage
-// agents' own lines and the underlying steps' [AGENT:step] lines.
-const STEP_TO_STAGE: Record<string, StageId> = {
-  ...Object.fromEntries(STAGES.flatMap((s) => [[s.id, s.id], ...s.steps.map((st) => [st.id, s.id])])),
-  ...Object.fromEntries(PACKAGE_STEPS.map((s) => [s.id, "package"])),
-  package: "package",
-};
+// Log line tag -> stage, for coloring the live log. Covers both the agents'
+// own lines and the underlying steps' [AGENT:step] lines.
+const STEP_TO_STAGE: Record<string, StageId> = Object.fromEntries(
+  STAGES.flatMap((s) => [[s.id, s.id], ...s.steps.map((st) => [st.id, s.id])])
+);
 
 const STAGE_TAG: Record<StageId | "system", { label: string; cls: string }> = {
-  discovery: { label: "discovery", cls: "text-sky-300" },
-  composer: { label: "composer", cls: "text-violet-300" },
-  verifier: { label: "verifier", cls: "text-amber-300" },
-  repair: { label: "repair", cls: "text-rose-300" },
-  package: { label: "package", cls: "text-emerald-300" },
+  infrastructure: { label: "infra", cls: "text-sky-300" },
+  iac_engineering: { label: "iac", cls: "text-violet-300" },
+  verification: { label: "verify", cls: "text-amber-300" },
+  delivery: { label: "deliver", cls: "text-emerald-300" },
   system: { label: "system", cls: "text-slate-500" },
 };
 
@@ -264,11 +262,13 @@ export default function ScanProgress({ jobId }: ScanProgressProps) {
   // Derived stage view
   // ---------------------------------------------------------------------
   const completedStages = status?.completed_stages ?? [];
-  const currentStage = status?.current_stage ?? (isTerminal ? null : "discovery");
+  const currentStage = status?.current_stage ?? (isTerminal ? null : "infrastructure");
   const summaries = status?.stage_summaries ?? {};
   const iterations = status?.verification_iterations ?? [];
   const maxRepairs = status?.max_repair_iterations ?? 2;
   const repairAttempts = status?.repair_attempts ?? 0;
+  const repairs = status?.repair_history ?? [];
+  const verdict = status?.verification_verdict ?? null;
   const failed = jobStatus === "FAILED";
   const awaiting = jobStatus === "AWAITING_APPROVAL" || currentStage === "awaiting_approval";
   const rejected = jobStatus === "REJECTED";
@@ -280,23 +280,22 @@ export default function ScanProgress({ jobId }: ScanProgressProps) {
     currentStage && currentStage !== "awaiting_approval" && currentStage !== "complete"
       ? (currentStage as StageId)
       : null;
-  const haltedStage: StageId | null = awaiting || rejected
-    ? (iterations.length > 0 && iterations[iterations.length - 1].halted_for_approval ? "verifier" : "repair")
-    : null;
+  // The risk gate lives in the Delivery & Approval Agent.
+  const haltedStage: StageId | null = awaiting || rejected ? "delivery" : null;
 
   const stageState = (id: StageId): StageState => {
     if (failed && lastActive === id) return "failed";
     if ((awaiting || rejected) && haltedStage === id) return "halted";
     if (!failed && !awaiting && !rejected && lastActive === id) return "active";
     if (completedStages.includes(id)) return "done";
-    if (id === "repair" && (complete || (completedStages.includes("package") && !completedStages.includes("repair"))))
-      return "skipped";
     return "pending";
   };
 
-  const loopActive = currentStage === "verifier" || currentStage === "repair";
+  const loopActive =
+    currentStage === "verification" || (currentStage === "iac_engineering" && iterations.length > 0);
   // Count the pass that's running now, not just the finished ones.
-  const passNo = iterations.length + (currentStage === "verifier" && !isTerminal ? 1 : 0);
+  const passNo = iterations.length + (currentStage === "verification" && !isTerminal ? 1 : 0);
+  const verified = verdict === "PASS" || verdict === "NEEDS_APPROVAL";
   const doneAgents = STAGES.filter((s) => stageState(s.id) === "done" || stageState(s.id) === "skipped").length;
   const progress = Math.min(100, Math.max(0, status?.progress_percentage ?? 0));
 
@@ -320,18 +319,22 @@ export default function ScanProgress({ jobId }: ScanProgressProps) {
       {/* Outcome banners */}
       {complete && (
         <OutcomeBanner
-          tone="emerald"
-          icon={CheckCircle2}
-          title="Pipeline complete"
+          tone={verified ? "emerald" : "amber"}
+          icon={verified ? CheckCircle2 : AlertTriangle}
+          title={verified ? "Pipeline complete" : "Delivered, but not fully verified"}
           body={
-            iterations.length > 1
+            !verified
+              ? verdict === "FAIL"
+                ? `Validation still failed after ${repairAttempts} repair cycle${repairAttempts === 1 ? "" : "s"}. Review the bundle before using it.`
+                : `Some checks couldn't run: ${(iterations[iterations.length - 1]?.incomplete_reasons ?? []).join("; ") || "see the log"}.`
+              : iterations.length > 1
               ? `Verified after ${iterations.length} passes and ${repairAttempts} repair cycle${repairAttempts === 1 ? "" : "s"}. The bundle and reports are ready.`
-              : "The Terraform bundle, dependency graph and verification reports are ready."
+              : "Verified on the first pass. The bundle and reports are ready."
           }
           action={
             <button
               onClick={() => router.push(`/results/${jobId}`)}
-              className="btn bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm shrink-0"
+              className={`btn text-white shadow-sm shrink-0 ${verified ? "bg-emerald-600 hover:bg-emerald-700" : "bg-amber-600 hover:bg-amber-700"}`}
             >
               View results
               <ArrowRight className="w-4 h-4" />
@@ -389,20 +392,13 @@ export default function ScanProgress({ jobId }: ScanProgressProps) {
 
         <StageCard
           def={STAGES[0]}
-          state={stageState("discovery")}
-          summary={summaries.discovery}
+          state={stageState("infrastructure")}
+          summary={summaries.infrastructure}
           currentStep={currentStep}
           index={1}
         />
-        <StageCard
-          def={STAGES[1]}
-          state={stageState("composer")}
-          summary={summaries.composer}
-          currentStep={currentStep}
-          index={2}
-        />
 
-        {/* The self-correcting loop */}
+        {/* The self-correcting loop: IaC Engineering fixes, Verification judges */}
         <div
           className={`rounded-2xl border-2 border-dashed p-3 sm:p-4 space-y-3 transition-colors ${
             loopActive ? "border-brand-300 bg-brand-50/30" : "border-slate-200"
@@ -411,7 +407,7 @@ export default function ScanProgress({ jobId }: ScanProgressProps) {
           <div className="flex items-center justify-between gap-3 px-1">
             <div className="flex items-center gap-2 text-xs font-bold text-slate-700">
               <RefreshCw className={`w-3.5 h-3.5 text-brand-600 ${loopActive && !awaiting ? "animate-spin [animation-duration:3s]" : ""}`} />
-              Verify ⇄ repair loop
+              Generate ⇄ verify loop
             </div>
             <span className="text-2xs font-semibold text-slate-500 tabular-nums">
               {passNo === 0
@@ -422,55 +418,35 @@ export default function ScanProgress({ jobId }: ScanProgressProps) {
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             <StageCard
+              def={STAGES[1]}
+              state={stageState("iac_engineering")}
+              summary={summaries.iac_engineering}
+              currentStep={currentStep}
+              index={2}
+              compact
+            />
+            <StageCard
               def={STAGES[2]}
-              state={stageState("verifier")}
-              summary={summaries.verifier}
+              state={stageState("verification")}
+              summary={summaries.verification}
               currentStep={currentStep}
               index={3}
               compact
             />
-            <StageCard
-              def={STAGES[3]}
-              state={stageState("repair")}
-              summary={stageState("repair") === "skipped" ? "Not needed: verification passed first time" : summaries.repair}
-              currentStep={currentStep}
-              index={4}
-              compact
-            />
           </div>
 
-          {iterations.length > 0 && <IterationTimeline iterations={iterations} maxRepairs={maxRepairs} />}
+          {iterations.length > 0 && (
+            <IterationTimeline iterations={iterations} repairs={repairs} maxRepairs={maxRepairs} />
+          )}
         </div>
 
-        {/* Output step - not an agent */}
-        <div
-          className={`card px-4 py-3 flex items-center gap-3 ${
-            completedStages.includes("package") ? "" : currentStage === "package" ? "ring-2 ring-brand-500/20" : "opacity-60"
-          }`}
-        >
-          <div
-            className={`p-2 rounded-lg shrink-0 ${
-              completedStages.includes("package")
-                ? "bg-emerald-50 text-emerald-600"
-                : currentStage === "package"
-                ? "bg-brand-600 text-white"
-                : "bg-slate-100 text-slate-400"
-            }`}
-          >
-            {currentStage === "package" && !completedStages.includes("package") ? (
-              <Loader2 className="w-4 h-4 animate-spin" />
-            ) : (
-              <Package className="w-4 h-4" />
-            )}
-          </div>
-          <div className="min-w-0 flex-1">
-            <div className="text-xs font-semibold text-slate-800">Package outputs</div>
-            <div className="text-2xs text-slate-500 truncate">
-              {summaries.package ?? "Cost estimate, README, import plan, reports and ZIP bundle"}
-            </div>
-          </div>
-          <span className="text-3xs font-semibold uppercase tracking-wider text-slate-400 shrink-0">Output step</span>
-        </div>
+        <StageCard
+          def={STAGES[3]}
+          state={stageState("delivery")}
+          summary={summaries.delivery}
+          currentStep={currentStep}
+          index={4}
+        />
       </div>
 
       {/* Live log */}
@@ -530,7 +506,7 @@ function OutcomeBanner({
   body,
   action,
 }: {
-  tone: "emerald" | "rose" | "slate";
+  tone: "emerald" | "amber" | "rose" | "slate";
   icon: LucideIcon;
   title: string;
   body: string;
@@ -538,6 +514,7 @@ function OutcomeBanner({
 }) {
   const styles = {
     emerald: { wrap: "border-emerald-200 bg-emerald-50/60", icon: "bg-emerald-600", title: "text-emerald-900", body: "text-emerald-800/80" },
+    amber: { wrap: "border-amber-200 bg-amber-50/60", icon: "bg-amber-600", title: "text-amber-900", body: "text-amber-800/90" },
     rose: { wrap: "border-rose-200 bg-rose-50/60", icon: "bg-rose-600", title: "text-rose-900", body: "text-rose-800/90" },
     slate: { wrap: "bg-slate-50", icon: "bg-slate-500", title: "text-slate-900", body: "text-slate-600" },
   }[tone];
@@ -674,36 +651,78 @@ function StageCard({
   );
 }
 
-function IterationTimeline({ iterations, maxRepairs }: { iterations: VerificationIteration[]; maxRepairs: number }) {
+const VERDICT_STYLE: Record<string, { text: string; cls: string; icon: LucideIcon }> = {
+  PASS: { text: "Verified", cls: "text-emerald-700", icon: CheckCircle2 },
+  FAIL: { text: "Back to repair", cls: "text-rose-700", icon: Wrench },
+  INCOMPLETE: { text: "Incomplete", cls: "text-amber-700", icon: AlertTriangle },
+  NEEDS_APPROVAL: { text: "Needs approval", cls: "text-amber-700", icon: PauseCircle },
+};
+
+function IterationTimeline({
+  iterations,
+  repairs,
+  maxRepairs,
+}: {
+  iterations: VerificationIteration[];
+  repairs: RepairEntry[];
+  maxRepairs: number;
+}) {
   return (
     <ol className="rounded-xl bg-white border border-slate-200 divide-y divide-slate-100">
       {iterations.map((it, i) => {
         const last = i === iterations.length - 1;
-        const outcome = it.passed
-          ? { text: "Passed", cls: "text-emerald-700", icon: CheckCircle2 }
-          : it.halted_for_approval
-          ? { text: "Needs approval", cls: "text-amber-700", icon: PauseCircle }
-          : it.system_failure
-          ? { text: "Environment error", cls: "text-rose-700", icon: AlertTriangle }
-          : { text: last && i >= maxRepairs ? "Still failing" : "Repair", cls: "text-rose-700", icon: Wrench };
-        const OutcomeIcon = outcome.icon;
+        const style =
+          it.verdict === "FAIL" && last && i >= maxRepairs
+            ? { text: "Still failing", cls: "text-rose-700", icon: XCircle }
+            : VERDICT_STYLE[it.verdict] ?? VERDICT_STYLE.INCOMPLETE;
+        const OutcomeIcon = style.icon;
+        const repair = repairs[i];
         return (
-          <li key={it.iteration} className="px-3 py-2 flex items-center gap-3 text-2xs">
-            <span className="font-bold text-slate-900 tabular-nums w-12 shrink-0">Pass {it.iteration}</span>
-            <div className="flex-1 min-w-0 flex flex-wrap gap-x-3 gap-y-0.5 text-slate-600">
-              <Check ok={it.validation_passed} label={it.system_failure ? "validate (env)" : "validate"} />
-              <span className={it.high_findings > 0 ? "text-rose-700 font-semibold" : ""}>
-                {it.high_findings} high/critical
+          <li key={it.iteration} className="text-2xs">
+            <div className="px-3 py-2 flex items-center gap-3">
+              <span className="font-bold text-slate-900 tabular-nums w-12 shrink-0">Pass {it.iteration}</span>
+              <div className="flex-1 min-w-0 flex flex-wrap gap-x-3 gap-y-0.5 text-slate-600">
+                <Check ok={it.validation_passed} label={it.system_failure ? "validate (env)" : "validate"} />
+                {(it.checks_run ?? []).includes("policy") ? (
+                  <>
+                    <span>
+                      {it.plan_changes === null ? "plan not run" : `plan: ${it.plan_changes} change${it.plan_changes === 1 ? "" : "s"}`}
+                    </span>
+                    {it.drift_findings > 0 && <span className="text-amber-700">{it.drift_findings} drift</span>}
+                    <span className={it.high_findings > 0 ? "text-amber-700" : ""}>
+                      {it.high_findings} high/critical reported
+                    </span>
+                  </>
+                ) : (
+                  <span className="text-slate-400">later checks wait for validate</span>
+                )}
+              </div>
+              <span className={`flex items-center gap-1 font-semibold shrink-0 ${style.cls}`}>
+                <OutcomeIcon className="w-3 h-3" />
+                {style.text}
               </span>
-              <span>
-                {it.plan_changes === null ? "plan skipped" : `plan: ${it.plan_changes} change${it.plan_changes === 1 ? "" : "s"}`}
-              </span>
-              {it.drift_findings > 0 && <span className="text-amber-700">{it.drift_findings} drift</span>}
             </div>
-            <span className={`flex items-center gap-1 font-semibold shrink-0 ${outcome.cls}`}>
-              <OutcomeIcon className="w-3 h-3" />
-              {outcome.text}
-            </span>
+            {(it.incomplete_reasons ?? []).length > 0 && (
+              <div className="px-3 pb-2 -mt-1 text-amber-800">Not verified: {it.incomplete_reasons.join("; ")}</div>
+            )}
+            {repair && (
+              <div className="mx-3 mb-2 px-2.5 py-1.5 rounded-lg bg-violet-50 border border-violet-100 text-violet-900 flex flex-wrap gap-x-3 gap-y-0.5">
+                <span className="font-semibold">Repair {repair.cycle}</span>
+                <span>
+                  fixed {repair.fixed.length}
+                  {repair.fixed.length ? `: ${repair.fixed.slice(0, 2).join(", ")}` : ""}
+                </span>
+                {repair.rejected.length > 0 && (
+                  <span
+                    className="text-rose-700"
+                    title={repair.rejected.map((r) => `${r.address}: ${r.violations.join(", ")}`).join("; ")}
+                  >
+                    {repair.rejected.length} rejected by invariant checks
+                  </span>
+                )}
+                {repair.unresolved.length > 0 && <span className="text-slate-500">{repair.unresolved.length} unresolved</span>}
+              </div>
+            )}
           </li>
         );
       })}

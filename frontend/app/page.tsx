@@ -110,7 +110,7 @@ export default function HomePage() {
     <div className="space-y-6">
       <PageHeader
         title="Dashboard"
-        description="Read-only AWS discovery, four agents with a self-correcting verify/repair loop. Nothing in your AWS account is ever changed."
+        description="Read-only AWS discovery, four agents with a self-correcting generate/verify loop. Nothing in your AWS account is ever changed."
         actions={
           <>
             <button onClick={refresh} className="btn-secondary px-3" title="Refresh" aria-label="Refresh">

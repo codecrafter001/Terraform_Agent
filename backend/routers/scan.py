@@ -25,7 +25,7 @@ router = APIRouter(prefix="/scan", tags=["scan"], dependencies=[Depends(require_
 # existed; keep both in sync with the graph rather than repeating this list).
 # Must match agents/graph.py::ALL_STAGES (not imported, to keep LangGraph out
 # of API startup).
-ALL_STAGES = ("discovery", "composer", "verifier", "repair", "package")
+ALL_STAGES = ("infrastructure", "iac_engineering", "verification", "delivery")
 
 _FULL_AGENT_PIPELINE = (
     "intent_router", "cloud_discovery", "graph_agent", "classification_agent",
@@ -188,6 +188,8 @@ async def get_scan_status(job_id: str):
         verification_iterations=state.get("verification_iterations", []) or [],
         repair_attempts=state.get("repair_attempts", 0) or 0,
         max_repair_iterations=state.get("max_repair_iterations"),
+        verification_verdict=state.get("verification_verdict") or None,
+        repair_history=state.get("repair_history", []) or [],
         migration_confidence=state.get("migration_confidence"),
         created_at=state.get("created_at", datetime.utcnow().isoformat()),
         error=state.get("error")
@@ -320,7 +322,7 @@ async def _resume_after_decision(job_id: str, state: Dict[str, Any], approved: b
     immediately - cost_agent/documentation_agent can take real time (Infracost
     subprocess, an LLM call, ZIP packaging)."""
     from agents.documentation_agent import documentation_agent_node
-    from agents.graph import _timed, package_outputs
+    from agents.graph import _timed, delivery_agent
     from routers.metrics import record_job_outcome
 
     # _timed wraps each node the exact same way build_graph() does for every
@@ -359,10 +361,10 @@ async def _resume_after_decision(job_id: str, state: Dict[str, Any], approved: b
                 job_id, "[AGENT:system] Human approval received - resuming pipeline.", agent_name="system"
             )
 
-            # The same output step the graph runs on an unblocked job: cost
-            # estimate + documentation + ZIP, each step _timed.
-            state["current_stage"] = "package"
-            result = await package_outputs(state)
+            # The Delivery & Approval Agent again - with approval_decision now
+            # set, its risk gate lets the job through to cost + docs + bundle.
+            state["current_stage"] = "delivery"
+            result = await delivery_agent(state)
             state = {**state, **result}  # documentation sets status back to COMPLETE
         else:
             state["status"] = "REJECTED"

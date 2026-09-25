@@ -54,7 +54,7 @@ replace/destroy (that's the planned `drift_reconciliation_agent`'s job), what de
 - **Agent Orchestration**: LangGraph (StateGraph), LangChain
 - **Asynchronous Task Queue**: Celery + Redis 7 (broker & result backend) + Redis Pub/Sub for SSE live logs
 - **Local LLM**: Ollama (`codellama`, `llama3`) running locally / containerized
-- **Security & Validation Pipeline**: Terraform CLI (`fmt`, `init`, `validate`), `tfsec`, `Checkov`, `Trivy`, `Conftest` (OPA policies)
+- **Security & Validation Pipeline**: Terraform CLI (`fmt`, `init`, `validate`), `Checkov`, `Trivy` (includes the former tfsec rules), `Conftest` (OPA policies)
 - **Containerization & Ingress**: Docker, Docker Compose, Nginx Reverse Proxy
 
 ---
@@ -62,41 +62,55 @@ replace/destroy (that's the planned `drift_reconciliation_agent`'s job), what de
 ## 4-Agent LangGraph Architecture (`backend/agents/graph.py`)
 
 Rule: something is an **agent** only if it's a stage the UI presents as a unit of reasoning; the
-per-concern node functions it runs are **steps** (mostly deterministic tool calls - only
-`terraform_composer` and `repair_agent` ask an LLM to decide anything). Each step module stays
-individually unit-tested; the graph only wires stages.
+per-concern node functions it runs are **steps** (mostly deterministic tool calls). Each step
+module stays individually unit-tested; the graph only wires agents.
 
 ```
-discovery -> composer -> verifier <-> repair
-                            |-> package -> END        (output step, not an agent)
-                            |-> END (AWAITING_APPROVAL halt)
+infrastructure -> iac_engineering -> verification --PASS / INCOMPLETE / NEEDS_APPROVAL--> delivery -> END
+                        ^                  |
+                        +------ FAIL ------+   (validation errors only, max N repair cycles)
 ```
 
-1. **Discovery Agent** - steps: `intent_router`, `resource_explorer`, `cloud_discovery` (boto3, read-only), `graph_agent`, `classification_agent`.
+1. **Infrastructure Agent** - steps: `intent_router`, `resource_explorer`, `cloud_discovery` (boto3, read-only), `graph_agent`, `classification_agent`.
    `resource_explorer` (`tools/resource_explorer.py`) queries AWS Resource Explorer for an all-region
    inventory using only `ListIndexes` + `Search` (`READ_ONLY_OPERATIONS`, enforced by tests). It never
    creates/changes indexes or views - if Resource Explorer isn't turned on it reports why and discovery
    carries on. `region="auto"` resolves to the region with the most supported resources; an explicit
-   region is never overridden, only warned about. Resource Explorer returns type/region/ARN/tags only,
-   so `cloud_discovery` still does the detailed `Describe*` reads (single region).
-2. **Composer Agent** - steps: `adoption_planning_agent`, `terraform_composer` (Ollama HCL synthesis).
-3. **Verifier Agent** - steps: `validation_agent`, `drift_reconciliation_agent`, `plan_equivalence_agent`, `policy_agent`. Stops its pass the moment a step sets `pending_approval`. Records one `verification_iterations` entry per pass.
-4. **Repair Agent** - step: `repair_agent` (LLM fixes for `safe_auto` findings only; anything else escalates to `pending_approval`).
-- **package** (output step) - `cost_agent`, `documentation_agent`. Also what `POST /scan/{id}/approve` resumes.
+   region is never overridden, only warned about.
+2. **IaC Engineering Agent** - first visit: `adoption_planning_agent`, `terraform_composer`. When the
+   verifier returns FAIL: `repair_agent` step = `agents/validation_repair.py`, which fixes only blocks
+   that fail `terraform validate`/`init` (mapped via `tools/validation_diagnostics.py`) with the
+   value-preserving `prompts/repair_validation.txt`. **Every fix must pass
+   `tools/hcl_invariants.py::check_repair_invariants`** (no resources removed, no `ignore_changes`, no
+   scanner suppressions, no `external` data sources or provisioners, no literal secrets) or it is
+   rejected and the block left as it was.
+3. **Verification & Risk Agent** - judges, **never edits**. `validation_agent` first; if it fails the
+   pass stops there (verdict FAIL). Otherwise `drift_reconciliation_agent`, `plan_equivalence_agent`,
+   `policy_agent` (Checkov, Trivy, Conftest - tfsec dropped, its rules live in Trivy). Security findings
+   are **reported, never auto-fixed** in adoption code. **Fails closed**: a crash, timeout, missing tool,
+   or unparseable output (runner `tool_error` -> `security_results.scanners_failed`), a `system`
+   validation check, or a plan-equivalence init failure makes the verdict INCOMPLETE, never PASS.
+   Verdicts: PASS | FAIL | INCOMPLETE | NEEDS_APPROVAL, one `verification_iterations` entry per pass.
+4. **Delivery & Approval Agent** - risk gate first: `pending_approval` without an approved
+   `approval_decision` pauses at `AWAITING_APPROVAL` (`POST /scan/{id}/approve` re-runs this agent with
+   the decision set). Then `cost_agent`, `documentation_agent`. Its summary states whether the bundle was
+   verified.
 
-Loop routing (`route_after_verify` / `route_after_repair`): `pending_approval` -> halt; a `system`
-validation check (environment failure) -> package, never repair; validation failed or any
-critical/high finding -> repair while `repair_attempts < max_repair_iterations`
-(env `TERRAAGENT_MAX_REPAIR_ITERATIONS`, default 2); otherwise package. Every repair is re-verified.
+The old security-driven `agents/repair_agent.py::repair_agent_node` is no longer in the graph - kept
+for the planned separate hardening PR. Routing: `route_after_verification` (FAIL and
+`repair_attempts < max_repair_iterations` -> iac_engineering; everything else -> delivery;
+env `TERRAAGENT_MAX_REPAIR_ITERATIONS`, default 2).
 
 Progress fields for the UI: `current_stage`, `completed_stages`, `stage_summaries`,
-`verification_iterations`, `max_repair_iterations` (exposed by `GET /scan/{id}/status`). The
-step-level `current_agent`/`completed_agents`/`agent_timings` are kept for metrics.
+`verification_iterations`, `verification_verdict`, `repair_history`, `max_repair_iterations` (exposed
+by `GET /scan/{id}/status`). Step-level `current_agent`/`completed_agents`/`agent_timings` are kept for
+metrics.
 
 Live logs: `redis_service.publish_log` stores a per-job, sequence-numbered history
-(`job:{id}:loghist`) alongside pub/sub; `GET /scan/{id}/logs` replays it on connect, so late or
-reconnecting clients see the whole run. Slow steps emit a heartbeat line every
-`TERRAAGENT_HEARTBEAT_SECONDS` (default 15).
+(`job:{id}:loghist`) alongside pub/sub; `GET /scan/{id}/logs` replays it on connect. Slow steps emit a
+heartbeat line every `TERRAAGENT_HEARTBEAT_SECONDS` (default 15). Every terraform/tofu command has a
+`TERRAAGENT_TF_COMMAND_TIMEOUT` (default 600s) and every scanner a `TERRAAGENT_SCANNER_TIMEOUT`
+(default 300s).
 
 ---
 
