@@ -84,7 +84,8 @@ class TerraAgentState(TypedDict):
     intent: dict
     resource_inventory: dict  # Resource Explorer inventory (tools/resource_explorer.py), or {available: False, reason}
     resources: List[dict]
-    classification_results: dict  # ClassificationReport-shaped: managed/unmanaged/shared/orphaned/unsupported
+    classification_results: dict  # ClassificationReport-shaped: decision + category per resource
+    infra_model: dict  # Canonical Infra Model (tools/infra_model.py) - one record per resource
     dependency_graph: dict
     adoption_plan: dict  # AdoptionPlan-shaped: safe_to_import/review_required/do_not_manage/use_data_source/unsupported
     terraform_files: dict
@@ -150,6 +151,7 @@ def build_initial_state(job_id: str, request: Dict[str, Any]) -> Dict[str, Any]:
         "resource_inventory": {},
         "resources": [],
         "classification_results": {},
+        "infra_model": {},
         "dependency_graph": {},
         "adoption_plan": {},
         "terraform_files": {},
@@ -337,11 +339,14 @@ async def infrastructure_agent(state: Dict[str, Any]) -> Dict[str, Any]:
     ])
 
     resources = acc.get("resources", []) or []
-    cls = (acc.get("classification_results", {}) or {}).get("summary", {}) or {}
+    decided = (acc.get("classification_results", {}) or {}).get("decisions", {}) or {}
     edges = (acc.get("dependency_graph", {}) or {}).get("edge_count", 0) or 0
     summary = f"Found {_plural(len(resources), 'resource')}"
-    if cls:
-        summary += f": {cls.get('unmanaged', 0)} unmanaged, {cls.get('managed', 0)} managed, {cls.get('shared', 0)} shared"
+    if decided:
+        summary += (
+            f": {decided.get('manage', 0)} manage, {decided.get('reference', 0)} reference, "
+            f"{decided.get('exclude', 0)} exclude, {decided.get('review', 0)} review"
+        )
     summary += f" · {_plural(edges, 'dependency')} · region {acc.get('region')}"
     inv = acc.get("resource_inventory", {}) or {}
     if inv.get("available"):

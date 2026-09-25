@@ -56,10 +56,15 @@ def test_classify_normal_managed_resource_by_tag():
     report: ClassificationReport = classify_resources(resources, graph)
 
     assert report.summary["managed"] == 3
+    by_id = {c.resource_id: c for c in report.classifications}
     for c in report.classifications:
         assert c.category == "managed"
-        assert c.recommended_action == "skip"
         assert any("already managed" in r for r in c.reason)
+    # Owned by Terraform elsewhere -> Reference (data block); by CloudFormation -> Exclude.
+    for rid in ("vpc-managed-1", "s3-managed-1"):
+        assert by_id[rid].decision == "reference" and by_id[rid].recommended_action == "data_source"
+    assert by_id["subnet-managed-1"].decision == "exclude"
+    assert by_id["subnet-managed-1"].recommended_action == "skip"
 
 
 def test_classify_normal_managed_resource_by_explicit_flag():
@@ -76,7 +81,8 @@ def test_classify_normal_managed_resource_by_explicit_flag():
     report = classify_resources(resources, graph)
     assert report.summary["managed"] == 1
     assert report.classifications[0].category == "managed"
-    assert report.classifications[0].recommended_action == "skip"
+    assert report.classifications[0].decision == "reference"
+    assert report.classifications[0].recommended_action == "data_source"
 
 
 def test_classify_unmanaged_resource_with_dependencies():
@@ -125,9 +131,11 @@ def test_classify_shared_default_security_group():
 
     report = classify_resources(resources, graph)
 
+    # An AWS default nothing depends on is Excluded - not in code, listed in the report.
     assert report.summary["shared"] == 1
     assert report.classifications[0].category == "shared"
-    assert report.classifications[0].recommended_action == "data_source"
+    assert report.classifications[0].decision == "exclude"
+    assert report.classifications[0].recommended_action == "skip"
 
 
 def test_classify_shared_default_vpc():
@@ -146,7 +154,40 @@ def test_classify_shared_default_vpc():
 
     assert report.summary["shared"] == 1
     assert report.classifications[0].category == "shared"
-    assert report.classifications[0].recommended_action == "data_source"
+    assert report.classifications[0].decision == "exclude"
+
+
+def test_classify_default_vpc_that_managed_resources_depend_on_is_referenced():
+    resources = [
+        {"id": "vpc-default-1", "resource_type": "aws_vpc", "is_default": True, "cidr_block": "172.31.0.0/16", "tags": []},
+        {"id": "subnet-app-1", "resource_type": "aws_subnet", "vpc_id": "vpc-default-1", "tags": []},
+    ]
+    graph = {
+        "nodes": [{"id": "vpc-default-1"}, {"id": "subnet-app-1"}],
+        "links": [{"source": "vpc-default-1", "target": "subnet-app-1"}],
+    }
+
+    report = classify_resources(resources, graph)
+    by_id = {c.resource_id: c for c in report.classifications}
+
+    assert by_id["vpc-default-1"].decision == "reference"
+    assert by_id["vpc-default-1"].recommended_action == "data_source"
+    assert by_id["subnet-app-1"].decision == "manage"
+    assert report.decisions == {"manage": 1, "reference": 1, "exclude": 0, "review": 0}
+
+
+def test_classify_iam_role_goes_to_review_by_default():
+    resources = [
+        {"id": "role-app-1", "resource_type": "aws_iam_role", "name": "app-role", "tags": []},
+        {"id": "i-1", "resource_type": "aws_instance", "tags": []},
+    ]
+    graph = {"nodes": [{"id": "role-app-1"}, {"id": "i-1"}], "links": [{"source": "role-app-1", "target": "i-1"}]}
+
+    report = classify_resources(resources, graph)
+    role = next(c for c in report.classifications if c.resource_id == "role-app-1")
+
+    assert role.decision == "review" and role.recommended_action == "manual_review"
+    assert role.evidence["rule"] == "iam_requires_review"
 
 
 def test_classify_shared_service_linked_iam_role():
@@ -258,7 +299,8 @@ def test_classify_unsupported_resource_type():
     assert report.summary["unsupported"] == 2
     for c in report.classifications:
         assert c.category == "unsupported"
-        assert c.recommended_action == "manual_review"
+        # Known type we can't generate yet: Excluded from code, listed in the report.
+        assert c.decision == "exclude" and c.recommended_action == "skip"
         assert any("no adoption support yet" in r for r in c.reason)
 
 

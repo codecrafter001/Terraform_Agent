@@ -40,6 +40,7 @@ class JobResults(BaseModel):
     dependency_graph: Dict[str, Any] = {}
     adoption_plan: Dict[str, Any] = {}
     resource_inventory: Dict[str, Any] = {}
+    infra_model: Dict[str, Any] = {}
     requested_region: Optional[str] = None
     generation_manifest: Optional[Dict[str, Any]] = None
     validation_results: Dict[str, Any] = {}

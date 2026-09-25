@@ -2,22 +2,44 @@
 plan-equivalence results.
 """
 
-from typing import Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
+
+
+# The adoption decision for one resource (the Week 3 plan's four outcomes):
+#   manage    - bring under this Terraform: resource + import block
+#   reference - exists but owned elsewhere: data block
+#   exclude   - AWS defaults, service-linked roles, CloudFormation-managed,
+#               unsupported types: not in code, listed in the report
+#   review    - unclear ownership: waits for a human decision
+Decision = Literal["manage", "reference", "exclude", "review"]
+
+DECISION_TO_ACTION: Dict[str, str] = {
+    "manage": "import",
+    "reference": "data_source",
+    "exclude": "skip",
+    "review": "manual_review",
+}
 
 
 class ResourceClassification(BaseModel):
     resource_id: str
     resource_type: str
+    # Why - the signal that produced the decision.
     category: Literal["managed", "unmanaged", "drifted", "orphaned", "shared", "unsupported"]
     reason: List[str]
     recommended_action: Literal["import", "data_source", "skip", "manual_review"]
+    decision: Decision = "manage"
+    # Which rule fired and on what input - tags are treated as untrusted text
+    # and only ever matched against fixed keys, never interpreted.
+    evidence: Dict[str, Any] = Field(default_factory=dict)
 
 
 class ClassificationReport(BaseModel):
     classifications: List[ResourceClassification]
     summary: Dict[str, int]  # category -> count
+    decisions: Dict[str, int] = Field(default_factory=dict)  # decision -> count
 
 
 class AdoptionCategoryPlan(BaseModel):

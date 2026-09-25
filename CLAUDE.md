@@ -77,6 +77,18 @@ infrastructure -> iac_engineering -> verification --PASS / INCOMPLETE / NEEDS_AP
    creates/changes indexes or views - if Resource Explorer isn't turned on it reports why and discovery
    carries on. `region="auto"` resolves to the region with the most supported resources; an explicit
    region is never overridden, only warned about.
+   `classification_agent` (`tools/resource_classifier.py`) gives every resource a **decision**, rules
+   first, no LLM: **manage** (resource + import block), **reference** (owned elsewhere - Terraform-tagged,
+   shared marker, or an AWS default something depends on: data block), **exclude** (CloudFormation-managed,
+   service-linked roles, unreferenced AWS defaults, unsupported types: not in code, in the report),
+   **review** (IAM roles unless `TERRAAGENT_MANAGE_IAM=true`, orphaned in the graph, malformed data).
+   Tags are untrusted text - only ever matched against fixed keys. The planner maps decisions onto the
+   composer's P2 categories (manage->safe_to_import, reference->use_data_source, exclude->do_not_manage
+   or unsupported, review->review_required).
+   Output: the **Canonical Infra Model** (`tools/infra_model.py`, state `infra_model`, `infra_model.json`
+   in the bundle) - one record per resource: type, ARN, import ID (fixed `IMPORT_ID_FIELDS` lookup, never
+   an LLM), region, attributes, dependencies, stack, decision, reasons, evidence (source API, discovery
+   time, rule).
 2. **IaC Engineering Agent** - first visit: `adoption_planning_agent`, `terraform_composer`. When the
    verifier returns FAIL: `repair_agent` step = `agents/validation_repair.py`, which fixes only blocks
    that fail `terraform validate`/`init` (mapped via `tools/validation_diagnostics.py`) with the

@@ -447,6 +447,7 @@ Verify that Terraform reports: `No changes. Your infrastructure matches the conf
 - `terraform/`: Modular Terraform configuration (`{'`, `'.join(sorted(tf_files.keys()))}`).
 - `inventory.json` / `inventory.csv`: Complete raw metadata of all discovered cloud assets.
 - `dependency_graph.json`: Full topological relationship DAG.
+- `infra_model.json`: Canonical Infra Model - one record per resource with import ID, dependencies, stack, adoption decision (manage / reference / exclude / review) and evidence.
 - `dependency_graph.html`: Standalone interactive D3 visualization - open directly in a browser, no server needed.
 - `reports/`: Granular validation, static security analysis, Infracost cost, and pending-approval reports.
 - `migration/import_plan.md`: The raw, ordered `terraform import` commands.
@@ -491,6 +492,7 @@ Verify that Terraform reports: `No changes. Your infrastructure matches the conf
         drift_results=drift_res,
         generation_manifest=state.get("generation_manifest"),
         migration_confidence=confidence_data,
+        infra_model=state.get("infra_model"),
         docs=docs,
         output_dir=output_dir,
         password=state.get("zip_password")

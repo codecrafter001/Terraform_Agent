@@ -257,6 +257,7 @@ async def get_scan_results(job_id: str):
         dependency_graph=state.get("dependency_graph", {}),
         adoption_plan=state.get("adoption_plan", {}),
         resource_inventory=state.get("resource_inventory") or {},
+        infra_model=state.get("infra_model") or {},
         requested_region=state.get("requested_region"),
         generation_manifest=state.get("generation_manifest"),
         validation_results=state.get("validation_results", {}),

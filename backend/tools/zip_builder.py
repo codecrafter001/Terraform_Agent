@@ -148,6 +148,7 @@ class ZipBuilder:
         drift_results: Optional[Dict[str, Any]] = None,
         generation_manifest: Optional[Dict[str, Any]] = None,
         migration_confidence: Optional[Dict[str, Any]] = None,
+        infra_model: Optional[Dict[str, Any]] = None,
         docs: Optional[Dict[str, str]] = None,
         output_dir: Optional[str] = None,
         password: Optional[str] = None
@@ -193,6 +194,8 @@ class ZipBuilder:
             zf.writestr("reports/cost_report.json", json.dumps(cost_results or {}, indent=2, default=str))
             zf.writestr("reports/pending_approval.json", json.dumps(pending_approval or {}, indent=2, default=str))
             zf.writestr("reports/drift_results.json", json.dumps(drift_results or {}, indent=2, default=str))
+            if infra_model:
+                zf.writestr("infra_model.json", json.dumps(infra_model, indent=2, default=str))
             if generation_manifest:
                 zf.writestr("reports/generation_manifest.json", json.dumps(generation_manifest, indent=2, default=str))
             if migration_confidence:

@@ -2,6 +2,7 @@ import { fetchJobResults } from "@/lib/api";
 import { demoJobResults } from "@/lib/demo";
 import CreatePullRequestAction from "@/components/CreatePullRequestAction";
 import DependencyGraph from "@/components/DependencyGraph";
+import DecisionsPanel from "@/components/DecisionsPanel";
 import InventoryPanel from "@/components/InventoryPanel";
 import ResultsApprovalSection from "@/components/ResultsApprovalSection";
 import ResultsTabs from "@/components/ResultsTabs";
@@ -190,12 +191,17 @@ export default async function JobResultsPage({ params }: ResultsPageProps) {
       id: "overview",
       label: "Overview",
       icon: <LayoutGrid className="w-3.5 h-3.5" />,
-      content: results.adoption_plan ? (
-        <AdoptionPlanCard results={results} plan={results.adoption_plan} />
-      ) : (
-        <div className="card p-10 text-center text-xs text-slate-500">
-          No adoption plan was produced for this job ({results.operation} mode).
-        </div>
+      content: (
+        <>
+          <DecisionsPanel model={results.infra_model} />
+          {results.adoption_plan ? (
+            <AdoptionPlanCard results={results} plan={results.adoption_plan} />
+          ) : (
+            <div className="card p-10 text-center text-xs text-slate-500">
+              No adoption plan was produced for this job ({results.operation} mode).
+            </div>
+          )}
+        </>
       ),
     },
     {

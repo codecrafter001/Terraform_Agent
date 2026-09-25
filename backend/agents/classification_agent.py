@@ -14,6 +14,7 @@ cloud_discovery -> graph_agent -> classification_agent -> adoption_planning_agen
 from typing import Any, Dict
 
 from services.redis_client import redis_service
+from tools.infra_model import build_infra_model
 from tools.resource_classifier import classify_resources
 
 
@@ -40,15 +41,21 @@ async def classification_agent_node(state: Dict[str, Any]) -> Dict[str, Any]:
 
     await redis_service.publish_log(
         job_id,
-        f"[AGENT:classification_agent] Classification complete: {report.summary}",
+        f"[AGENT:classification_agent] Decisions: {report.decisions.get('manage', 0)} manage, "
+        f"{report.decisions.get('reference', 0)} reference, {report.decisions.get('exclude', 0)} exclude, "
+        f"{report.decisions.get('review', 0)} review.",
         agent_name="classification_agent"
     )
 
     completed_agents = list(state.get("completed_agents", []))
     completed_agents.append("classification_agent")
 
+    classification = report.model_dump()
+    infra_model = build_infra_model(resources, dependency_graph, classification, state.get("region", "us-east-1"))
+
     return {
-        "classification_results": report.model_dump(),
+        "classification_results": classification,
+        "infra_model": infra_model,
         "completed_agents": completed_agents,
         "current_agent": "adoption_planning_agent",
         "progress_percentage": 50

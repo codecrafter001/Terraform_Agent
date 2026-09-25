@@ -234,6 +234,7 @@ export interface JobResults {
   dependency_graph: DependencyGraphData;
   adoption_plan?: AdoptionPlan;
   resource_inventory?: ResourceInventory;
+  infra_model?: InfraModel;
   requested_region?: string | null;
   validation_results: ValidationReportData;
   plan_equivalence_results?: PlanEquivalenceResult;
@@ -246,6 +247,32 @@ export interface JobResults {
   download_url?: string;
   zip_sha256?: string;
   zip_manifest: ZipManifestEntry[];
+}
+
+// Canonical Infra Model - backend/tools/infra_model.py
+export type AdoptionDecision = 'manage' | 'reference' | 'exclude' | 'review';
+
+export interface InfraRecord {
+  id: string;
+  type: string;
+  name?: string | null;
+  arn?: string | null;
+  import_id?: string | null;
+  region: string;
+  dependencies: string[];
+  stack?: string | null;
+  decision: AdoptionDecision;
+  category?: string | null;
+  reasons: string[];
+  evidence: { source_api?: string | null; discovered_at?: string; rule?: string };
+}
+
+export interface InfraModel {
+  version: number;
+  region: string;
+  generated_at: string;
+  summary: { total: number } & Record<AdoptionDecision, number>;
+  records: InfraRecord[];
 }
 
 // AWS Resource Explorer inventory - backend/tools/resource_explorer.py

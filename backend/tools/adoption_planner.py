@@ -28,6 +28,10 @@ _ACTION_TO_CATEGORY: Dict[str, PlanCategory] = {
 
 
 def _category_for(classification: Dict[str, Any]) -> PlanCategory:
+    # Unsupported types are Excluded, but keep their own plan category so the
+    # report counts them separately from AWS defaults / other-IaC resources.
+    if classification.get("category") == "unsupported" and classification.get("decision") == "exclude":
+        return "unsupported"
     action = classification.get("recommended_action")
     if action == "manual_review":
         return "unsupported" if classification.get("category") == "unsupported" else "review_required"

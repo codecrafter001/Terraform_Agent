@@ -1,7 +1,8 @@
 """Deterministic resource classification - no LLM, no new external calls.
 
-Classifies every discovered resource as managed / unmanaged / drifted /
-orphaned / shared / unsupported, per the decision-tree design in
+Rules first: every resource gets an adoption decision - manage / reference /
+exclude / review - plus the category that explains it (managed / unmanaged /
+orphaned / shared / unsupported), per the decision-tree design in
 docs/design/cloud-inventory-and-adoption-planning.md. This is the agent
 that makes the eventual Adoption Plan (and the composer's skip/data-source
 branches) possible - everything here only reads fields already present in
@@ -9,9 +10,14 @@ discovered resource dicts (tools/aws_scanner.py) and the dependency graph
 (tools/graph_builder.py); it adds no new AWS API calls.
 """
 
-from typing import Any, Dict, List, Tuple
+import os
+from typing import Any, Dict, List, Optional, Tuple
 
-from models.adoption import ClassificationReport, ResourceClassification
+from models.adoption import DECISION_TO_ACTION, ClassificationReport, ResourceClassification
+
+# IAM is high-risk to adopt: by default a (non service-linked, non shared) IAM
+# role is sent to Review rather than managed. Set to "true" to manage them.
+MANAGE_IAM = os.getenv("TERRAAGENT_MANAGE_IAM", "false").strip().lower() in ("1", "true", "yes")
 
 # Exactly the 8 resource types AWSScanner (tools/aws_scanner.py) discovers today.
 # Kept as an explicit whitelist rather than an implicit "not vpc/subnet/..." check
@@ -21,6 +27,27 @@ DISCOVERY_RESOURCE_TYPES = {
     "aws_vpc", "aws_subnet", "aws_route_table", "aws_security_group",
     "aws_instance", "aws_s3_bucket", "aws_db_instance", "aws_iam_role",
 }
+
+
+def _iac_owner(resource: Dict[str, Any]) -> Optional[str]:
+    """"cloudformation" / "terraform" if another IaC tool already owns this
+    resource (detected from fixed tag keys or explicit metadata), else None."""
+    if not isinstance(resource, dict):
+        return None
+    tags = resource.get("tags") or []
+    pairs: List[Tuple[str, str]] = []
+    if isinstance(tags, list):
+        pairs = [
+            (str(t.get("Key") or t.get("key") or "").strip().lower(), str(t.get("Value") or t.get("value") or ""))
+            for t in tags if isinstance(t, dict)
+        ]
+    elif isinstance(tags, dict):
+        pairs = [(str(k).strip().lower(), str(v)) for k, v in tags.items()]
+    if any(k in ("aws:cloudformation:stack-name", "aws:cloudformation:stack-id") for k, _ in pairs):
+        return "cloudformation"
+    if _is_managed_by_terraform(resource):
+        return "terraform"
+    return None
 
 
 def _is_managed_by_terraform(resource: Dict[str, Any]) -> bool:
@@ -133,12 +160,15 @@ def _build_trusted_services_map(dependency_graph: Dict[str, Any]) -> Dict[str, L
 
 
 def classify_resources(resources: List[Dict[str, Any]], dependency_graph: Dict[str, Any]) -> ClassificationReport:
-    """Classifies every resource into one of:
-    - managed: already managed by Terraform/IaC (skip generation)
-    - shared: AWS default/service-linked or shared resource (data_source or skip)
-    - orphaned: no incoming/outgoing dependency links in graph (manual_review)
-    - unsupported: unknown resource type or malformed data (manual_review)
-    - unmanaged: newly discovered active resource to be imported (import)
+    """Gives every resource a decision (manage / reference / exclude / review)
+    and the category behind it:
+    - unsupported type -> exclude (malformed data -> review)
+    - CloudFormation-managed -> exclude; Terraform-managed elsewhere -> reference
+    - service-linked role -> exclude; AWS default VPC/SG -> reference if something
+      depends on it, else exclude; shared marker -> reference
+    - IAM role -> review (unless TERRAAGENT_MANAGE_IAM)
+    - orphaned in the dependency graph -> review
+    - otherwise unmanaged -> manage
     """
     degree = _build_degree_map(dependency_graph) if dependency_graph else {}
     trusted_services = _build_trusted_services_map(dependency_graph) if dependency_graph else {}
@@ -152,8 +182,10 @@ def classify_resources(resources: List[Dict[str, Any]], dependency_graph: Dict[s
         "unsupported": 0,
     }
 
+    decisions: Dict[str, int] = {"manage": 0, "reference": 0, "exclude": 0, "review": 0}
+
     if not isinstance(resources, list):
-        return ClassificationReport(classifications=[], summary=summary)
+        return ClassificationReport(classifications=[], summary=summary, decisions=decisions)
 
     for idx, res in enumerate(resources):
         if not isinstance(res, dict):
@@ -162,9 +194,12 @@ def classify_resources(resources: List[Dict[str, Any]], dependency_graph: Dict[s
                 resource_type="unknown",
                 category="unsupported",
                 reason=["malformed discovery data: resource is not a dictionary"],
-                recommended_action="manual_review"
+                recommended_action="manual_review",
+                decision="review",
+                evidence={"rule": "malformed"},
             ))
             summary["unsupported"] += 1
+            decisions["review"] += 1
             continue
 
         r_id = res.get("id")
@@ -177,34 +212,64 @@ def classify_resources(resources: List[Dict[str, Any]], dependency_graph: Dict[s
                 resource_type=str(r_type or "unknown"),
                 category="unsupported",
                 reason=["malformed discovery data: missing resource id"],
-                recommended_action="manual_review"
+                recommended_action="manual_review",
+                decision="review",
+                evidence={"rule": "malformed"},
             ))
             summary["unsupported"] += 1
+            decisions["review"] += 1
             continue
 
         r_id = str(r_id)
         reasons: List[str] = []
-        category = None
-        action = None
+        category: Optional[str] = None
+        decision: Optional[str] = None
+        evidence: Dict[str, Any] = {}
 
-        # 1. Unsupported check: missing or unsupported resource type
-        if not r_type or r_type not in DISCOVERY_RESOURCE_TYPES:
-            category, action = "unsupported", "manual_review"
-            reasons.append(f"resource type '{r_type or 'unknown'}' has no adoption support yet")
+        # 1. No type at all is malformed data (Review); a known type we can't
+        #    generate yet is Excluded and listed in the report.
+        if not r_type:
+            category, decision = "unsupported", "review"
+            reasons.append("resource type 'unknown' has no adoption support yet (malformed discovery data)")
+            evidence = {"rule": "malformed"}
+        elif r_type not in DISCOVERY_RESOURCE_TYPES:
+            category, decision = "unsupported", "exclude"
+            reasons.append(f"resource type '{r_type}' has no adoption support yet")
+            evidence = {"rule": "unsupported_type"}
 
-        # 2. Managed check: already managed by Terraform/IaC
-        elif _is_managed_by_terraform(res):
-            category, action = "managed", "skip"
-            reasons.append("resource is already managed by Terraform/IaC (detected via tag/metadata)")
+        # 2. Already owned by another IaC tool.
+        if category is None:
+            owner = _iac_owner(res)
+            if owner == "cloudformation":
+                category, decision = "managed", "exclude"
+                reasons.append("resource is already managed by a CloudFormation stack - adopting it would fight that stack")
+                evidence = {"rule": "cloudformation_tag"}
+            elif owner == "terraform":
+                category, decision = "managed", "reference"
+                reasons.append("resource is already managed by Terraform/IaC elsewhere (detected via tag/metadata) - "
+                               "referenced with a data block, not re-imported")
+                evidence = {"rule": "terraform_tag_or_flag"}
 
-        # 3. Shared check: default VPC, default SG, service-linked IAM role, or shared tag
-        else:
+        # 3. AWS defaults, service-linked roles, shared resources.
+        if category is None:
             is_shared, shared_action, shared_reason = _is_shared_resource(res)
             if is_shared:
-                category, action = "shared", shared_action
+                category = "shared"
                 reasons.append(shared_reason)
+                is_aws_default = shared_reason.startswith("AWS auto-creates") or shared_reason.startswith("AWS default")
+                if shared_action == "skip":
+                    decision = "exclude"
+                    evidence = {"rule": "service_linked_role"}
+                elif is_aws_default and r_id in degree and degree[r_id] == 0:
+                    # Nothing we manage depends on it - leave it out of the code entirely.
+                    decision = "exclude"
+                    reasons.append("no discovered resource depends on it, so it is left out of the code")
+                    evidence = {"rule": "aws_default_unreferenced"}
+                else:
+                    decision = "reference"
+                    evidence = {"rule": "aws_default_referenced" if is_aws_default else "shared_marker"}
 
-        # 4. Orphaned check: zero degree in dependency graph (or IAM role with unused trust policy)
+        # 4. Orphaned: nothing references it and it references nothing - unclear ownership.
         if category is None and r_id in degree and degree[r_id] == 0:
             services = trusted_services.get(r_id)
             if services:
@@ -213,20 +278,31 @@ def classify_resources(resources: List[Dict[str, Any]], dependency_graph: Dict[s
                 )
             else:
                 reasons.append("no other discovered resource references this one")
-            category, action = "orphaned", "manual_review"
+            category, decision = "orphaned", "review"
+            evidence = {"rule": "orphaned_in_graph"}
 
-        # 5. Default: Unmanaged newly discovered resource
+        # 5. IAM is high-risk in the MVP: Review unless explicitly enabled.
+        if category is None and r_type == "aws_iam_role" and not MANAGE_IAM:
+            category, decision = "unmanaged", "review"
+            reasons.append("IAM roles are high-risk to adopt - confirm ownership before managing (TERRAAGENT_MANAGE_IAM)")
+            evidence = {"rule": "iam_requires_review"}
+
+        # 6. Default: unmanaged, discovered, supported - Manage.
         if category is None:
-            category, action = "unmanaged", "import"
+            category, decision = "unmanaged", "manage"
             reasons.append("newly discovered resource with no prior Terraform state")
+            evidence = {"rule": "unmanaged_default"}
 
         classifications.append(ResourceClassification(
             resource_id=r_id,
             resource_type=str(r_type or "unknown"),
             category=category,
             reason=reasons,
-            recommended_action=action
+            recommended_action=DECISION_TO_ACTION[decision],
+            decision=decision,
+            evidence=evidence,
         ))
         summary[category] = summary.get(category, 0) + 1
+        decisions[decision] = decisions.get(decision, 0) + 1
 
-    return ClassificationReport(classifications=classifications, summary=summary)
+    return ClassificationReport(classifications=classifications, summary=summary, decisions=decisions)
