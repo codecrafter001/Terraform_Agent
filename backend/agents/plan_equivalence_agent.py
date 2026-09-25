@@ -1,19 +1,14 @@
 """Plan Equivalence Agent: runs a REAL `terraform init && plan && show -json`
 against the generated HCL (opt-in via run_plan_equivalence, off by default).
 
-IMPORTANT, verified empirically (a real `terraform plan` run against a fresh
-sandbox describing an already-existing S3 bucket, with no prior state file):
-every resource in a state-less sandbox plan shows up as `create`, NEVER
-`replace`/`destroy`/`update` - Terraform has no way to know a resource
-already exists in AWS without either a populated state file or a native
-`import {}` block binding the address to a real ID, and this codebase has
-neither (terraform_composer.py never emits import blocks, and CLAUDE.md's
-hard safety rule #2 forbids ever running `terraform import` automatically -
-even in a throwaway sandbox - so state can never be legitimately populated
-here). So the replace/destroy tallying below is kept for the day this
-codebase gains real import-block support, but it is NOT the thing that
-actually protects anyone today - treat it as defense-in-depth, not the
-primary signal.
+Since Week 4 the generator emits `imports.tf` (an `import {}` block per
+managed resource), so this plan is a real equivalence check: an imported
+resource that matches reality shows `no-op`, a mismatch shows `update` or
+`replace`, and TerraformRunner.plan_json counts `imported`. Planning with
+import blocks is read-only - nothing is imported or written to state unless
+someone applies, which TerraAgent never does (CLAUDE.md rule #2). Without
+import blocks (e.g. a resource with no derivable import ID) a resource still
+shows as `create`.
 
 The check that IS real and reachable today: a `plan` (or `show`) step that
 fails after `init` succeeds means the AWS provider itself rejected something

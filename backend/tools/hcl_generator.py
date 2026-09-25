@@ -22,6 +22,8 @@ import logging
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from models.manifest import GenerationManifest, UnresolvedAttribute
+from tools.import_blocks import IMPORTS_FILENAME, ImportEntry, compose_imports_tf
+from tools.infra_model import import_id_for
 from tools.naming import unique_clean_name
 
 logger = logging.getLogger("terraagent.hcl_generator")
@@ -115,6 +117,8 @@ class HCLGenerator:
             "storage_and_data": []
         }
 
+        import_entries: List[ImportEntry] = []
+
         manifest = GenerationManifest(
             job_id=self.job_id,
             engine=self.engine_name,
@@ -177,6 +181,16 @@ class HCLGenerator:
             if warnings:
                 manifest.warnings.extend(warnings)
 
+            import_id = import_id_for(res)
+            if not import_id:
+                # Can't bind it to the real resource - generating it anyway would
+                # make Terraform try to create a duplicate.
+                manifest.warnings.append(f"{r_type}.{clean_name}: no import ID could be derived - sent to review")
+                manifest.resources_review_required += 1
+                manifest.adoption_outcomes[r_id] = "review_required"
+                continue
+            import_entries.append(ImportEntry(r_id, f"{r_type}.{clean_name}", import_id))
+
             manifest.resources_generated += 1
             resource_blocks_by_stack.setdefault(stack_name, []).append(hcl_block)
             module_blocks[mod_category].append(hcl_block)
@@ -203,6 +217,12 @@ class HCLGenerator:
         all_outputs = [b for blocks in output_blocks_by_stack.values() for b in blocks]
         if all_outputs:
             files["outputs.tf"] = "\n\n".join(all_outputs)
+
+        # Import blocks bind each managed resource to the real AWS resource, in
+        # dependency-safe order. Root module only - that's where Terraform loads
+        # these resource blocks from.
+        if import_entries:
+            files[IMPORTS_FILENAME] = compose_imports_tf(import_entries, adoption_plan.get("import_order"))
 
         # 5. Generate Reusable Submodules tree
         self._compose_submodules(files, module_blocks, module_outputs)

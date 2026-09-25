@@ -688,6 +688,14 @@ function IterationTimeline({
                     <span>
                       {it.plan_changes === null ? "plan not run" : `plan: ${it.plan_changes} change${it.plan_changes === 1 ? "" : "s"}`}
                     </span>
+                    {it.imported != null && it.imported > 0 && <span>{it.imported} imported</span>}
+                    {it.config_mismatches != null && (
+                      <span className={it.config_mismatches > 0 ? "text-amber-700" : "text-emerald-700"}>
+                        {it.config_mismatches > 0
+                          ? `${it.config_mismatches} attribute mismatch${it.config_mismatches === 1 ? "" : "es"} vs live`
+                          : "attributes match live"}
+                      </span>
+                    )}
                     {it.drift_findings > 0 && <span className="text-amber-700">{it.drift_findings} drift</span>}
                     <span className={it.high_findings > 0 ? "text-amber-700" : ""}>
                       {it.high_findings} high/critical reported

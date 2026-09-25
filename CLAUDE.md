@@ -89,7 +89,12 @@ infrastructure -> iac_engineering -> verification --PASS / INCOMPLETE / NEEDS_AP
    in the bundle) - one record per resource: type, ARN, import ID (fixed `IMPORT_ID_FIELDS` lookup, never
    an LLM), region, attributes, dependencies, stack, decision, reasons, evidence (source API, discovery
    time, rule).
-2. **IaC Engineering Agent** - first visit: `adoption_planning_agent`, `terraform_composer`. When the
+2. **IaC Engineering Agent** - first visit: `adoption_planning_agent`, `terraform_composer`. The
+   generator writes `imports.tf`: an `import {}` block per managed resource (root-module addresses,
+   adoption-plan order), IDs from `IMPORT_ID_FIELDS` only (`tools/import_blocks.py`). A managed resource
+   with no derivable import ID goes to review instead of being generated. Import blocks are reviewable
+   text - they take effect only when someone applies in their own pipeline (rule #2); `plan` with them is
+   read-only. Per-wave GitHub PRs filter `imports.tf` to that wave's resources. When the
    verifier returns FAIL: `repair_agent` step = `agents/validation_repair.py`, which fixes only blocks
    that fail `terraform validate`/`init` (mapped via `tools/validation_diagnostics.py`) with the
    value-preserving `prompts/repair_validation.txt`. **Every fix must pass
@@ -98,6 +103,9 @@ infrastructure -> iac_engineering -> verification --PASS / INCOMPLETE / NEEDS_AP
    rejected and the block left as it was.
 3. **Verification & Risk Agent** - judges, **never edits**. `validation_agent` first; if it fails the
    pass stops there (verdict FAIL). Otherwise `drift_reconciliation_agent`, `plan_equivalence_agent`,
+   `config_crosscheck` (with plan equivalence, opt-in: `TerraformRunner.generate_config` runs
+   `plan -generate-config-out` on just the import blocks and `tools/config_crosscheck.py` compares every
+   top-level literal we generated with what Terraform generated from the live resource - report only),
    `policy_agent` (Checkov, Trivy, Conftest - tfsec dropped, its rules live in Trivy). Security findings
    are **reported, never auto-fixed** in adoption code. **Fails closed**: a crash, timeout, missing tool,
    or unparseable output (runner `tool_error` -> `security_results.scanners_failed`), a `system`

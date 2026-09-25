@@ -57,6 +57,8 @@ export interface VerificationIteration {
   verdict: VerificationVerdict;
   checks_run: string[];
   incomplete_reasons: string[];
+  imported?: number | null;
+  config_mismatches?: number | null;
   validation_passed: boolean;
   system_failure: boolean;
   high_findings: number;

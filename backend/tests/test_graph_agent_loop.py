@@ -38,7 +38,7 @@ def calls(monkeypatch) -> List[str]:
     for name in (
         "intent_router_node", "resource_explorer_node", "graph_agent_node", "classification_agent_node",
         "adoption_planning_agent_node", "drift_reconciliation_agent_node",
-        "plan_equivalence_agent_node", "cost_agent_node",
+        "plan_equivalence_agent_node", "config_crosscheck_node", "cost_agent_node",
     ):
         monkeypatch.setattr(graph_mod, name, _stub(name.replace("_node", ""), calls))
     monkeypatch.setattr(graph_mod, "cloud_discovery_node",

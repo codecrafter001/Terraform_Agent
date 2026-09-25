@@ -26,14 +26,27 @@ def _model():
 
 
 def test_every_discoverable_type_has_an_import_id_rule_and_source_api():
-    assert set(IMPORT_ID_FIELDS) == DISCOVERY_RESOURCE_TYPES
+    assert DISCOVERY_RESOURCE_TYPES <= set(IMPORT_ID_FIELDS)
     assert set(SOURCE_API) == DISCOVERY_RESOURCE_TYPES
+
+
+def test_every_type_the_generator_can_build_has_an_import_id_rule():
+    import re
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parents[1].joinpath("tools", "hcl_generator.py").read_text(encoding="utf-8")
+    buildable = set(re.findall(r'r_type (?:==|in) \(?"(aws_[a-z0-9_]+)"', src)) | set(
+        t for group in re.findall(r"r_type in \(([^)]*)\)", src) for t in re.findall(r'"(aws_[a-z0-9_]+)"', group)
+    )
+    assert buildable and buildable <= set(IMPORT_ID_FIELDS), buildable - set(IMPORT_ID_FIELDS)
 
 
 def test_import_ids_come_from_the_lookup_table():
     assert import_id_for({"resource_type": "aws_iam_role", "id": "AROAX", "name": "app-role"}) == "app-role"
     assert import_id_for({"resource_type": "aws_subnet", "id": "subnet-1"}) == "subnet-1"
     assert import_id_for({"resource_type": "aws_lambda_function", "id": "fn-1"}) is None
+    assert import_id_for({"resource_type": "aws_sqs_queue", "id": "q", "url": "https://sqs/q"}) == "https://sqs/q"
+    assert import_id_for({"resource_type": "aws_lb", "id": "arn:aws:elasticloadbalancing:x"}) == "arn:aws:elasticloadbalancing:x"
 
 
 def test_records_carry_facts_decision_and_evidence():

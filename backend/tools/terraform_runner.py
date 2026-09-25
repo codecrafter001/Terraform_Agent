@@ -167,6 +167,82 @@ class TerraformRunner:
 
         return results
 
+    @staticmethod
+    def _scoped_aws_env(aws_credentials: Dict[str, Optional[str]], region: str) -> Dict[str, str]:
+        """Minimal env for a single credentialed subprocess - never
+        os.environ.copy(). Only PATH/HOME/TF_PLUGIN_CACHE_DIR plus the AWS
+        credential vars; TF_LOG/TF_LOG_PATH forced unset (provider debug logs
+        can write raw request bodies, credentials included, to disk)."""
+        env = {
+            "PATH": os.environ.get("PATH", ""),
+            "HOME": os.environ.get("HOME", ""),
+            "TF_PLUGIN_CACHE_DIR": os.environ.get("TF_PLUGIN_CACHE_DIR", ""),
+            "TF_IN_AUTOMATION": "1",
+            "AWS_ACCESS_KEY_ID": aws_credentials.get("access_key") or "",
+            "AWS_SECRET_ACCESS_KEY": aws_credentials.get("secret_key") or "",
+            "AWS_DEFAULT_REGION": region,
+        }
+        if aws_credentials.get("session_token"):
+            env["AWS_SESSION_TOKEN"] = aws_credentials["session_token"]
+        env.pop("TF_LOG", None)
+        env.pop("TF_LOG_PATH", None)
+        return env
+
+    @classmethod
+    async def generate_config(
+        cls,
+        hcl_files: Dict[str, str],
+        aws_credentials: Dict[str, Optional[str]],
+        region: str,
+        binary: str = "terraform",
+    ) -> Dict[str, Any]:
+        """Terraform's own view of the imported resources: a sandbox holding only
+        versions/providers and the import {} blocks (no resource blocks), then
+        `plan -generate-config-out=generated.tf`, which writes HCL for every
+        import target from the live resource. Used to cross-check our generated
+        attributes. Read-only: plan never writes state or touches AWS, and no
+        `-out` plan file is produced. Same scoped-credential rules as plan_json."""
+        sandbox_dir = create_sandbox(prefix="terraagent_genconfig_")
+        result: Dict[str, Any] = {"passed": False, "generated": "", "checks": []}
+        env = cls._scoped_aws_env(aws_credentials, region)
+        keep = {"versions.tf", "providers.tf", "variables.tf", "locals.tf", "imports.tf"}
+        try:
+            for filename, content in hcl_files.items():
+                if filename not in keep:
+                    continue
+                with open(os.path.join(sandbox_dir, filename), "w", encoding="utf-8") as f:
+                    f.write(content)
+
+            code, out, err = await cls.run_command(
+                [binary, "init", "-backend=false", "-input=false"], cwd=sandbox_dir, env=env
+            )
+            result["checks"].append({"check_name": "init", "passed": code == 0,
+                                     "output": CredentialScrubber.scrub_text(out + ("\n" + err if err else ""))})
+            if code != 0:
+                return result
+
+            code, out, err = await cls.run_command(
+                [binary, "plan", "-generate-config-out=generated.tf", "-input=false", "-lock=false", "-no-color"],
+                cwd=sandbox_dir, env=env,
+            )
+            generated_path = os.path.join(sandbox_dir, "generated.tf")
+            generated = ""
+            if os.path.exists(generated_path):
+                with open(generated_path, "r", encoding="utf-8") as f:
+                    generated = f.read()
+            # plan can exit non-zero after writing generated.tf (the generated
+            # config may itself not validate); what matters here is the file.
+            result["generated"] = CredentialScrubber.scrub_text(generated)
+            result["passed"] = bool(generated)
+            result["checks"].append({"check_name": "generate_config", "passed": bool(generated),
+                                     "output": CredentialScrubber.scrub_text(out + ("\n" + err if err else ""))[-4000:]})
+        except Exception as e:
+            result["checks"].append({"check_name": "system", "passed": False,
+                                     "output": CredentialScrubber.scrub_text(str(e))})
+        finally:
+            release_sandbox(sandbox_dir)
+        return result
+
     @classmethod
     async def plan_json(
         cls,
@@ -211,25 +287,12 @@ class TerraformRunner:
             "replace": 0,
             "destroy": 0,
             "no_op": 0,
+            "imported": 0,  # resources bound by an import {} block
             "blocking_actions": [],
             "checks": [],
         }
 
-        env = {
-            "PATH": os.environ.get("PATH", ""),
-            "HOME": os.environ.get("HOME", ""),
-            "TF_PLUGIN_CACHE_DIR": os.environ.get("TF_PLUGIN_CACHE_DIR", ""),
-            "TF_IN_AUTOMATION": "1",
-            "AWS_ACCESS_KEY_ID": aws_credentials.get("access_key") or "",
-            "AWS_SECRET_ACCESS_KEY": aws_credentials.get("secret_key") or "",
-            "AWS_DEFAULT_REGION": region,
-        }
-        if aws_credentials.get("session_token"):
-            env["AWS_SESSION_TOKEN"] = aws_credentials["session_token"]
-        # Belt-and-suspenders: guarantee these never end up in the scoped env
-        # even if a future edit above ever starts from a broader base dict.
-        env.pop("TF_LOG", None)
-        env.pop("TF_LOG_PATH", None)
+        env = cls._scoped_aws_env(aws_credentials, region)
 
         try:
             for filename, content in hcl_files.items():
@@ -279,6 +342,8 @@ class TerraformRunner:
             for change in resource_changes:
                 actions = change.get("change", {}).get("actions", [])
                 address = change.get("address", "unknown")
+                if change.get("change", {}).get("importing"):
+                    result["imported"] += 1
                 if actions in (["no-op"], ["read"]):
                     result["no_op"] += 1
                 elif actions == ["create"]:

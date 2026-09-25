@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from tools.hcl_blocks import STACK_FILE_NAMES, extract_resource_block
+from tools.import_blocks import IMPORTS_FILENAME, filter_imports_tf
 from tools.naming import unique_clean_name
 
 logger = logging.getLogger("terraagent.github_client")
@@ -74,7 +75,20 @@ def _extract_wave_files(
     standalone HCL without them - every wave's PR needs its own copy.
     """
     filtered: Dict[str, str] = {}
+    wave_addresses = []
+    for rid in resource_ids:
+        res = resources_by_id.get(rid)
+        if res and res.get("resource_type"):
+            wave_addresses.append(f"{res['resource_type']}.{unique_clean_name(res.get('name', rid), rid)}")
+
     for filename, content in tf_files.items():
+        if filename == IMPORTS_FILENAME:
+            # Import blocks must only target resources this PR contains, or
+            # `terraform validate` fails ("import target does not exist").
+            wave_imports = filter_imports_tf(content, wave_addresses)
+            if wave_imports:
+                filtered[filename] = wave_imports
+            continue
         if filename not in STACK_FILE_NAMES:
             filtered[filename] = content
             continue
@@ -205,19 +219,16 @@ def _build_pr_body(
         lines.append(f"- ${cost_results.get('total_monthly_cost', 0.0):.2f} {cost_results.get('currency', 'USD')}/month")
 
     lines += ["", "### Before Merging", "1. Run `terraform init` inside `terraform/`."]
+    lines.append(
+        "2. `terraform/imports.tf` binds every managed resource to the existing AWS resource "
+        "with an `import {}` block - keep it. Your pipeline's `terraform plan` should show each "
+        "one as \"will be imported\"."
+    )
     if wave_import_cmds:
-        lines.append(
-            "2. Run these `terraform import` commands, in order - this links existing AWS "
-            "resources to state without creating duplicates:"
-        )
+        lines.append("   Terraform < 1.5 only: delete `imports.tf` and run these instead, in order:")
         lines.append("```bash")
         lines.extend(wave_import_cmds)
         lines.append("```")
-    else:
-        lines.append(
-            "2. Run every `terraform import` command in `migration/import_plan.md`, in order - "
-            "this links existing AWS resources to state without creating duplicates."
-        )
     lines += [
         "3. Run `terraform plan` and confirm it reports `No changes.`",
         "4. Only merge and apply once the plan is clean and this PR has been reviewed. "

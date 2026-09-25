@@ -37,6 +37,7 @@ logger = logging.getLogger("terraagent.graph")
 from .adoption_planning_agent import adoption_planning_agent_node
 from .classification_agent import classification_agent_node
 from .cloud_discovery import cloud_discovery_node
+from .config_crosscheck_agent import config_crosscheck_node
 from .cost_agent import cost_agent_node
 from .documentation_agent import documentation_agent_node
 from .drift_reconciliation_agent import drift_reconciliation_agent_node
@@ -93,6 +94,7 @@ class TerraAgentState(TypedDict):
     validation_results: dict
     drift_results: dict  # {skipped|resources_checked|resources_missing|findings|...} from drift_reconciliation_agent
     plan_equivalence_results: dict  # PlanEquivalenceResult-shaped, only populated if run_plan_equivalence
+    config_crosscheck: dict  # generated attributes vs `plan -generate-config-out` (agents/config_crosscheck_agent.py)
     security_results: dict
     cost_results: dict  # Infracost breakdown: total_monthly_cost/currency/resources/tool_skipped
     repair_attempts: int
@@ -159,6 +161,7 @@ def build_initial_state(job_id: str, request: Dict[str, Any]) -> Dict[str, Any]:
         "validation_results": {},
         "drift_results": {},
         "plan_equivalence_results": {},
+        "config_crosscheck": {},
         "security_results": {},
         "cost_results": {},
         "repair_attempts": 0,
@@ -443,6 +446,9 @@ def _incomplete_reasons(acc: Dict[str, Any]) -> List[str]:
         init = next((c for c in plan.get("checks", []) or [] if c.get("check_name") == "init"), None)
         if init and not init.get("passed"):
             reasons.append("plan equivalence could not initialize")
+    cross = acc.get("config_crosscheck") or {}
+    if cross and not cross.get("skipped") and cross.get("error"):
+        reasons.append(f"config cross-check could not run ({cross['error']})")
     return reasons
 
 
@@ -453,6 +459,8 @@ def _record_iteration(acc: Dict[str, Any], validation_only: bool) -> Dict[str, A
     drift = acc.get("drift_results", {}) or {}
 
     plan_ran = bool(plan) and not plan.get("skipped") and not validation_only
+    cross = acc.get("config_crosscheck") or {}
+    cross_ran = bool(cross) and not cross.get("skipped") and not cross.get("error")
     plan_changes = (
         sum(int(plan.get(k, 0) or 0) for k in ("create", "update", "replace", "destroy")) if plan_ran else None
     )
@@ -480,6 +488,8 @@ def _record_iteration(acc: Dict[str, Any], validation_only: bool) -> Dict[str, A
         "total_findings": 0 if validation_only else len(sec.get("findings", []) or []),
         "plan_changes": plan_changes,
         "drift_findings": 0 if validation_only else len(drift.get("findings", []) or []),
+        "imported": None if not plan_ran else int(plan.get("imported", 0) or 0),
+        "config_mismatches": None if validation_only or not cross_ran else len(cross.get("mismatches", []) or []),
         "incomplete_reasons": incomplete,
         "halted_for_approval": verdict == VERDICT_NEEDS_APPROVAL,
         "passed": verdict == VERDICT_PASS,
@@ -497,6 +507,9 @@ def _iteration_summary(it: Dict[str, Any], max_iters: int) -> str:
         parts.append(f"{it['high_findings']} high/critical reported" if it["high_findings"] else "no high findings")
         if it["plan_changes"] is not None:
             parts.append(f"plan: {_plural(it['plan_changes'], 'change')}")
+        if it.get("config_mismatches") is not None:
+            parts.append(f"{_plural(it['config_mismatches'], 'attribute mismatch')} vs live"
+                         if it["config_mismatches"] else "attributes match live")
     else:
         parts.append("later checks skipped until it validates")
     parts.append({
@@ -527,6 +540,7 @@ async def verification_agent(state: Dict[str, Any]) -> Dict[str, Any]:
             [
                 ("drift_reconciliation_agent", "comparing generated HCL to live AWS", drift_reconciliation_agent_node),
                 ("plan_equivalence_agent", "terraform plan equivalence", plan_equivalence_agent_node),
+                ("config_crosscheck", "cross-check against plan -generate-config-out", config_crosscheck_node),
                 ("policy_agent", "Checkov / Trivy / OPA (report only)", policy_agent_node),
             ],
             # Same halts as before: a destructive or behavior-changing finding

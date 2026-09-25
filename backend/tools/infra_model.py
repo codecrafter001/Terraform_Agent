@@ -11,21 +11,29 @@ Deterministic, no LLM. Import IDs come from a fixed lookup table
 """
 
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 MODEL_VERSION = 1
 
-# Terraform import ID per resource type: which discovered field holds it.
-# Must match the AWS provider's documented `terraform import` / `import {}` ID.
-IMPORT_ID_FIELDS: Dict[str, str] = {
-    "aws_vpc": "id",
-    "aws_subnet": "id",
-    "aws_route_table": "id",
-    "aws_security_group": "id",
-    "aws_instance": "id",
-    "aws_s3_bucket": "id",  # bucket name
-    "aws_db_instance": "id",  # DB instance identifier
-    "aws_iam_role": "name",  # role name, not ARN
+# Terraform import ID per resource type: the discovered field(s) that hold it,
+# tried in order. Must match the AWS provider's documented import ID.
+IMPORT_ID_FIELDS: Dict[str, Tuple[str, ...]] = {
+    "aws_vpc": ("id",),
+    "aws_subnet": ("id",),
+    "aws_route_table": ("id",),
+    "aws_security_group": ("id",),
+    "aws_instance": ("id",),
+    "aws_s3_bucket": ("id",),  # bucket name
+    "aws_db_instance": ("id",),  # DB instance identifier
+    "aws_iam_role": ("name",),  # role name, not ARN
+    "aws_internet_gateway": ("id",),
+    "aws_nat_gateway": ("id",),
+    "aws_lb": ("arn", "id"),
+    "aws_alb": ("arn", "id"),
+    "aws_kms_key": ("key_id", "id"),
+    "aws_dynamodb_table": ("name", "id"),  # table name
+    "aws_sns_topic": ("arn", "id"),
+    "aws_sqs_queue": ("url", "id"),  # queue URL
 }
 
 # The read-only API each resource type is discovered through (tools/aws_scanner.py).
@@ -44,9 +52,11 @@ _NON_ATTRIBUTE_KEYS = {"id", "name", "resource_type", "tags", "arn", "region"}
 
 
 def import_id_for(resource: Dict[str, Any]) -> Optional[str]:
-    field = IMPORT_ID_FIELDS.get(str(resource.get("resource_type") or ""))
-    value = resource.get(field) if field else None
-    return str(value) if value else None
+    for field in IMPORT_ID_FIELDS.get(str(resource.get("resource_type") or ""), ()):
+        value = resource.get(field)
+        if value:
+            return str(value)
+    return None
 
 
 def _tags(resource: Dict[str, Any]) -> Dict[str, str]:

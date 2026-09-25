@@ -29,17 +29,22 @@ def _load_prompt(filename: str) -> str:
 # safety issue observed in testing with LLM-authored versions of this section.
 ADOPTION_INSTRUCTIONS = """## Safe Import & Adoption Instructions
 
-Follow these steps in order - do not skip the import step, or Terraform will try
-to create duplicate resources instead of adopting your existing ones.
+Follow these steps in order. `terraform/imports.tf` contains an `import {}` block
+for every managed resource - keep it, or Terraform will try to create duplicate
+resources instead of adopting your existing ones.
 
-1. Run `terraform init` inside the `terraform/` directory.
-2. Run every `terraform import` command listed in `migration/import_plan.md`, in order.
-   This links each existing AWS resource to Terraform's state without creating it.
-3. Run `terraform plan` and confirm it reports `No changes.` - if it reports any
-   changes, review them carefully before proceeding; they mean the generated
-   configuration doesn't yet match the real resource exactly.
-4. Only once the plan is clean should a human apply it, after review. TerraAgent
-   itself never runs `terraform apply` or `terraform destroy`.
+1. Run `terraform init` inside the `terraform/` directory (Terraform >= 1.5 or
+   OpenTofu >= 1.6, which support import blocks).
+2. Run `terraform plan`. Every managed resource should show as "will be imported",
+   and the summary should read `N to import, 0 to add, 0 to change, 0 to destroy`.
+   Any add/change/destroy means the generated configuration doesn't yet match the
+   real resource exactly - review it before going further.
+3. Only once the plan is clean should a human apply it, after review, through your
+   normal pipeline (Atlantis, HCP Terraform, Spacelift, CI). Applying is what
+   performs the imports. TerraAgent itself never runs `apply`, `destroy` or `import`.
+
+Older Terraform without import-block support: delete `imports.tf` and run the
+`terraform import` commands in `migration/import_plan.md` instead, in order.
 """
 
 # Swapped in for ADOPTION_INSTRUCTIONS instead, whenever a human rejected the
@@ -56,8 +61,8 @@ REJECTED_SECTION = """## Not Approved For Adoption
 above for the finding(s) and reason. This bundle is kept only as an audit
 record of what was generated and why it was not adopted.**
 
-Do NOT run the `terraform import` commands in `migration/import_plan.md`, and
-do NOT run `terraform plan`/`apply` against this configuration. If you believe
+Do NOT apply this configuration (its `imports.tf` would adopt the resources), and
+do NOT run the `terraform import` commands in `migration/import_plan.md`. If you believe
 this was rejected in error, re-run the scan and have a human approve it through
 the normal approval flow instead of applying this bundle directly.
 """
@@ -333,9 +338,11 @@ waves above.
 
     import_plan_md = f"""# TerraAgent Import Plan
 
-Verified, non-destructive `terraform import` commands, grouped into dependency-safe
-migration waves by the Adoption Planning Agent. Run these from inside the `terraform/`
-directory, after `terraform init`, completing each wave before starting the next.
+The same imports as `terraform/imports.tf` (the preferred path - see README), as
+`terraform import` CLI commands for Terraform versions without import-block support.
+Grouped into dependency-safe migration waves by the Adoption Planning Agent. Run these
+from inside the `terraform/` directory, after `terraform init` and after deleting
+`imports.tf`, completing each wave before starting the next.
 See `migration_checklist.md` for the full adoption procedure. Resources classified
 "skip" (AWS-managed) or "use_data_source" (referenced, not owned) are intentionally
 excluded - there's no `resource` block for either to import into.
