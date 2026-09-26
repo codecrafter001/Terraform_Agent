@@ -17,7 +17,7 @@ It is never written into TerraAgentState, Redis, or any log line.
 
 import base64
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
@@ -62,21 +62,6 @@ def _handle_api_error(resp: httpx.Response, action_desc: str) -> GitHubPullReque
     elif status == 422:
         return GitHubPullRequestError(f"{prefix} (422 Unprocessable) - {raw_msg}. Branch or changes may already exist or contain invalid parameters.")
     return GitHubPullRequestError(f"{prefix} - {raw_msg}")
-
-
-async def _existing_file_sha(client: httpx.AsyncClient, repo: str, path: str, ref: str) -> Optional[str]:
-    """Returns the blob sha of `path` on `ref` if it already exists there,
-    None if it doesn't. The Contents API's PUT (create-or-update-file)
-    endpoint requires this sha to overwrite an existing file - omitting it
-    when one is present returns a 422, which is exactly what happened before
-    this check existed, on the very first commit (README.md) against almost
-    any real target repo."""
-    resp = await client.get(f"/repos/{repo}/contents/{path}", params={"ref": ref})
-    if resp.status_code == 200:
-        data = resp.json()
-        if isinstance(data, dict):
-            return data.get("sha")
-    return None
 
 
 def _import_cmd(res: Dict[str, Any]) -> str:
@@ -361,6 +346,69 @@ async def _create_branch(client: httpx.AsyncClient, repo: str, branch_name: str,
         )
 
 
+async def _publish(
+    client: httpx.AsyncClient,
+    repo: str,
+    *,
+    from_branch: str,
+    branch_name: str,
+    files: Dict[str, str],
+    commit_message: str,
+    pr: Dict[str, str],
+) -> Tuple[Dict[str, Any], str]:
+    """One atomic commit with every file, then the branch, then the PR - via
+    the Git Data API (blobs -> tree -> commit -> ref).
+
+    Nothing exists in the repo until the commit is complete: the branch is
+    only created pointing at the finished commit, so a failure while uploading
+    leaves nothing behind. Only a failure opening the PR can leave a branch,
+    and it is deleted before the error propagates, so a retry of the same
+    job/wave always starts clean. Returns (pr_data, commit_sha)."""
+    ref_resp = await client.get(f"/repos/{repo}/git/ref/heads/{from_branch}")
+    if ref_resp.status_code != 200:
+        raise _handle_api_error(ref_resp, f"reading branch '{from_branch}' on '{repo}'")
+    base_sha = ref_resp.json()["object"]["sha"]
+    commit_resp = await client.get(f"/repos/{repo}/git/commits/{base_sha}")
+    if commit_resp.status_code != 200:
+        raise _handle_api_error(commit_resp, f"reading commit {base_sha[:12]} on '{repo}'")
+    base_tree = commit_resp.json()["tree"]["sha"]
+
+    tree: List[Dict[str, str]] = []
+    for path, content in files.items():
+        blob_resp = await client.post(f"/repos/{repo}/git/blobs", json={
+            "content": base64.b64encode(content.encode("utf-8")).decode("ascii"),
+            "encoding": "base64",
+        })
+        if blob_resp.status_code not in (200, 201):
+            raise _handle_api_error(blob_resp, f"uploading '{path}' to '{repo}'")
+        tree.append({"path": path, "mode": "100644", "type": "blob", "sha": blob_resp.json()["sha"]})
+
+    # Built on the base tree: everything already in the repo is kept, and
+    # files at the same paths (a README.md, say) are replaced.
+    tree_resp = await client.post(f"/repos/{repo}/git/trees", json={"base_tree": base_tree, "tree": tree})
+    if tree_resp.status_code not in (200, 201):
+        raise _handle_api_error(tree_resp, f"building the commit tree on '{repo}'")
+    new_commit = await client.post(f"/repos/{repo}/git/commits", json={
+        "message": commit_message, "tree": tree_resp.json()["sha"], "parents": [base_sha],
+    })
+    if new_commit.status_code not in (200, 201):
+        raise _handle_api_error(new_commit, f"creating the commit on '{repo}'")
+    commit_sha = new_commit.json()["sha"]
+
+    await _create_branch(client, repo, branch_name, commit_sha)
+    try:
+        pr_resp = await client.post(f"/repos/{repo}/pulls", json={**pr, "head": branch_name})
+        if pr_resp.status_code not in (200, 201):
+            raise _handle_api_error(pr_resp, f"opening pull request on '{repo}'")
+    except GitHubPullRequestError:
+        try:
+            await client.delete(f"/repos/{repo}/git/refs/heads/{branch_name}")
+        except Exception:
+            pass
+        raise
+    return pr_resp.json(), commit_sha
+
+
 async def create_adoption_pr(
     github_token: str,
     repo: str,
@@ -381,34 +429,14 @@ async def create_adoption_pr(
     security_posture: Optional[Dict[str, Any]] = None,
     infra_model: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Creates a branch off base_branch, commits the generated Terraform
-    files (plus the migration/README docs) onto it via the Contents API - one
-    real commit per file, the same approach this codebase's own plan
-    document for this feature calls for - then opens a PR against
-    base_branch with an adoption/plan-equivalence/security summary in the
-    body. Raises GitHubPullRequestError on any non-2xx response.
-
-    Two things verified against GitHub's actual, documented Contents API
-    contract that a naive implementation (and this function's own first
-    version) gets wrong:
-
-    1. `PUT /repos/{owner}/{repo}/contents/{path}` requires the existing
-       file's blob `sha` when a file already exists at that path (a plain
-       422 otherwise) - and since the new branch is forked from base_sha, it
-       inherits everything already in the target repo. Every one of these
-       PRs commits a README.md, and virtually every real GitHub repo already
-       has one, so this fired on the very first commit against almost any
-       real target - `_existing_file_sha` below checks for and supplies it.
-    2. If anything fails after the branch is created (a commit, or the PR-
-       open call itself), the branch must be deleted before the error
-       propagates - otherwise it's left behind half-populated, and since the
-       branch name is deterministic, retrying the exact same job/wave would
-       fail immediately with "Reference already exists" on the very next
-       attempt's branch-create call, forever, until someone deleted it by
-       hand on GitHub. Symmetrically, if a stray branch from a PRE-fix run
-       (or any other reason) is already sitting there when this function
-       starts, it's deleted and recreated rather than treated as a hard
-       failure.
+    """Commits the generated Terraform files (plus the migration/README docs)
+    as ONE commit on a new branch off base_branch, then opens a PR with the
+    adoption summary in the body (`_publish`: Git Data API). Raises
+    GitHubPullRequestError on any non-2xx response. Files already in the repo
+    at the same paths (almost every repo has a README.md) are replaced in the
+    new tree; everything else is kept. The branch only appears once the
+    commit is complete, is deleted again if opening the PR fails, and a stray
+    branch from an earlier attempt is replaced - so retries always start clean.
 
     When `wave` is given (one entry from adoption_plan["waves"]), this scopes
     the PR to just that wave instead of the whole job: `tf_files` is filtered
@@ -449,71 +477,20 @@ async def create_adoption_pr(
         branch_name = f"terraagent/adopt-{job_id}"
         pr_title = f"TerraAgent: adopt discovered infrastructure ({job_id})"
 
+    files_to_commit: Dict[str, str] = {f"terraform/{name}": content for name, content in files_to_commit_base.items()}
+    files_to_commit.update(docs_to_commit)
+    pr_body = _build_pr_body(
+        job_id, adoption_plan, plan_equivalence_results, drift_results or {}, security_results,
+        cost_results, pending_approval, approval_decision,
+        wave=wave, wave_import_cmds=wave_import_cmds,
+        migration_safety=migration_safety, security_posture=security_posture, infra_model=infra_model,
+    )
     async with httpx.AsyncClient(base_url=GITHUB_API_BASE, headers=headers, timeout=_REQUEST_TIMEOUT) as client:
-        ref_resp = await client.get(f"/repos/{repo}/git/ref/heads/{base_branch}")
-        if ref_resp.status_code != 200:
-            raise GitHubPullRequestError(
-                f"Failed to read base branch '{base_branch}' on '{repo}': "
-                f"{ref_resp.status_code} {ref_resp.text}"
-            )
-        base_sha = ref_resp.json()["object"]["sha"]
-
-        await _create_branch(client, repo, branch_name, base_sha)
-
-        try:
-            files_to_commit: Dict[str, str] = {f"terraform/{name}": content for name, content in files_to_commit_base.items()}
-            files_to_commit.update(docs_to_commit)
-            last_commit_sha: Optional[str] = None
-
-            for path, content in files_to_commit.items():
-                encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
-                payload: Dict[str, Any] = {
-                    "message": f"TerraAgent: add {path} (job {job_id})",
-                    "content": encoded,
-                    "branch": branch_name,
-                }
-                existing_sha = await _existing_file_sha(client, repo, path, branch_name)
-                if existing_sha:
-                    payload["sha"] = existing_sha
-
-                put_resp = await client.put(f"/repos/{repo}/contents/{path}", json=payload)
-                if put_resp.status_code not in (200, 201):
-                    raise _handle_api_error(put_resp, f"committing '{path}' to '{repo}@{branch_name}'")
-                try:
-                    put_json = put_resp.json()
-                    if isinstance(put_json, dict) and "commit" in put_json:
-                        last_commit_sha = put_json["commit"].get("sha")
-                except Exception:
-                    pass
-
-            pr_body = _build_pr_body(
-                job_id, adoption_plan, plan_equivalence_results, drift_results or {}, security_results,
-                cost_results, pending_approval, approval_decision,
-                wave=wave, wave_import_cmds=wave_import_cmds,
-                migration_safety=migration_safety, security_posture=security_posture, infra_model=infra_model,
-            )
-            pr_resp = await client.post(
-                f"/repos/{repo}/pulls",
-                json={
-                    "title": pr_title,
-                    "head": branch_name,
-                    "base": base_branch,
-                    "body": pr_body,
-                },
-            )
-            if pr_resp.status_code not in (200, 201):
-                raise _handle_api_error(pr_resp, f"opening pull request on '{repo}'")
-        except GitHubPullRequestError:
-            # Never leave a half-populated branch behind - a retry of this
-            # exact job/wave must be able to start clean, not hit "Reference
-            # already exists" on its very first call.
-            try:
-                await client.delete(f"/repos/{repo}/git/refs/heads/{branch_name}")
-            except Exception:
-                pass
-            raise
-
-        pr_data = pr_resp.json()
+        pr_data, commit_sha = await _publish(
+            client, repo, from_branch=base_branch, branch_name=branch_name, files=files_to_commit,
+            commit_message=pr_title,
+            pr={"title": pr_title, "base": base_branch, "body": pr_body},
+        )
         logger.info(f"[{job_id}] Opened GitHub PR #{pr_data.get('number')} on {repo}")
         return {
             "pr_url": pr_data.get("html_url"),
@@ -522,7 +499,7 @@ async def create_adoption_pr(
             "branch": branch_name,
             "repo": repo,
             "base_branch": base_branch,
-            "commit_sha": last_commit_sha or pr_data.get("head", {}).get("sha"),
+            "commit_sha": commit_sha,
             "changed_files": list(files_to_commit.keys()),
             "wave": wave.get("wave") if wave else None,
             "status": pr_data.get("state", "open"),
@@ -587,47 +564,14 @@ async def create_hardening_pr(
         "X-GitHub-Api-Version": "2022-11-28",
     }
     branch_name = f"terraagent/harden-{job_id}"
-    last_commit_sha: Optional[str] = None
+    title = f"TerraAgent: security hardening ({len(hardening.get('changes') or [])} changes) - job {job_id}"
     async with httpx.AsyncClient(base_url=GITHUB_API_BASE, headers=headers, timeout=_REQUEST_TIMEOUT) as client:
-        ref_resp = await client.get(f"/repos/{repo}/git/ref/heads/{adoption_branch}")
-        if ref_resp.status_code != 200:
-            raise _handle_api_error(ref_resp, f"reading adoption branch '{adoption_branch}' on '{repo}'")
-        await _create_branch(client, repo, branch_name, ref_resp.json()["object"]["sha"])
-        try:
-            for name, content in files.items():
-                path = f"terraform/{name}"
-                payload: Dict[str, Any] = {
-                    "message": f"TerraAgent hardening: update {path} (job {job_id})",
-                    "content": base64.b64encode(content.encode("utf-8")).decode("ascii"),
-                    "branch": branch_name,
-                }
-                existing_sha = await _existing_file_sha(client, repo, path, branch_name)
-                if existing_sha:
-                    payload["sha"] = existing_sha
-                put_resp = await client.put(f"/repos/{repo}/contents/{path}", json=payload)
-                if put_resp.status_code not in (200, 201):
-                    raise _handle_api_error(put_resp, f"committing '{path}' to '{repo}@{branch_name}'")
-                try:
-                    put_json = put_resp.json()
-                    if isinstance(put_json, dict) and "commit" in put_json:
-                        last_commit_sha = put_json["commit"].get("sha")
-                except Exception:
-                    pass
-            pr_resp = await client.post(f"/repos/{repo}/pulls", json={
-                "title": f"TerraAgent: security hardening ({len(hardening.get('changes') or [])} changes) - job {job_id}",
-                "head": branch_name,
-                "base": adoption_branch,
-                "body": _build_hardening_body(job_id, hardening, adoption_pr),
-            })
-            if pr_resp.status_code not in (200, 201):
-                raise _handle_api_error(pr_resp, f"opening hardening PR on '{repo}'")
-        except GitHubPullRequestError:
-            try:
-                await client.delete(f"/repos/{repo}/git/refs/heads/{branch_name}")
-            except Exception:
-                pass
-            raise
-        pr_data = pr_resp.json()
+        pr_data, commit_sha = await _publish(
+            client, repo, from_branch=adoption_branch, branch_name=branch_name,
+            files={f"terraform/{name}": content for name, content in files.items()},
+            commit_message=title,
+            pr={"title": title, "base": adoption_branch, "body": _build_hardening_body(job_id, hardening, adoption_pr)},
+        )
         logger.info(f"[{job_id}] Opened hardening PR #{pr_data.get('number')} on {repo}")
         return {
             "pr_url": pr_data.get("html_url"),
@@ -635,7 +579,7 @@ async def create_hardening_pr(
             "branch": branch_name,
             "repo": repo,
             "base_branch": adoption_branch,
-            "commit_sha": last_commit_sha or pr_data.get("head", {}).get("sha"),
+            "commit_sha": commit_sha,
             "changed_files": [f"terraform/{k}" for k in files.keys()],
             "wave": None,
             "kind": "hardening",
