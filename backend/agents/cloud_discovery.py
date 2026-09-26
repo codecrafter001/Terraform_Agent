@@ -20,7 +20,7 @@ async def cloud_discovery_node(state: Dict[str, Any]) -> Dict[str, Any]:
     """Scans AWS resources based on credentials and filters in state."""
     job_id = state.get("job_id", "")
     region = state.get("region", "us-east-1")
-    filters = state.get("resource_filters", ["EC2", "VPC", "S3", "RDS", "SG"])
+    filters = state.get("resource_filters", ["EC2", "VPC", "S3", "RDS", "SG", "ELB", "DYNAMODB", "KMS", "SQS", "SNS"])
 
     logger.info(f"[{job_id}] Cloud Discovery: Scanning region '{region}' with filters {filters}")
 

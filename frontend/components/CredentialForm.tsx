@@ -28,6 +28,11 @@ import {
   MessageSquareCode,
   Settings2,
   Wrench,
+  Split,
+  Table2,
+  KeyRound,
+  ListOrdered,
+  BellRing,
 } from "lucide-react";
 
 const AUTO_REGION = "auto";
@@ -96,6 +101,11 @@ const RESOURCE_OPTIONS = [
   { id: "S3", label: "S3 Buckets", icon: HardDrive, color: "text-emerald-600", bg: "bg-emerald-50" },
   { id: "RDS", label: "RDS Databases", icon: Database, color: "text-amber-600", bg: "bg-amber-50" },
   { id: "IAM", label: "IAM Roles & Policies", icon: Shield, color: "text-pink-600", bg: "bg-pink-50" },
+  { id: "ELB", label: "Load Balancers", icon: Split, color: "text-cyan-600", bg: "bg-cyan-50" },
+  { id: "DYNAMODB", label: "DynamoDB Tables", icon: Table2, color: "text-sky-600", bg: "bg-sky-50" },
+  { id: "KMS", label: "KMS Keys", icon: KeyRound, color: "text-yellow-600", bg: "bg-yellow-50" },
+  { id: "SQS", label: "SQS Queues", icon: ListOrdered, color: "text-orange-600", bg: "bg-orange-50" },
+  { id: "SNS", label: "SNS Topics", icon: BellRing, color: "text-fuchsia-600", bg: "bg-fuchsia-50" },
 ];
 
 export default function CredentialForm() {
@@ -126,6 +136,11 @@ export default function CredentialForm() {
     "S3",
     "RDS",
     "IAM",
+    "ELB",
+    "DYNAMODB",
+    "KMS",
+    "SQS",
+    "SNS",
   ]);
 
   // Natural-Language User Request

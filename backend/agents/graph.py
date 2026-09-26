@@ -161,7 +161,7 @@ def build_initial_state(job_id: str, request: Dict[str, Any]) -> Dict[str, Any]:
         "environment": request.get("environment", "production"),
         "user_request": request.get("user_request"),
         "analyzed_intent": request.get("analyzed_intent"),
-        "resource_filters": request.get("resource_filters", ["EC2", "VPC", "S3", "RDS", "IAM", "SG"]),
+        "resource_filters": request.get("resource_filters", ["EC2", "VPC", "S3", "RDS", "IAM", "SG", "ELB", "DYNAMODB", "KMS", "SQS", "SNS"]),
         "aws_credentials": {
             "access_key": request.get("aws_access_key"),
             "secret_key": request.get("aws_secret_key"),

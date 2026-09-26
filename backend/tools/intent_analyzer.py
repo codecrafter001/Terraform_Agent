@@ -54,6 +54,16 @@ RESOURCE_CATEGORY_MAP = {
     "policy": "IAM",
     "lambda": "LAMBDA",
     "function": "LAMBDA",
+    "load balancer": "ELB",
+    "alb": "ELB",
+    "elb": "ELB",
+    "dynamodb": "DYNAMODB",
+    "dynamo": "DYNAMODB",
+    "kms": "KMS",
+    "sqs": "SQS",
+    "queue": "SQS",
+    "sns": "SNS",
+    "topic": "SNS",
 }
 
 

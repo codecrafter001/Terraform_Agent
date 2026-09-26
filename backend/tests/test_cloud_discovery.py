@@ -199,9 +199,12 @@ def test_one_failing_service_does_not_sink_the_others(monkeypatch):
     monkeypatch.setattr(scanner, "scan_vpcs", boom)
     monkeypatch.setattr(scanner, "scan_subnets", lambda: [{"id": "subnet-1"}])
     monkeypatch.setattr(scanner, "scan_route_tables", lambda: [])
+    monkeypatch.setattr(scanner, "scan_internet_gateways", lambda: [])
+    monkeypatch.setattr(scanner, "scan_nat_gateways", lambda: [])
 
     results = scanner.scan_all(filters=["VPC"])
 
     assert results == [{"id": "subnet-1"}]
     report = scanner.report()
-    assert report["complete"] is False and report["counts"]["vpcs"] == 0 and report["counts"]["subnets"] == 1
+    assert report["complete"] is False and report["counts"] == {
+        "vpcs": 0, "subnets": 1, "route_tables": 0, "internet_gateways": 0, "nat_gateways": 0}

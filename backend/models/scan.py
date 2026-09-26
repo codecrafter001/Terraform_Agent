@@ -33,7 +33,7 @@ class IntentAnalysisRequest(BaseModel):
     region: str = Field(default="us-east-1", description="Target AWS region")
     environment: str = Field(default="production", description="Target environment (e.g. production, staging, dev)")
     resource_filters: List[str] = Field(
-        default_factory=lambda: ["EC2", "VPC", "S3", "RDS", "IAM", "SG"],
+        default_factory=lambda: ["EC2", "VPC", "S3", "RDS", "IAM", "SG", "ELB", "DYNAMODB", "KMS", "SQS", "SNS"],
         description="Filter specific resource categories"
     )
 
@@ -65,7 +65,7 @@ class ScanRequest(BaseModel):
     )
     operation: OperationType = Field(default=OperationType.GENERATE, description="Pipeline operation mode")
     resource_filters: List[str] = Field(
-        default_factory=lambda: ["EC2", "VPC", "S3", "RDS", "IAM", "SG"],
+        default_factory=lambda: ["EC2", "VPC", "S3", "RDS", "IAM", "SG", "ELB", "DYNAMODB", "KMS", "SQS", "SNS"],
         description="Filter specific resource categories to scan"
     )
     role_arn: Optional[str] = Field(
@@ -115,7 +115,7 @@ class ScanRequest(BaseModel):
                 "environment": "production",
                 "user_request": "Increase EC2 web server from t2.micro to t2.medium and scale Fargate from 2 to 4 tasks.",
                 "operation": "modify",
-                "resource_filters": ["EC2", "VPC", "S3", "RDS", "IAM", "SG"]
+                "resource_filters": ["EC2", "VPC", "S3", "RDS", "IAM", "SG", "ELB", "DYNAMODB", "KMS", "SQS", "SNS"]
             }
         }
     }

@@ -31,9 +31,17 @@ SUPPORTED_TYPES: Dict[str, str] = {
     "ec2:vpc": "VPC",
     "ec2:subnet": "VPC",
     "ec2:route-table": "VPC",
+    "ec2:internet-gateway": "VPC",
+    "ec2:natgateway": "VPC",
     "ec2:security-group": "SG",
+    "elasticloadbalancing:loadbalancer/app": "ELB",
+    "elasticloadbalancing:loadbalancer/net": "ELB",
     "s3:bucket": "S3",
     "rds:db": "RDS",
+    "dynamodb:table": "DYNAMODB",
+    "kms:key": "KMS",
+    "sqs:queue": "SQS",
+    "sns:topic": "SNS",
     "iam:role": "IAM",
 }
 
