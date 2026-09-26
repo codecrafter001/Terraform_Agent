@@ -97,3 +97,37 @@ def test_unrepresentable_route_sends_the_table_to_review():
     _, manifest, _ = _generate([{"id": "rtb-1", "resource_type": "aws_route_table", "vpc_id": "vpc-1",
                                  "routes": [{"destination_cidr_block": "0.0.0.0/0"}]}])
     assert manifest.resources_review_required == 1
+
+
+def test_route_table_associations_are_generated_and_imported():
+    from tools.import_blocks import import_targets
+    from tools.naming import unique_clean_name
+
+    rt = {"id": "rtb-1", "resource_type": "aws_route_table", "name": "public", "vpc_id": "vpc-1",
+          "routes": [{"destination_cidr_block": "0.0.0.0/0", "gateway_id": "igw-1"}],
+          "associated_subnets": ["subnet-b", "subnet-a"]}
+    subnet = {"id": "subnet-a", "resource_type": "aws_subnet", "name": "a", "vpc_id": "vpc-1",
+              "cidr_block": "10.0.1.0/24", "map_public_ip_on_launch": True}
+    files, manifest, hcl = _generate([rt, subnet])
+    rt_name = unique_clean_name("public", "rtb-1")
+
+    assert hcl.count('resource "aws_route_table_association"') == 2
+    targets = import_targets(files["imports.tf"])
+    # sorted subnets -> deterministic addresses; the managed subnet is referenced, the other is literal
+    assert targets[f"aws_route_table_association.{rt_name}_assoc_0"] == "subnet-a/rtb-1"
+    assert targets[f"aws_route_table_association.{rt_name}_assoc_1"] == "subnet-b/rtb-1"
+    assert 'subnet_id      = "subnet-b"' in hcl
+    assert "subnet associations are left unmanaged" not in " ".join(manifest.warnings)
+
+
+def test_wave_pr_carries_route_table_associations():
+    from services.github_client import _extract_wave_files
+    from tools.import_blocks import import_targets
+
+    rt = {"id": "rtb-1", "resource_type": "aws_route_table", "name": "public", "vpc_id": "vpc-1",
+          "routes": [], "associated_subnets": ["subnet-a"]}
+    files, _, _ = _generate([rt])
+    wave = _extract_wave_files(files, ["rtb-1"], {"rtb-1": rt})
+    stack = "\n".join(v for k, v in wave.items() if k != "imports.tf")
+    assert 'resource "aws_route_table_association"' in stack
+    assert len(import_targets(wave["imports.tf"])) == 2

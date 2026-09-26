@@ -112,7 +112,9 @@ infrastructure -> iac_engineering -> verification --PASS / INCOMPLETE / NEEDS_AP
    Hardening proposal's job. Every discovered string reaches HCL only through
    `tools/hcl_render.py::hcl_str` (escapes quotes, newlines and `${`/`%{`) - names, tags, descriptions and
    policy documents are untrusted text. Security-group rules keep every source (IPv4/IPv6, prefix
-   lists, other groups, self); routes keep every target kind or send the table to review. When the
+   lists, other groups, self); routes keep every target kind or send the table to review; each
+   explicit subnet association is its own `aws_route_table_association` with an import block
+   (`subnet-id/rtb-id`) and travels with its route table in per-wave PRs. When the
    verifier returns FAIL: `repair_agent` step = `agents/validation_repair.py`, which fixes only blocks
    that fail `terraform validate`/`init` (mapped via `tools/validation_diagnostics.py`) with the
    value-preserving `prompts/repair_validation.txt`. **Every fix must pass

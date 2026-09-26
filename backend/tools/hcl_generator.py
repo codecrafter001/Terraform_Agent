@@ -32,6 +32,16 @@ from tools.naming import unique_clean_name
 logger = logging.getLogger("terraagent.hcl_generator")
 
 
+def route_table_subnets(res: Dict[str, Any]) -> List[str]:
+    """Explicitly associated subnets of a discovered route table, sorted so
+    association addresses are deterministic."""
+    return sorted({s for s in res.get("associated_subnets") or [] if s})
+
+
+def association_address(route_table_clean_name: str, index: int) -> str:
+    return f"aws_route_table_association.{route_table_clean_name}_assoc_{index}"
+
+
 class HCLGenerator:
     """Deterministic, dependency-aware modular HCL synthesizer."""
 
@@ -108,6 +118,9 @@ class HCLGenerator:
 
 
         import_entries: List[ImportEntry] = []
+        # Extra import blocks a template emits for companion resources (route
+        # table associations), filled by _compose_managed_resource per resource.
+        self._companion_imports: List[Tuple[str, str]] = []
 
         manifest = GenerationManifest(
             job_id=self.job_id,
@@ -178,6 +191,7 @@ class HCLGenerator:
                 manifest.adoption_outcomes[r_id] = "review_required"
                 continue
             import_entries.append(ImportEntry(r_id, f"{r_type}.{clean_name}", import_id))
+            import_entries.extend(ImportEntry(r_id, address, cid) for address, cid in self._companion_imports)
 
             manifest.resources_generated += 1
             resource_blocks_by_stack.setdefault(stack_name, []).append(hcl_block)
@@ -312,6 +326,7 @@ project_name = "Cloud-Modernization"
         unresolved: List[UnresolvedAttribute] = []
         warnings: List[str] = []
         address = f"{r_type}.{clean_name}"
+        self._companion_imports = []
 
         def missing(attribute: str, reason: str) -> None:
             unresolved.append(UnresolvedAttribute(
@@ -451,13 +466,19 @@ project_name = "Cloud-Modernization"
                     missing("route", f"A route on {r_id} has a destination or target TerraAgent can't represent yet.")
                     return "", [], unresolved, warnings
                 body.append("\n  route {\n" + "\n".join(f"    {line}" for line in lines) + "\n  }")
-            if res.get("associated_subnets"):
-                warnings.append(
-                    f"{address}: subnet associations are left unmanaged in this adoption "
-                    "(no import blocks for them yet)"
+            hcl_parts = [resource(body)]
+            # Each explicit subnet association is its own resource, imported
+            # as "subnet-id/rtb-id" (the main-table association has no subnet
+            # and is never managed here).
+            for idx, subnet_id in enumerate(route_table_subnets(res)):
+                assoc = association_address(clean_name, idx)
+                hcl_parts.append(
+                    f'resource "aws_route_table_association" "{assoc.split(".", 1)[1]}" {{\n'
+                    f"  subnet_id      = {ref(subnet_id)}\n"
+                    f"  route_table_id = {address}.id\n}}"
                 )
-            hcl = resource(body)
-            return hcl, outputs, [], warnings
+                self._companion_imports.append((assoc, f"{subnet_id}/{r_id}"))
+            return "\n\n".join(hcl_parts), outputs, [], warnings
 
         elif r_type == "aws_s3_bucket":
             hcl = resource([f"  bucket = {hcl_str(res.get('name') or r_id)}"])

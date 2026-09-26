@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from tools.hcl_blocks import STACK_FILE_NAMES, extract_resource_block
+from tools.hcl_generator import association_address, route_table_subnets
 from tools.import_blocks import IMPORTS_FILENAME, filter_imports_tf
 from tools.naming import unique_clean_name
 
@@ -99,10 +100,19 @@ def _extract_wave_files(
     """
     filtered: Dict[str, str] = {}
     wave_addresses = []
+    wave_blocks: List[tuple] = []  # (resource type, name) of every block this wave owns
     for rid in resource_ids:
         res = resources_by_id.get(rid)
         if res and res.get("resource_type"):
-            wave_addresses.append(f"{res['resource_type']}.{unique_clean_name(res.get('name', rid), rid)}")
+            name = unique_clean_name(res.get("name", rid), rid)
+            wave_addresses.append(f"{res['resource_type']}.{name}")
+            wave_blocks.append((res["resource_type"], name))
+            if res["resource_type"] == "aws_route_table":
+                # A route table's subnet associations travel with it.
+                for idx in range(len(route_table_subnets(res))):
+                    assoc = association_address(name, idx)
+                    wave_addresses.append(assoc)
+                    wave_blocks.append(tuple(assoc.split(".", 1)))
 
     for filename, content in tf_files.items():
         if filename == IMPORTS_FILENAME:
@@ -117,13 +127,8 @@ def _extract_wave_files(
             continue
 
         blocks = []
-        for rid in resource_ids:
-            res = resources_by_id.get(rid)
-            resource_type = res.get("resource_type") if res else None
-            if not res or not resource_type:
-                continue
-            clean_name = unique_clean_name(res.get("name", rid), rid)
-            block = extract_resource_block(content, resource_type, clean_name)
+        for resource_type, name in wave_blocks:
+            block = extract_resource_block(content, resource_type, name)
             if block:
                 blocks.append(block)
 
