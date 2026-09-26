@@ -18,3 +18,7 @@ class AuditLogRecord(BaseModel):
     zip_generated: bool = False
     created_at: str
     completed_at: Optional[str] = None
+    github_pr_url: Optional[str] = None
+    github_pr_number: Optional[int] = None
+    github_hardening_pr_url: Optional[str] = None
+    github_hardening_pr_number: Optional[int] = None

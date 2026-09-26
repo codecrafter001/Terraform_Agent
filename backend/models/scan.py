@@ -161,6 +161,81 @@ class CreatePullRequestRequest(BaseModel):
     )
 
 
+class MergePullRequestRequest(BaseModel):
+    """Merge one of THIS job's own PRs - never an arbitrary repo/PR. Merging
+    can trigger the team's pipeline to apply (Atlantis/HCP Terraform
+    auto-apply), so it needs an explicit confirmation, a human approval done
+    in GitHub, and a mergeable PR (routers/scan.py::merge_pull_request)."""
+    github_token: SecretStr = Field(
+        ...,
+        description="GitHub token with contents:write and pull_requests:write. Used once, never stored."
+    )
+    kind: Literal["adoption", "hardening"] = Field(
+        default="adoption", description="Which of this job's PRs to merge"
+    )
+    confirm: bool = Field(
+        default=False,
+        description="Must be true: the caller confirms that merging may make their pipeline apply the change.",
+    )
+    merge_method: Literal["squash", "merge", "rebase"] = Field(
+        default="squash",
+        description="Git merge method to use (squash, merge, or rebase)"
+    )
+    commit_title: Optional[str] = Field(None, max_length=250, description="Optional custom commit title")
+    commit_message: Optional[str] = Field(None, max_length=5000, description="Optional custom commit message")
+
+
+class PullRequestFileResponse(BaseModel):
+    filename: str
+    status: Optional[str] = None
+    additions: int = 0
+    deletions: int = 0
+    changes: int = 0
+    patch: Optional[str] = None
+    raw_url: Optional[str] = None
+
+
+class PullRequestReviewResponse(BaseModel):
+    id: Optional[int] = None
+    user: Optional[str] = None
+    state: str
+    submitted_at: Optional[str] = None
+    body: Optional[str] = None
+
+
+class PullRequestDetailsResponse(BaseModel):
+    job_id: str
+    repo: str
+    pr_number: int
+    title: str
+    state: str
+    html_url: str
+    body: Optional[str] = None
+    head_branch: str
+    base_branch: str
+    head_sha: Optional[str] = None
+    mergeable: Optional[bool] = None
+    mergeable_state: Optional[str] = None
+    merged: bool = False
+    merged_at: Optional[str] = None
+    merge_commit_sha: Optional[str] = None
+    additions: int = 0
+    deletions: int = 0
+    changed_files_count: int = 0
+    changed_files: List[PullRequestFileResponse] = []
+    reviews: List[PullRequestReviewResponse] = []
+    diff: Optional[str] = None
+    workflow_runs: List[Dict[str, Any]] = []
+
+
+class MergePullRequestResponse(BaseModel):
+    job_id: str
+    merged: bool
+    sha: Optional[str] = None
+    message: str
+    workflow_runs: List[Dict[str, Any]] = []
+
+
 class ScanResponse(BaseModel):
     job_id: str
     status: JobStatus
@@ -168,3 +243,4 @@ class ScanResponse(BaseModel):
     operation: OperationType
     region: str
     message: Optional[str] = None
+

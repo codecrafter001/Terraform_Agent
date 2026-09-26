@@ -25,7 +25,11 @@ def _to_audit_record(r: Any) -> AuditLogRecord:
         security_findings_count=r.security_findings_count,
         zip_generated=r.zip_generated,
         created_at=r.created_at,
-        completed_at=r.completed_at
+        completed_at=r.completed_at,
+        github_pr_url=getattr(r, "github_pr_url", None),
+        github_pr_number=getattr(r, "github_pr_number", None),
+        github_hardening_pr_url=getattr(r, "github_hardening_pr_url", None),
+        github_hardening_pr_number=getattr(r, "github_hardening_pr_number", None),
     )
 
 

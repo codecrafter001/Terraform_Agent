@@ -55,6 +55,8 @@ class JobResults(BaseModel):
     approval_request: Optional[Dict[str, Any]] = None  # what the risk gate is waiting on
     approval_decision: Optional[Dict[str, Any]] = None
     hardening: Dict[str, Any] = {}  # optional Hardening proposal - separate from the adoption code
+    user_request: Optional[str] = None  # the natural-language request, if the job came from one
+    analyzed_intent: Optional[Dict[str, Any]] = None  # its parsed intent (operation, requested_changes, ...)
     cost_results: Dict[str, Any] = {}  # Infracost delta of the hardening proposal only
     github_pr: Optional[Dict[str, Any]] = None
     github_wave_prs: Dict[str, Any] = {}
@@ -76,5 +78,12 @@ class PullRequestResponse(BaseModel):
     pr_url: str
     pr_number: int
     branch: str
+    repo: Optional[str] = None
+    base_branch: Optional[str] = "main"
+    commit_sha: Optional[str] = None
+    changed_files: List[str] = []
+    pr_title: Optional[str] = None
+    status: Optional[str] = "open"
     wave: Optional[int] = None
     kind: str = "adoption"
+

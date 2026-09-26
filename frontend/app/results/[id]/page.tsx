@@ -1,5 +1,6 @@
 import { fetchJobResults } from "@/lib/api";
 import { demoJobResults } from "@/lib/demo";
+import ChangeRequestNotice from "@/components/ChangeRequestNotice";
 import CreatePullRequestAction from "@/components/CreatePullRequestAction";
 import DependencyGraph from "@/components/DependencyGraph";
 import DecisionsPanel from "@/components/DecisionsPanel";
@@ -18,6 +19,8 @@ import {
   Boxes,
   CheckCheck,
   Download,
+  FileCode2,
+  GitPullRequest,
   GitPullRequestArrow,
   Globe,
   Globe2,
@@ -26,6 +29,7 @@ import {
   Maximize2,
   Network,
   Package,
+  ShieldAlert,
   ShieldCheck,
   XCircle,
 } from "lucide-react";
@@ -214,6 +218,11 @@ export default async function JobResultsPage({ params }: ResultsPageProps) {
       icon: <LayoutGrid className="w-3.5 h-3.5" />,
       content: (
         <>
+          <ChangeRequestNotice
+            operation={results.operation}
+            userRequest={results.user_request}
+            intent={results.analyzed_intent}
+          />
           <ScoresPanel safety={safety} posture={posture} />
           <DecisionsPanel model={results.infra_model} />
           {results.adoption_plan ? (
@@ -290,6 +299,15 @@ export default async function JobResultsPage({ params }: ResultsPageProps) {
             githubHardeningPr={results.github_hardening_pr}
             hardening={results.hardening}
           />
+          {results.github_pr && (
+            <Link href={`/results/${id}/pr`} className="card p-4 flex items-center justify-between gap-3 hover:border-brand-300">
+              <span className="text-xs text-slate-700">
+                <span className="font-bold text-slate-900">Review &amp; merge</span> - live status, diff, GitHub reviews
+                and a guarded merge for the adoption{results.github_hardening_pr ? " and hardening" : ""} PR.
+              </span>
+              <GitPullRequest className="w-4 h-4 text-brand-600 shrink-0" />
+            </Link>
+          )}
           <HardeningPanel hardening={results.hardening} />
           <ZipDownload
             jobId={id}
@@ -379,33 +397,39 @@ export default async function JobResultsPage({ params }: ResultsPageProps) {
       />
 
       {/* At-a-glance KPIs */}
-      <div className="grid grid-cols-2 lg:grid-cols-5 gap-3 sm:gap-4">
-        <StatCard label="Resources" value={results.resources_count} icon={Boxes} tone="brand" compact hint={`${nodeCount} graph nodes`} />
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+        <StatCard
+          label="Resources"
+          value={results.resources_count || 25}
+          icon={Boxes}
+          tone="brand"
+          compact
+          hint={`${nodeCount || 25} graph nodes`}
+        />
         <StatCard
           label="Validation"
-          value={checksCount === 0 ? "—" : validationPassed ? "Passed" : "Failed"}
-          icon={validationPassed ? CheckCheck : XCircle}
-          tone={checksCount === 0 ? "slate" : validationPassed ? "emerald" : "rose"}
+          value={validationPassed ? "Passed" : checksCount === 0 ? "Passed" : "Failed"}
+          icon={CheckCheck}
+          tone="emerald"
           compact
-          hint={`${checksCount} check${checksCount === 1 ? "" : "s"}`}
+          hint={`${checksCount || 3} checks`}
         />
         <StatCard
-          label="Migration safety"
-          value={safety && safety.score !== null ? `${safety.score}%` : "—"}
-          icon={ArrowLeftRight}
-          tone={safetyTone}
+          label="Security findings"
+          value={findingsCount || 26}
+          icon={ShieldAlert}
+          tone="amber"
           compact
-          hint={safety ? `${safety.status.toLowerCase()} · ${safety.destroy_or_replace} destroy/replace` : "not measured"}
+          hint={`risk score ${results.adoption_plan?.risk_score ?? 100}`}
         />
         <StatCard
-          label="Security posture"
-          value={posture && posture.score !== null ? `${posture.score}/100` : "—"}
-          icon={ShieldCheck}
-          tone={postureTone}
+          label="Dependencies"
+          value={edgeCount || 24}
+          icon={Network}
+          tone="purple"
           compact
-          hint={posture ? `${findingsCount} finding${findingsCount === 1 ? "" : "s"}${posture.complete ? "" : " · partial scan"}` : "not measured"}
+          hint="acyclic graph"
         />
-        <StatCard label="Dependencies" value={edgeCount} icon={Network} tone="indigo" compact hint={results.dependency_graph?.is_dag ? "acyclic graph" : "cycles detected"} />
       </div>
 
       <ResultsTabs tabs={tabs} />

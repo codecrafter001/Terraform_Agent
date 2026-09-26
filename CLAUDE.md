@@ -155,6 +155,13 @@ infrastructure -> iac_engineering -> verification --PASS / INCOMPLETE / NEEDS_AP
    **Hardening PR** (`kind: "hardening"`) is stacked on the adoption PR's branch so its diff is only the
    fixes, and needs the adoption PR first. Code lives under `terraform/` so Atlantis / HCP Terraform /
    Spacelift run it as-is - TerraAgent never applies. The encrypted ZIP stays as a secondary download.
+   **PR lifecycle** (`/results/{id}/pr`): `GET /scan/{id}/pull-request?kind=adoption|hardening` shows live
+   status/diff/reviews/workflow runs of **this job's own PR only** (token only via the `X-GitHub-Token`
+   header, never stored). There is **no in-app approval** - TerraAgent opened the PR, so a teammate
+   approves it in GitHub. `POST .../pull-request/merge` merges only the job's own PR and only if
+   `confirm: true`, GitHub reports it open + mergeable, its latest reviews include an APPROVED and no
+   CHANGES_REQUESTED, and (hardening) the adoption PR is merged and the hardening PR retargeted onto its
+   base. Merging can start the team's apply-on-merge pipeline; TerraAgent itself still never applies.
 
 The old security-driven `agents/repair_agent.py::repair_agent_node` is no longer in the graph (its
 deterministic S3 fix now lives in `tools/hardening.py`). Routing: `route_after_verification` (FAIL and

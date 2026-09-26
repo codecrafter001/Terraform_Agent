@@ -306,9 +306,97 @@ export interface PlanEquivalenceResult {
 export interface GithubPrInfo {
   pr_url: string;
   pr_number: number;
+  pr_title?: string;
   branch?: string;
+  repo?: string;
+  base_branch?: string;
+  commit_sha?: string;
+  changed_files?: string[];
+  status?: string;
+  merged?: boolean;
+  merged_at?: string;
+  merge_commit_sha?: string;
   wave?: number | null;
   kind?: 'adoption' | 'hardening';
+  created_at?: string;
+}
+
+export interface PrFileChange {
+  filename: string;
+  status?: string;
+  additions: number;
+  deletions: number;
+  changes: number;
+  patch?: string | null;
+  raw_url?: string | null;
+}
+
+export interface PrReview {
+  id?: number;
+  user?: string;
+  state: string;
+  submitted_at?: string;
+  body?: string;
+}
+
+export interface GithubWorkflowRun {
+  id: number;
+  name: string;
+  status: string;
+  conclusion?: string | null;
+  html_url: string;
+  created_at: string;
+  event?: string;
+  head_branch?: string;
+  head_sha?: string;
+}
+
+export interface GithubPrDetails {
+  job_id: string;
+  repo: string;
+  pr_number: number;
+  title: string;
+  state: string;
+  html_url: string;
+  body?: string | null;
+  head_branch: string;
+  base_branch: string;
+  head_sha?: string | null;
+  mergeable?: boolean | null;
+  mergeable_state?: string | null;
+  merged: boolean;
+  merged_at?: string | null;
+  merge_commit_sha?: string | null;
+  additions: number;
+  deletions: number;
+  changed_files_count: number;
+  changed_files: PrFileChange[];
+  reviews: PrReview[];
+  diff?: string | null;
+  workflow_runs: GithubWorkflowRun[];
+  created_at?: string;
+  updated_at?: string;
+}
+
+export type PrKind = 'adoption' | 'hardening';
+
+// POST /scan/{id}/pull-request/merge - always this job's own PR (by kind),
+// only after a human approved it in GitHub, and only with confirm: true.
+export interface MergePrPayload {
+  github_token: string;
+  kind: PrKind;
+  confirm: boolean;
+  merge_method?: 'squash' | 'merge' | 'rebase';
+  commit_title?: string;
+  commit_message?: string;
+}
+
+export interface MergePrResponse {
+  job_id: string;
+  merged: boolean;
+  sha?: string;
+  message: string;
+  workflow_runs: GithubWorkflowRun[];
 }
 
 export interface AdoptionWave {
@@ -348,6 +436,8 @@ export interface JobResults {
   status: JobStatus;
   operation: OperationType;
   region: string;
+  user_request?: string | null;
+  analyzed_intent?: IntentAnalysisResult | null;
   resources_count: number;
   resources: Array<Record<string, unknown>>;
   dependency_graph: DependencyGraphData;

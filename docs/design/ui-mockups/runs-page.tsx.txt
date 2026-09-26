@@ -1,0 +1,89 @@
+import Link from "next/link";
+import { Terminal, CheckCircle2, AlertCircle, Clock, ArrowRight } from "lucide-react";
+import { PageHeader } from "@/components/ui";
+
+export default function TerraformRunsPage() {
+  const runs = [
+    {
+      id: "run-plan-8842",
+      type: "terraform plan (sandbox)",
+      target: "Production VPC & EC2 Estate",
+      status: "Passed",
+      drift: "0 drift / 2 in-place updates",
+      duration: "14.2s",
+      time: "10 mins ago",
+      jobId: "job-d276dd5537c3",
+    },
+    {
+      id: "run-val-8841",
+      type: "terraform validate & fmt",
+      target: "All Synthesized Stacks",
+      status: "Passed",
+      drift: "0 syntax errors",
+      duration: "3.1s",
+      time: "12 mins ago",
+      jobId: "job-d276dd5537c3",
+    },
+    {
+      id: "run-plan-8839",
+      type: "terraform plan -generate-config-out",
+      target: "AWS Resource Import Set",
+      status: "Passed",
+      drift: "0 destroy / 0 mutate",
+      duration: "18.5s",
+      time: "1 hour ago",
+      jobId: "job-s3-encryption",
+    },
+  ];
+
+  return (
+    <div className="space-y-6">
+      <PageHeader
+        breadcrumbs={[{ label: "Dashboard", href: "/" }, { label: "Terraform Runs" }]}
+        title={
+          <div className="flex items-center gap-3">
+            <Terminal className="w-6 h-6 text-brand-600" />
+            <span>Terraform Execution & Verification Runs</span>
+          </div>
+        }
+        meta="Automated sandbox plan, fmt, and validation execution logs for risk management."
+      />
+
+      <div className="card overflow-hidden">
+        <div className="divide-y divide-slate-100">
+          {runs.map((run) => (
+            <div key={run.id} className="p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 hover:bg-slate-50/50 transition-colors">
+              <div className="space-y-1">
+                <div className="flex items-center gap-2">
+                  <span className="font-mono text-xs font-bold text-slate-800">{run.id}</span>
+                  <span className="text-2xs font-semibold px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 flex items-center gap-1">
+                    <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                    {run.status}
+                  </span>
+                </div>
+                <div className="text-xs text-slate-700 font-medium">
+                  {run.type} · <span className="text-slate-500">{run.target}</span>
+                </div>
+                <div className="text-2xs text-slate-400 font-mono flex items-center gap-3">
+                  <span>{run.drift}</span>
+                  <span>•</span>
+                  <span className="flex items-center gap-1"><Clock className="w-3 h-3" /> {run.duration}</span>
+                  <span>•</span>
+                  <span>{run.time}</span>
+                </div>
+              </div>
+
+              <Link
+                href={`/results/${run.jobId}`}
+                className="btn-secondary py-2 text-xs font-semibold shrink-0 self-start sm:self-center"
+              >
+                View Job
+                <ArrowRight className="w-3.5 h-3.5" />
+              </Link>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}

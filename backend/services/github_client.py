@@ -40,6 +40,29 @@ class GitHubPullRequestError(RuntimeError):
     every other externally-sourced error string in this codebase."""
 
 
+def _handle_api_error(resp: httpx.Response, action_desc: str) -> GitHubPullRequestError:
+    """Produces descriptive, user-friendly error messages based on GitHub status codes."""
+    status = resp.status_code
+    try:
+        data = resp.json()
+        raw_msg = data.get("message", resp.text)
+    except Exception:
+        raw_msg = resp.text
+
+    prefix = f"Failed {action_desc}: {status}"
+    if status == 401:
+        return GitHubPullRequestError(f"{prefix} (401 Unauthorized) - {raw_msg}. Please verify your GitHub Personal Access Token (PAT).")
+    elif status == 403:
+        return GitHubPullRequestError(f"{prefix} (403 Forbidden) - {raw_msg}. Check token permissions (needs 'repo' scope) or API rate limits.")
+    elif status == 404:
+        return GitHubPullRequestError(f"{prefix} (404 Not Found) - {raw_msg}. Check the repository format (owner/repo).")
+    elif status in (405, 409):
+        return GitHubPullRequestError(f"{prefix} ({status} Conflict) - {raw_msg}. PR may have merge conflicts, not be mergeable, or be blocked by branch protection rules.")
+    elif status == 422:
+        return GitHubPullRequestError(f"{prefix} (422 Unprocessable) - {raw_msg}. Branch or changes may already exist or contain invalid parameters.")
+    return GitHubPullRequestError(f"{prefix} - {raw_msg}")
+
+
 async def _existing_file_sha(client: httpx.AsyncClient, repo: str, path: str, ref: str) -> Optional[str]:
     """Returns the blob sha of `path` on `ref` if it already exists there,
     None if it doesn't. The Contents API's PUT (create-or-update-file)
@@ -435,6 +458,7 @@ async def create_adoption_pr(
         try:
             files_to_commit: Dict[str, str] = {f"terraform/{name}": content for name, content in files_to_commit_base.items()}
             files_to_commit.update(docs_to_commit)
+            last_commit_sha: Optional[str] = None
 
             for path, content in files_to_commit.items():
                 encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
@@ -449,10 +473,13 @@ async def create_adoption_pr(
 
                 put_resp = await client.put(f"/repos/{repo}/contents/{path}", json=payload)
                 if put_resp.status_code not in (200, 201):
-                    raise GitHubPullRequestError(
-                        f"Failed to commit '{path}' to '{repo}@{branch_name}': "
-                        f"{put_resp.status_code} {put_resp.text}"
-                    )
+                    raise _handle_api_error(put_resp, f"committing '{path}' to '{repo}@{branch_name}'")
+                try:
+                    put_json = put_resp.json()
+                    if isinstance(put_json, dict) and "commit" in put_json:
+                        last_commit_sha = put_json["commit"].get("sha")
+                except Exception:
+                    pass
 
             pr_body = _build_pr_body(
                 job_id, adoption_plan, plan_equivalence_results, drift_results or {}, security_results,
@@ -470,9 +497,7 @@ async def create_adoption_pr(
                 },
             )
             if pr_resp.status_code not in (200, 201):
-                raise GitHubPullRequestError(
-                    f"Failed to open pull request on '{repo}': {pr_resp.status_code} {pr_resp.text}"
-                )
+                raise _handle_api_error(pr_resp, f"opening pull request on '{repo}'")
         except GitHubPullRequestError:
             # Never leave a half-populated branch behind - a retry of this
             # exact job/wave must be able to start clean, not hit "Reference
@@ -488,8 +513,15 @@ async def create_adoption_pr(
         return {
             "pr_url": pr_data.get("html_url"),
             "pr_number": pr_data.get("number"),
+            "pr_title": pr_title,
             "branch": branch_name,
+            "repo": repo,
+            "base_branch": base_branch,
+            "commit_sha": last_commit_sha or pr_data.get("head", {}).get("sha"),
+            "changed_files": list(files_to_commit.keys()),
             "wave": wave.get("wave") if wave else None,
+            "status": pr_data.get("state", "open"),
+            "created_at": pr_data.get("created_at"),
         }
 
 
@@ -550,13 +582,11 @@ async def create_hardening_pr(
         "X-GitHub-Api-Version": "2022-11-28",
     }
     branch_name = f"terraagent/harden-{job_id}"
+    last_commit_sha: Optional[str] = None
     async with httpx.AsyncClient(base_url=GITHUB_API_BASE, headers=headers, timeout=_REQUEST_TIMEOUT) as client:
         ref_resp = await client.get(f"/repos/{repo}/git/ref/heads/{adoption_branch}")
         if ref_resp.status_code != 200:
-            raise GitHubPullRequestError(
-                f"Failed to read the adoption branch '{adoption_branch}' on '{repo}': "
-                f"{ref_resp.status_code} {ref_resp.text}"
-            )
+            raise _handle_api_error(ref_resp, f"reading adoption branch '{adoption_branch}' on '{repo}'")
         await _create_branch(client, repo, branch_name, ref_resp.json()["object"]["sha"])
         try:
             for name, content in files.items():
@@ -571,9 +601,13 @@ async def create_hardening_pr(
                     payload["sha"] = existing_sha
                 put_resp = await client.put(f"/repos/{repo}/contents/{path}", json=payload)
                 if put_resp.status_code not in (200, 201):
-                    raise GitHubPullRequestError(
-                        f"Failed to commit '{path}' to '{repo}@{branch_name}': {put_resp.status_code} {put_resp.text}"
-                    )
+                    raise _handle_api_error(put_resp, f"committing '{path}' to '{repo}@{branch_name}'")
+                try:
+                    put_json = put_resp.json()
+                    if isinstance(put_json, dict) and "commit" in put_json:
+                        last_commit_sha = put_json["commit"].get("sha")
+                except Exception:
+                    pass
             pr_resp = await client.post(f"/repos/{repo}/pulls", json={
                 "title": f"TerraAgent: security hardening ({len(hardening.get('changes') or [])} changes) - job {job_id}",
                 "head": branch_name,
@@ -581,9 +615,7 @@ async def create_hardening_pr(
                 "body": _build_hardening_body(job_id, hardening, adoption_pr),
             })
             if pr_resp.status_code not in (200, 201):
-                raise GitHubPullRequestError(
-                    f"Failed to open pull request on '{repo}': {pr_resp.status_code} {pr_resp.text}"
-                )
+                raise _handle_api_error(pr_resp, f"opening hardening PR on '{repo}'")
         except GitHubPullRequestError:
             try:
                 await client.delete(f"/repos/{repo}/git/refs/heads/{branch_name}")
@@ -592,5 +624,169 @@ async def create_hardening_pr(
             raise
         pr_data = pr_resp.json()
         logger.info(f"[{job_id}] Opened hardening PR #{pr_data.get('number')} on {repo}")
-        return {"pr_url": pr_data.get("html_url"), "pr_number": pr_data.get("number"),
-                "branch": branch_name, "wave": None, "kind": "hardening"}
+        return {
+            "pr_url": pr_data.get("html_url"),
+            "pr_number": pr_data.get("number"),
+            "branch": branch_name,
+            "repo": repo,
+            "base_branch": adoption_branch,
+            "commit_sha": last_commit_sha or pr_data.get("head", {}).get("sha"),
+            "changed_files": [f"terraform/{k}" for k in files.keys()],
+            "wave": None,
+            "kind": "hardening",
+            "status": pr_data.get("state", "open"),
+        }
+
+
+async def get_pr_details(
+    github_token: str,
+    repo: str,
+    pr_number: int,
+) -> Dict[str, Any]:
+    """Fetches real-time GitHub PR metadata, state, changed files, and reviews."""
+    headers = {
+        "Authorization": f"Bearer {github_token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    async with httpx.AsyncClient(base_url=GITHUB_API_BASE, headers=headers, timeout=_REQUEST_TIMEOUT) as client:
+        pr_resp = await client.get(f"/repos/{repo}/pulls/{pr_number}")
+        if pr_resp.status_code != 200:
+            raise _handle_api_error(pr_resp, f"fetching PR #{pr_number} from '{repo}'")
+        pr_data = pr_resp.json()
+
+        # Fetch changed files
+        files_resp = await client.get(f"/repos/{repo}/pulls/{pr_number}/files", params={"per_page": 100})
+        files_data = files_resp.json() if files_resp.status_code == 200 else []
+
+        changed_files_list = []
+        if isinstance(files_data, list):
+            for f in files_data:
+                changed_files_list.append({
+                    "filename": f.get("filename"),
+                    "status": f.get("status"),
+                    "additions": f.get("additions", 0),
+                    "deletions": f.get("deletions", 0),
+                    "changes": f.get("changes", 0),
+                    "patch": f.get("patch"),
+                    "raw_url": f.get("raw_url"),
+                })
+
+        # Fetch reviews
+        reviews_resp = await client.get(f"/repos/{repo}/pulls/{pr_number}/reviews")
+        reviews_data = reviews_resp.json() if reviews_resp.status_code == 200 else []
+        reviews_list = []
+        if isinstance(reviews_data, list):
+            for r in reviews_data:
+                reviews_list.append({
+                    "id": r.get("id"),
+                    "user": (r.get("user") or {}).get("login"),
+                    "state": r.get("state"),
+                    "submitted_at": r.get("submitted_at"),
+                    "body": r.get("body"),
+                })
+
+        return {
+            "pr_number": pr_data.get("number"),
+            "title": pr_data.get("title"),
+            "state": pr_data.get("state"),
+            "html_url": pr_data.get("html_url"),
+            "body": pr_data.get("body"),
+            "head_branch": (pr_data.get("head") or {}).get("ref"),
+            "base_branch": (pr_data.get("base") or {}).get("ref"),
+            "head_sha": (pr_data.get("head") or {}).get("sha"),
+            "mergeable": pr_data.get("mergeable"),
+            "mergeable_state": pr_data.get("mergeable_state"),
+            "merged": pr_data.get("merged", False),
+            "merged_at": pr_data.get("merged_at"),
+            "merge_commit_sha": pr_data.get("merge_commit_sha"),
+            "additions": pr_data.get("additions", 0),
+            "deletions": pr_data.get("deletions", 0),
+            "changed_files_count": pr_data.get("changed_files", len(changed_files_list)),
+            "changed_files": changed_files_list,
+            "reviews": reviews_list,
+            "created_at": pr_data.get("created_at"),
+            "updated_at": pr_data.get("updated_at"),
+        }
+
+
+async def get_pr_diff(
+    github_token: str,
+    repo: str,
+    pr_number: int,
+) -> str:
+    """Fetches the raw unified git diff from GitHub for the pull request."""
+    headers = {
+        "Authorization": f"Bearer {github_token}",
+        "Accept": "application/vnd.github.v3.diff",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    async with httpx.AsyncClient(base_url=GITHUB_API_BASE, headers=headers, timeout=_REQUEST_TIMEOUT) as client:
+        diff_resp = await client.get(f"/repos/{repo}/pulls/{pr_number}")
+        if diff_resp.status_code != 200:
+            raise _handle_api_error(diff_resp, f"fetching diff for PR #{pr_number} on '{repo}'")
+        return diff_resp.text
+
+
+async def merge_pr(
+    github_token: str,
+    repo: str,
+    pr_number: int,
+    merge_method: str = "squash",
+    commit_title: Optional[str] = None,
+    commit_message: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Merges the approved GitHub Pull Request into the target base branch."""
+    headers = {
+        "Authorization": f"Bearer {github_token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    payload: Dict[str, Any] = {"merge_method": merge_method}
+    if commit_title:
+        payload["commit_title"] = commit_title
+    if commit_message:
+        payload["commit_message"] = commit_message
+
+    async with httpx.AsyncClient(base_url=GITHUB_API_BASE, headers=headers, timeout=_REQUEST_TIMEOUT) as client:
+        resp = await client.put(f"/repos/{repo}/pulls/{pr_number}/merge", json=payload)
+        if resp.status_code not in (200, 201):
+            raise _handle_api_error(resp, f"merging PR #{pr_number} on '{repo}'")
+        data = resp.json()
+        return {
+            "merged": data.get("merged", True),
+            "sha": data.get("sha"),
+            "message": data.get("message", "Pull Request successfully merged"),
+        }
+
+
+async def get_workflow_runs(
+    github_token: str,
+    repo: str,
+    branch: str = "main",
+) -> List[Dict[str, Any]]:
+    """Retrieves recent GitHub Actions workflow runs triggered on the target branch."""
+    headers = {
+        "Authorization": f"Bearer {github_token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    async with httpx.AsyncClient(base_url=GITHUB_API_BASE, headers=headers, timeout=_REQUEST_TIMEOUT) as client:
+        resp = await client.get(f"/repos/{repo}/actions/runs", params={"branch": branch, "per_page": 5})
+        if resp.status_code != 200:
+            return []
+        data = resp.json()
+        runs = []
+        for r in data.get("workflow_runs", []):
+            runs.append({
+                "id": r.get("id"),
+                "name": r.get("name"),
+                "status": r.get("status"),
+                "conclusion": r.get("conclusion"),
+                "html_url": r.get("html_url"),
+                "created_at": r.get("created_at"),
+                "event": r.get("event"),
+                "head_branch": r.get("head_branch"),
+                "head_sha": r.get("head_sha"),
+            })
+        return runs

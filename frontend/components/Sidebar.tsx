@@ -5,21 +5,27 @@ import Image from "next/image";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import type { LucideIcon } from "lucide-react";
-import { LayoutDashboard, Menu, PlusCircle, ShieldCheck, X } from "lucide-react";
+import {
+  LayoutDashboard,
+  Menu,
+  PlusCircle,
+  GitPullRequest,
+  ShieldCheck,
+  X,
+} from "lucide-react";
 import { checkHealth } from "@/lib/api";
 
 interface NavItem {
   href: string;
   label: string;
   icon: LucideIcon;
-  // Extra path prefixes that should also highlight this item (e.g. a job's
-  // progress/results pages live under the dashboard's job history).
   matches?: string[];
 }
 
 const NAV_ITEMS: NavItem[] = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard, matches: ["/results", "/scan/"] },
   { href: "/scan", label: "New Request", icon: PlusCircle },
+  { href: "/pull-requests", label: "Pull Requests", icon: GitPullRequest, matches: ["/pull-requests"] },
 ];
 
 function isActive(pathname: string, item: NavItem): boolean {

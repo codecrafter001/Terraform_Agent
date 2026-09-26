@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import { Eye, EyeOff, ExternalLink, GitPullRequestArrow, Loader2 } from "lucide-react";
 import { createPullRequest } from "@/lib/api";
 import { AdoptionPlan, GithubPrInfo, Hardening, JobStatus } from "@/lib/types";
@@ -115,15 +116,23 @@ export default function CreatePullRequestAction({
               </p>
             </div>
           </div>
-          <a
-            href={pr.pr_url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center gap-1.5 shadow-sm transition-all"
-          >
-            <span>View on GitHub</span>
-            <ExternalLink className="w-3.5 h-3.5" />
-          </a>
+          <div className="flex items-center gap-2">
+            <Link
+              href={`/results/${jobId}/pr`}
+              className="px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold flex items-center gap-1.5 shadow-sm transition-all"
+            >
+              <span>Review & Merge in TerraAgent</span>
+            </Link>
+            <a
+              href={pr.pr_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center gap-1.5 shadow-sm transition-all"
+            >
+              <span>View on GitHub</span>
+              <ExternalLink className="w-3.5 h-3.5" />
+            </a>
+          </div>
         </div>
       ))}
 

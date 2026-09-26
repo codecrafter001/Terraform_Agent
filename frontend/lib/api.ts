@@ -50,6 +50,10 @@ export interface AuditJobRecord {
   zip_generated: boolean;
   created_at: string;
   completed_at?: string;
+  github_pr_url?: string | null;
+  github_pr_number?: number | null;
+  github_hardening_pr_url?: string | null;
+  github_hardening_pr_number?: number | null;
 }
 
 // Server Components/SSR run inside the frontend container, where NEXT_PUBLIC_API_URL
@@ -88,9 +92,9 @@ export async function checkHealth(): Promise<boolean> {
   }
 }
 
-export async function fetchJobs(): Promise<AuditJobRecord[]> {
+export async function fetchJobs(limit = 20): Promise<AuditJobRecord[]> {
   try {
-    const res = await fetch(`${API_BASE}/jobs`, { cache: "no-store", headers: authHeaders() });
+    const res = await fetch(`${API_BASE}/jobs?limit=${limit}`, { cache: "no-store", headers: authHeaders() });
     if (!res.ok) return [];
     return await res.json();
   } catch {
@@ -187,7 +191,13 @@ export interface PullRequestResponseData {
   job_id: string;
   pr_url: string;
   pr_number: number;
+  pr_title?: string;
   branch: string;
+  repo?: string;
+  base_branch?: string;
+  commit_sha?: string;
+  changed_files?: string[];
+  status?: string;
   wave?: number | null;
   kind?: "adoption" | "hardening";
 }
@@ -205,6 +215,44 @@ export async function createPullRequest(jobId: string, payload: CreatePullReques
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: "Failed to create pull request" }));
     throw new Error(err.detail || "Pull request creation failed");
+  }
+
+  return await res.json();
+}
+
+export async function fetchPullRequestDetails(
+  jobId: string,
+  kind: import("./types").PrKind,
+  githubToken?: string,
+): Promise<import("./types").GithubPrDetails> {
+  // The token travels only in this dedicated header, for this one request.
+  const headers: Record<string, string> = { ...authHeaders() };
+  if (githubToken) headers["X-GitHub-Token"] = githubToken;
+
+  const res = await fetch(`${API_BASE}/scan/${jobId}/pull-request?kind=${kind}`, { cache: "no-store", headers });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: "Failed to fetch pull request details" }));
+    throw new Error(err.detail || "Could not fetch pull request details");
+  }
+  return await res.json();
+}
+
+export async function mergePullRequest(
+  jobId: string,
+  payload: import("./types").MergePrPayload,
+): Promise<import("./types").MergePrResponse> {
+  const res = await fetch(`${API_BASE}/scan/${jobId}/pull-request/merge`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...authHeaders(),
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: "Failed to merge pull request" }));
+    throw new Error(err.detail || "PR merge failed");
   }
 
   return await res.json();

@@ -3,7 +3,7 @@
 import asyncio
 import uuid
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sse_starlette.sse import EventSourceResponse
@@ -16,12 +16,19 @@ from models.scan import (
     IntentAnalysisRequest,
     IntentAnalysisResponse,
     JobStatus,
+    MergePullRequestRequest,
+    MergePullRequestResponse,
+    PullRequestDetailsResponse,
+    PullRequestFileResponse,
+    PullRequestReviewResponse,
     ScanRequest,
     ScanResponse,
 )
 from services.auth import require_api_key
 from services.celery_app import run_scan_task
-from services.database import create_job_record, mark_job_complete, mark_job_failed, set_github_pr, set_wave_pr
+from services.database import (
+    create_job_record, mark_job_complete, mark_job_failed, set_github_pr, set_hardening_pr, set_wave_pr,
+)
 from services.rate_limiter import limiter
 from services.redis_client import redis_service
 from tools.intent_analyzer import analyze_user_intent, parse_deterministic_intent
@@ -278,6 +285,8 @@ async def get_scan_results(job_id: str):
         approval_request=state.get("approval_request"),
         approval_decision=state.get("approval_decision"),
         hardening=state.get("hardening") or {},
+        user_request=state.get("user_request"),
+        analyzed_intent=state.get("analyzed_intent") or state.get("intent") or None,
         cost_results=state.get("cost_results") or {},
         github_pr=state.get("github_pr"),
         github_wave_prs=state.get("github_wave_prs", {}),
@@ -499,10 +508,184 @@ async def _create_hardening_pr(job_id: str, state: Dict[str, Any], body: CreateP
         raise HTTPException(status_code=502, detail=CredentialScrubber.scrub_text(str(e)))
 
     state["github_hardening_pr"] = pr_info
+    set_hardening_pr(job_id, pr_info)
     await redis_service.set_job_state(job_id, state)
     await redis_service.publish_log(
         job_id, f"[AGENT:system] GitHub hardening pull request opened: {pr_info['pr_url']}", agent_name="system")
     return PullRequestResponse(job_id=job_id, **pr_info)
+
+
+_PR_STATE_KEYS = {"adoption": "github_pr", "hardening": "github_hardening_pr"}
+
+
+def _own_pr(state: Dict[str, Any], kind: str) -> Dict[str, Any]:
+    """This job's own PR of the given kind. The PR-lifecycle endpoints only
+    ever act on these - never on a repo/PR number a caller supplies."""
+    pr = dict(state.get(_PR_STATE_KEYS[kind]) or {})
+    if not pr.get("repo") or not pr.get("pr_number"):
+        raise HTTPException(status_code=404, detail=f"This job has no {kind} pull request yet - open it first")
+    return pr
+
+
+def _github_token_header(request: Request) -> str:
+    # Only this dedicated header - never logged, never persisted.
+    return (request.headers.get("X-GitHub-Token") or "").strip()
+
+
+def _approved_in_github(reviews: List[Dict[str, Any]]) -> bool:
+    """At least one reviewer's latest review is APPROVED and nobody's latest
+    is CHANGES_REQUESTED (GitHub reports every review in order)."""
+    latest: Dict[str, str] = {}
+    for r in reviews:
+        if r.get("state") in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED"):
+            latest[str(r.get("user"))] = r["state"]
+    states = set(latest.values())
+    return "APPROVED" in states and "CHANGES_REQUESTED" not in states
+
+
+def _details_response(job_id: str, pr: Dict[str, Any], details: Optional[Dict[str, Any]],
+                      diff_text: Optional[str], workflow_runs: List[Dict[str, Any]]) -> PullRequestDetailsResponse:
+    d = details or {}
+    files = d.get("changed_files") or [{"filename": f} for f in pr.get("changed_files") or []]
+    return PullRequestDetailsResponse(
+        job_id=job_id,
+        repo=pr["repo"],
+        pr_number=pr["pr_number"],
+        title=d.get("title") or pr.get("pr_title") or f"PR #{pr['pr_number']}",
+        state=d.get("state") or pr.get("status") or "open",
+        html_url=d.get("html_url") or pr.get("pr_url") or f"https://github.com/{pr['repo']}/pull/{pr['pr_number']}",
+        body=d.get("body"),
+        head_branch=d.get("head_branch") or pr.get("branch") or "",
+        base_branch=d.get("base_branch") or pr.get("base_branch") or "main",
+        head_sha=d.get("head_sha") or pr.get("commit_sha"),
+        mergeable=d.get("mergeable"),
+        mergeable_state=d.get("mergeable_state"),
+        merged=bool(d.get("merged", pr.get("merged", False))),
+        merged_at=d.get("merged_at") or pr.get("merged_at"),
+        merge_commit_sha=d.get("merge_commit_sha") or pr.get("merge_commit_sha"),
+        additions=d.get("additions", 0),
+        deletions=d.get("deletions", 0),
+        changed_files_count=d.get("changed_files_count", len(files)),
+        changed_files=[PullRequestFileResponse(**f) for f in files],
+        reviews=[PullRequestReviewResponse(**r) for r in d.get("reviews") or []],
+        diff=diff_text,
+        workflow_runs=workflow_runs,
+    )
+
+
+@router.get("/{job_id}/pull-request", response_model=PullRequestDetailsResponse)
+async def get_pull_request_status(request: Request, job_id: str, kind: Literal["adoption", "hardening"] = "adoption"):
+    """Live status of this job's own adoption or hardening PR: merge state,
+    changed files, diff, reviews and recent workflow runs on the base branch.
+    Live data needs a GitHub token in the X-GitHub-Token header (used for this
+    request only); without it, the cached PR record is returned."""
+    state = await redis_service.get_job_state(job_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="Job not found")
+    pr = _own_pr(state, kind)
+    token = _github_token_header(request)
+    if not token:
+        return _details_response(job_id, pr, None, None, [])
+
+    from services.github_client import GitHubPullRequestError, get_pr_details, get_pr_diff, get_workflow_runs
+    from tools.credential_scrubber import CredentialScrubber
+
+    try:
+        details = await get_pr_details(github_token=token, repo=pr["repo"], pr_number=pr["pr_number"])
+    except GitHubPullRequestError as e:
+        raise HTTPException(status_code=502, detail=CredentialScrubber.scrub_text(str(e)))
+    diff_text: Optional[str] = None
+    try:
+        diff_text = await get_pr_diff(github_token=token, repo=pr["repo"], pr_number=pr["pr_number"])
+    except Exception as e:
+        logger.warning(f"[{job_id}] Could not fetch PR diff: {CredentialScrubber.scrub_text(str(e))}")
+    workflow_runs: List[Dict[str, Any]] = []
+    try:
+        workflow_runs = await get_workflow_runs(
+            github_token=token, repo=pr["repo"], branch=details.get("base_branch") or "main")
+    except Exception as e:
+        logger.warning(f"[{job_id}] Could not fetch workflow runs: {CredentialScrubber.scrub_text(str(e))}")
+
+    pr["status"] = details.get("state", "open")
+    if details.get("merged"):
+        pr.update(merged=True, merge_commit_sha=details.get("merge_commit_sha"), merged_at=details.get("merged_at"))
+    state[_PR_STATE_KEYS[kind]] = pr
+    await redis_service.set_job_state(job_id, state)
+    return _details_response(job_id, pr, details, diff_text, workflow_runs)
+
+
+@router.post("/{job_id}/pull-request/merge", response_model=MergePullRequestResponse)
+@limiter.limit("20/hour")
+async def merge_pull_request(request: Request, job_id: str, body: MergePullRequestRequest):
+    """Merge this job's own PR - a human action with guard rails, because the
+    team's pipeline may apply on merge. TerraAgent itself still never runs
+    terraform apply. Refused unless: confirm is true; for hardening, the
+    adoption PR is merged and the hardening PR now targets the same base; and
+    GitHub reports the PR open, mergeable, and approved by a reviewer (in
+    GitHub - TerraAgent does not approve its own PRs)."""
+    if not body.confirm:
+        raise HTTPException(status_code=422, detail="Confirm the merge: your pipeline may apply this change once merged")
+    state = await redis_service.get_job_state(job_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="Job not found")
+    pr = _own_pr(state, body.kind)
+    adoption = state.get("github_pr") or {}
+    if body.kind == "hardening" and not adoption.get("merged"):
+        raise HTTPException(status_code=409, detail="Merge the adoption PR first - hardening is applied on top of it")
+
+    from services.github_client import GitHubPullRequestError, get_pr_details, get_workflow_runs, merge_pr
+    from tools.credential_scrubber import CredentialScrubber
+
+    token = body.github_token.get_secret_value()
+    try:
+        details = await get_pr_details(github_token=token, repo=pr["repo"], pr_number=pr["pr_number"])
+    except GitHubPullRequestError as e:
+        raise HTTPException(status_code=502, detail=CredentialScrubber.scrub_text(str(e)))
+    if details.get("merged") or details.get("state") != "open":
+        raise HTTPException(status_code=409, detail=f"The PR is {'already merged' if details.get('merged') else 'not open'}")
+    if body.kind == "hardening" and details.get("base_branch") != adoption.get("base_branch"):
+        raise HTTPException(
+            status_code=409,
+            detail=(f"The hardening PR still targets '{details.get('base_branch')}'. Retarget it onto "
+                    f"'{adoption.get('base_branch')}' first (GitHub does this when the adoption branch is deleted)."),
+        )
+    if details.get("mergeable") is not True:
+        raise HTTPException(
+            status_code=409,
+            detail=f"GitHub doesn't report the PR as mergeable yet ({details.get('mergeable_state') or 'unknown'})",
+        )
+    if not _approved_in_github(details.get("reviews") or []):
+        raise HTTPException(status_code=409, detail="The PR needs an approving review in GitHub before it can be merged")
+
+    try:
+        merge_result = await merge_pr(
+            github_token=token, repo=pr["repo"], pr_number=pr["pr_number"],
+            merge_method=body.merge_method, commit_title=body.commit_title, commit_message=body.commit_message,
+        )
+    except GitHubPullRequestError as e:
+        raise HTTPException(status_code=502, detail=CredentialScrubber.scrub_text(str(e)))
+
+    base_branch = details.get("base_branch") or pr.get("base_branch") or "main"
+    workflow_runs: List[Dict[str, Any]] = []
+    try:
+        workflow_runs = await get_workflow_runs(github_token=token, repo=pr["repo"], branch=base_branch)
+    except Exception as e:
+        logger.warning(f"[{job_id}] Failed to fetch workflow runs after merge: {CredentialScrubber.scrub_text(str(e))}")
+
+    pr.update(status="merged", merged=True, merge_commit_sha=merge_result.get("sha"),
+              merged_at=datetime.utcnow().isoformat())
+    state[_PR_STATE_KEYS[body.kind]] = pr
+    await redis_service.set_job_state(job_id, state)
+    await redis_service.publish_log(
+        job_id,
+        f"[AGENT:system] {body.kind.title()} PR #{pr['pr_number']} merged into {base_branch} by a human "
+        f"(commit {merge_result.get('sha')}). Any apply happens in the team's own pipeline.",
+        agent_name="system",
+    )
+    return MergePullRequestResponse(
+        job_id=job_id, merged=True, sha=merge_result.get("sha"),
+        message=merge_result.get("message", "Pull Request successfully merged"), workflow_runs=workflow_runs,
+    )
 
 
 @router.get("/{job_id}/logs")

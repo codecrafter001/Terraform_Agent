@@ -26,6 +26,8 @@ class JobRecord(Base):
     approval_decision_summary = Column(String, nullable=True)  # JSON-encoded {decision, reason, decided_at} or null
     github_pr_url = Column(String, nullable=True)
     github_pr_number = Column(Integer, nullable=True)
+    github_hardening_pr_url = Column(String, nullable=True)
+    github_hardening_pr_number = Column(Integer, nullable=True)
     github_wave_prs_summary = Column(String, nullable=True)  # JSON-encoded {wave_number: {pr_url, pr_number, branch}}
     created_at = Column(String, nullable=False)
     completed_at = Column(String, nullable=True)

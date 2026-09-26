@@ -136,6 +136,21 @@ def set_github_pr(job_id: str, pr_info: Dict[str, Any]) -> None:
         session.close()
 
 
+def set_hardening_pr(job_id: str, pr_info: Dict[str, Any]) -> None:
+    """Persists the Hardening PR's url/number - same token discipline as set_github_pr."""
+    from models.orm import JobRecord
+    session = SessionLocal()
+    try:
+        record = session.get(JobRecord, job_id)
+        if record is None:
+            return
+        record.github_hardening_pr_url = pr_info.get("pr_url")
+        record.github_hardening_pr_number = pr_info.get("pr_number")
+        session.commit()
+    finally:
+        session.close()
+
+
 def set_wave_pr(job_id: str, wave_number: int, pr_info: Dict[str, Any]) -> None:
     """Persists one wave-scoped PR's url/number/branch - same non-persistence
     guarantee for the token as set_github_pr above. A job can have several
