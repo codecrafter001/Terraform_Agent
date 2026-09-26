@@ -23,8 +23,8 @@ Rules #1–#2 above are enforced by one real, code-level mechanism, not just con
 subprocess ever starts: the binary must be `terraform`/`tofu`, the subcommand must be one of
 `version`/`fmt`/`init`/`validate`/`plan`/`show`/`providers`, and no argv token may be
 `apply`/`destroy`/`import`, bare or as a flag (`plan -destroy`) - otherwise it raises. **This is a chokepoint only for callers that actually go through it.**
-Verified: five other tools (`checkov_runner.py`, `conftest_runner.py`, `trivy_runner.py`,
-`tfsec_runner.py`, `infracost_runner.py`) already shell out via their own independent
+Verified: four other tools (`checkov_runner.py`, `conftest_runner.py`, `trivy_runner.py`,
+`infracost_runner.py`) already shell out via their own independent
 `asyncio.create_subprocess_exec` calls with fixed argv, bypassing `run_command` entirely — benign
 today only because none of them ever names the `terraform`/`tofu` binary.
 
@@ -163,8 +163,8 @@ infrastructure -> iac_engineering -> verification --PASS / INCOMPLETE / NEEDS_AP
    CHANGES_REQUESTED, and (hardening) the adoption PR is merged and the hardening PR retargeted onto its
    base. Merging can start the team's apply-on-merge pipeline; TerraAgent itself still never applies.
 
-The old security-driven `agents/repair_agent.py::repair_agent_node` is no longer in the graph (its
-deterministic S3 fix now lives in `tools/hardening.py`). Routing: `route_after_verification` (FAIL and
+The old security-driven `agents/repair_agent.py` was removed (its deterministic S3 fix lives in
+`tools/hardening.py`; the `repair_agent` step name now means `agents/validation_repair.py`). Routing: `route_after_verification` (FAIL and
 `repair_attempts < max_repair_iterations` -> iac_engineering; everything else -> delivery;
 env `TERRAAGENT_MAX_REPAIR_ITERATIONS`, default 2) and `route_after_delivery` (`regenerate_requested`
 -> iac_engineering, else END).
@@ -195,18 +195,17 @@ terraagent/
 │   ├── main.py             # FastAPI entrypoint, CORS, lifespan & healthcheck
 │   ├── routers/            # scan.py, jobs.py, download.py
 │   ├── agents/             # 4 agents (graph.py) + the step modules they run
-│   ├── tools/              # AWS scanner, runners (terraform, tfsec, checkov, trivy, conftest, zip)
+│   ├── tools/              # AWS scanner, runners (terraform, checkov, trivy, conftest, infracost, zip)
 │   ├── models/             # Pydantic models (ScanRequest with SecretStr) & SQLAlchemy DB models
 │   ├── services/           # Celery app, Redis async client, Ollama client
 │   ├── prompts/            # HCL generation, repair, and documentation prompt templates
 │   ├── requirements.txt    # Python dependencies
-│   └── Dockerfile          # Python 3.11-slim + Terraform CLI + tfsec + non-root user
+│   └── Dockerfile          # Python 3.11-slim + Terraform/OpenTofu + Checkov/Trivy/Conftest/Infracost + non-root user
 ├── docker/                 # Orchestration & reverse proxy
 │   ├── docker-compose.yml  # Multi-service composition (API, Frontend, Redis, Celery, Ollama, Nginx)
 │   ├── docker-compose.dev.yml
 │   └── nginx/nginx.conf    # Upstream routing (/api -> FastAPI:8000, / -> Next.js:3000)
 ├── security/               # Security policies & tool configurations
-│   ├── .tfsec/config.yml
 │   ├── checkov/.checkov.yaml
 │   └── policies/           # Rego policies (no_public_s3.rego, no_open_security_group.rego)
 ├── scripts/                # Utility scripts (init_dev.sh, run_scan.sh, test_pipeline.sh)

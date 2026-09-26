@@ -16,7 +16,7 @@ broker_url = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
 result_backend = os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/0")
 OUTPUT_DIR = os.getenv("OUTPUT_DIR", "/tmp/terraagent")
 ZIP_EXPIRY_SECONDS = int(os.getenv("ZIP_EXPIRY_HOURS", "24")) * 3600
-# Generous ceiling for a real scan (AWS discovery + LLM calls + terraform/tfsec/
+# Generous ceiling for a real scan (AWS discovery + LLM calls + terraform/
 # checkov/trivy subprocesses, possibly through 2 repair cycles) - only meant to
 # catch a worker that died and will never report back, not a slow-but-alive one.
 MAX_JOB_RUNTIME_SECONDS = int(os.getenv("MAX_JOB_RUNTIME_SECONDS", "1800"))
