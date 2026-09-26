@@ -18,6 +18,7 @@ import {
   Boxes,
   CheckCheck,
   Download,
+  GitPullRequestArrow,
   Globe,
   Globe2,
   LayoutGrid,
@@ -276,10 +277,20 @@ export default async function JobResultsPage({ params }: ResultsPageProps) {
     },
     {
       id: "deliverables",
-      label: "Deliverables",
+      label: "Pull request & bundle",
       icon: <Package className="w-3.5 h-3.5" />,
       content: (
         <>
+          <CreatePullRequestAction
+            jobId={id}
+            status={results.status}
+            githubPr={results.github_pr}
+            githubWavePrs={results.github_wave_prs}
+            adoptionPlan={results.adoption_plan}
+            githubHardeningPr={results.github_hardening_pr}
+            hardening={results.hardening}
+          />
+          <HardeningPanel hardening={results.hardening} />
           <ZipDownload
             jobId={id}
             downloadUrl={results.download_url}
@@ -287,14 +298,6 @@ export default async function JobResultsPage({ params }: ResultsPageProps) {
             sha256={results.zip_sha256}
             status={results.status}
           />
-          <CreatePullRequestAction
-            jobId={id}
-            status={results.status}
-            githubPr={results.github_pr}
-            githubWavePrs={results.github_wave_prs}
-            adoptionPlan={results.adoption_plan}
-          />
-          <HardeningPanel hardening={results.hardening} />
         </>
       ),
     },
@@ -329,14 +332,27 @@ export default async function JobResultsPage({ params }: ResultsPageProps) {
               New scan
             </Link>
             {results.status === "COMPLETE" && !isDemo && (
-              <a
-                href={results.download_url || `/api/download/${id}`}
-                download={`terraagent_${id}.zip`}
-                className="btn-primary"
-              >
-                <Download className="w-4 h-4" />
-                Download bundle
-              </a>
+              <>
+                <a
+                  href={results.download_url || `/api/download/${id}`}
+                  download={`terraagent_${id}.zip`}
+                  className="btn-secondary"
+                >
+                  <Download className="w-4 h-4" />
+                  ZIP
+                </a>
+                {results.github_pr ? (
+                  <a href={results.github_pr.pr_url} target="_blank" rel="noopener noreferrer" className="btn-primary">
+                    <GitPullRequestArrow className="w-4 h-4" />
+                    Adoption PR #{results.github_pr.pr_number}
+                  </a>
+                ) : (
+                  <a href="#deliverables" className="btn-primary">
+                    <GitPullRequestArrow className="w-4 h-4" />
+                    Open pull request
+                  </a>
+                )}
+              </>
             )}
           </>
         }

@@ -58,6 +58,7 @@ class JobResults(BaseModel):
     cost_results: Dict[str, Any] = {}  # Infracost delta of the hardening proposal only
     github_pr: Optional[Dict[str, Any]] = None
     github_wave_prs: Dict[str, Any] = {}
+    github_hardening_pr: Optional[Dict[str, Any]] = None
     zip_available: bool = False
     download_url: Optional[str] = None
     zip_sha256: Optional[str] = None
@@ -76,3 +77,4 @@ class PullRequestResponse(BaseModel):
     pr_number: int
     branch: str
     wave: Optional[int] = None
+    kind: str = "adoption"

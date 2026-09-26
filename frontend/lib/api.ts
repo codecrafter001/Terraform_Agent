@@ -178,6 +178,7 @@ export interface CreatePullRequestPayload {
   repo: string;
   base_branch?: string;
   wave?: number;
+  kind?: "adoption" | "hardening";
 }
 
 export interface PullRequestResponseData {
@@ -186,6 +187,7 @@ export interface PullRequestResponseData {
   pr_number: number;
   branch: string;
   wave?: number | null;
+  kind?: "adoption" | "hardening";
 }
 
 export async function createPullRequest(jobId: string, payload: CreatePullRequestPayload): Promise<PullRequestResponseData> {

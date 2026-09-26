@@ -280,6 +280,7 @@ async def get_scan_results(job_id: str):
         cost_results=state.get("cost_results") or {},
         github_pr=state.get("github_pr"),
         github_wave_prs=state.get("github_wave_prs", {}),
+        github_hardening_pr=state.get("github_hardening_pr"),
         zip_available=bool(state.get("zip_path")),
         download_url=f"/api/download/{job_id}" if state.get("zip_path") else None,
         zip_sha256=state.get("zip_sha256"),
@@ -409,6 +410,8 @@ async def create_pull_request(request: Request, job_id: str, body: CreatePullReq
     tf_files = state.get("terraform_files") or {}
     if not tf_files:
         raise HTTPException(status_code=409, detail="No generated Terraform files available for this job")
+    if body.kind == "hardening":
+        return await _create_hardening_pr(job_id, state, body)
 
     wave_info = None
     if body.wave is not None:
@@ -440,6 +443,9 @@ async def create_pull_request(request: Request, job_id: str, body: CreatePullReq
             resources=state.get("resources") or [],
             wave=wave_info,
             base_branch=body.base_branch,
+            migration_safety=state.get("migration_safety"),
+            security_posture=state.get("security_posture"),
+            infra_model=state.get("infra_model"),
         )
     except GitHubPullRequestError as e:
         # GitHub's own error text can legitimately echo back request details
@@ -465,6 +471,36 @@ async def create_pull_request(request: Request, job_id: str, body: CreatePullReq
         agent_name="system"
     )
 
+    return PullRequestResponse(job_id=job_id, **pr_info)
+
+
+async def _create_hardening_pr(job_id: str, state: Dict[str, Any], body: CreatePullRequestRequest) -> PullRequestResponse:
+    """The Hardening PR stacks on the adoption PR's branch - so the adoption
+    PR has to exist first, and there has to be validated hardening code."""
+    hardening = state.get("hardening") or {}
+    if not hardening.get("files"):
+        raise HTTPException(status_code=409, detail="This job has no validated hardening changes to open a PR for")
+    adoption_pr = state.get("github_pr") or {}
+    if not adoption_pr.get("branch"):
+        raise HTTPException(status_code=409, detail="Open the adoption PR first - hardening is applied on top of it")
+
+    from services.github_client import GitHubPullRequestError, create_hardening_pr
+    from tools.credential_scrubber import CredentialScrubber
+    try:
+        pr_info = await create_hardening_pr(
+            github_token=body.github_token.get_secret_value(),
+            repo=body.repo,
+            job_id=job_id,
+            hardening=hardening,
+            adoption_pr=adoption_pr,
+        )
+    except GitHubPullRequestError as e:
+        raise HTTPException(status_code=502, detail=CredentialScrubber.scrub_text(str(e)))
+
+    state["github_hardening_pr"] = pr_info
+    await redis_service.set_job_state(job_id, state)
+    await redis_service.publish_log(
+        job_id, f"[AGENT:system] GitHub hardening pull request opened: {pr_info['pr_url']}", agent_name="system")
     return PullRequestResponse(job_id=job_id, **pr_info)
 
 

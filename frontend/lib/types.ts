@@ -308,6 +308,7 @@ export interface GithubPrInfo {
   pr_number: number;
   branch?: string;
   wave?: number | null;
+  kind?: 'adoption' | 'hardening';
 }
 
 export interface AdoptionWave {
@@ -366,6 +367,7 @@ export interface JobResults {
   cost_results?: CostResults;
   github_pr?: GithubPrInfo | null;
   github_wave_prs?: Record<string, GithubPrInfo>;
+  github_hardening_pr?: GithubPrInfo | null;
   zip_available: boolean;
   download_url?: string;
   zip_sha256?: string;

@@ -341,3 +341,52 @@ async def test_wave_without_resources_raises_value_error():
     wave = {"wave": 1, "resource_ids": ["bucket-1"], "risk_level": "low", "risk_signals": []}
     with pytest.raises(ValueError):
         await create_adoption_pr(**_base_kwargs(wave=wave, resources=None))
+
+
+def test_adoption_body_has_scores_resource_table_and_decisions():
+    from services.github_client import _build_pr_body
+    vpc_address = f"aws_vpc.{unique_clean_name('main', 'vpc-1')}"
+    body = _build_pr_body(
+        "job-1", {"total_resource_count": 2}, {"checks": [{"check_name": "show", "passed": True}],
+                                               "changes": []},
+        {"skipped": True}, {"findings": []}, {"skipped": True}, None, None,
+        migration_safety={"score": 100, "status": "SAFE", "basis": "plan", "destroy_or_replace": 0},
+        security_posture={"score": 70, "rating": "FAIR", "complete": True},
+        infra_model={"summary": {"manage": 1, "reference": 0, "exclude": 1, "review": 0}, "records": [
+            {"type": "aws_vpc", "id": "vpc-1", "name": "main", "import_id": "vpc-1", "decision": "manage"},
+            {"type": "aws_iam_role", "id": "svc|role", "decision": "exclude", "reasons": ["service-linked"]},
+        ]},
+    )
+    assert "Migration Safety:** 100%" in body and "Security Posture:** 70/100" in body
+    assert f"| `{vpc_address}` | `vpc-1` | no-op |" in body
+    assert "svc\|role" in body  # discovered text can't break the table
+    assert "zero changes" in body and "Cost Impact" in body and "HCP Terraform" in body
+
+
+@pytest.mark.asyncio
+async def test_hardening_pr_stacks_on_the_adoption_branch():
+    from services.github_client import create_hardening_pr
+    responses = [
+        _FakeResponse(200, {"object": {"sha": "adoption-head"}}),  # GET adoption branch ref
+        _FakeResponse(201, {}),  # POST refs (hardening branch)
+        _FakeResponse(200, {"sha": "old-blob"}),  # GET contents - file exists on the adoption branch
+        _FakeResponse(200, {}),  # PUT contents
+        _FakeResponse(201, {"html_url": "https://github.com/o/r/pull/8", "number": 8}),  # POST pulls
+    ]
+    fake_client = _FakeAsyncClient(responses)
+    hardening = {"files": {"data.tf": "x"}, "validated": True,
+                 "changes": [{"title": "Block public access", "impact": "behavior_changing",
+                              "explanation": "e", "risk": "r", "findings": ["CKV_AWS_53"]}],
+                 "cost": {"monthly_delta": 0.0, "currency": "USD"}}
+    with patch("httpx.AsyncClient", return_value=fake_client):
+        result = await create_hardening_pr(FAKE_TOKEN, "o/r", "job-1", hardening,
+                                           {"branch": "terraagent/adopt-job-1", "pr_number": 7})
+
+    assert result["kind"] == "hardening" and result["branch"] == "terraagent/harden-job-1"
+    calls = fake_client.calls
+    assert calls[0][1] == "/repos/o/r/git/ref/heads/terraagent/adopt-job-1"
+    assert calls[3][2]["json"]["sha"] == "old-blob"
+    pr = calls[-1][2]["json"]
+    assert pr["base"] == "terraagent/adopt-job-1"
+    assert "Merge and apply the adoption PR first" in pr["body"] and "CKV_AWS_53" in pr["body"]
+    assert FAKE_TOKEN not in str(calls)

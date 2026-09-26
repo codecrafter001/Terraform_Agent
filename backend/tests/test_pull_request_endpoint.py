@@ -180,3 +180,22 @@ def test_pull_request_wave_scoped_success_persists_under_github_wave_prs(client,
     assert results["github_wave_prs"]["1"]["pr_url"] == "https://github.com/my-org/my-repo/pull/5"
     # The whole-job github_pr field must stay untouched by a wave-scoped PR.
     assert results["github_pr"] is None
+
+
+def test_hardening_pr_requires_the_adoption_pr_first(client):
+    job_id = "job-hardenfirst"
+    _seed_complete_state(job_id)
+    state = asyncio.run(redis_service.get_job_state(job_id))
+    state["hardening"] = {"files": {"data.tf": "x"}, "changes": [{}]}
+    asyncio.run(redis_service.set_job_state(job_id, state))
+    resp = client.post(f"/api/scan/{job_id}/pull-request",
+                       json={"github_token": FAKE_TOKEN, "repo": "o/r", "kind": "hardening"})
+    assert resp.status_code == 409 and "adoption PR first" in resp.json()["detail"]
+
+
+def test_hardening_pr_requires_hardening_changes(client):
+    job_id = "job-hardennone"
+    _seed_complete_state(job_id)
+    resp = client.post(f"/api/scan/{job_id}/pull-request",
+                       json={"github_token": FAKE_TOKEN, "repo": "o/r", "kind": "hardening"})
+    assert resp.status_code == 409 and "no validated hardening" in resp.json()["detail"]

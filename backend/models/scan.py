@@ -146,6 +146,11 @@ class CreatePullRequestRequest(BaseModel):
                      "reviewable diff containing only that wave's resource blocks plus shared "
                      "foundational files. Omit for the original whole-job PR."
     )
+    kind: Literal["adoption", "hardening"] = Field(
+        default="adoption",
+        description="adoption: the zero-change import PR. hardening: the optional security-fix PR, "
+                    "stacked on the adoption PR's branch (open the adoption PR first).",
+    )
 
 
 class ScanResponse(BaseModel):
