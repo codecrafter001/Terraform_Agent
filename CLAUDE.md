@@ -177,6 +177,12 @@ Progress fields for the UI: `current_stage`, `completed_stages`, `stage_summarie
 `approval_request`, `hardening`, `cost_results`). Step-level `current_agent`/`completed_agents`/`agent_timings` are kept for
 metrics.
 
+Job list (Postgres audit records, `routers/jobs.py`): `GET /jobs` also returns
+`migration_safety_score`/`migration_safety_status` (stored at completion so the dashboard shows them
+after Redis state expires; null without evidence) and hides archived jobs unless
+`?include_archived=true`. `DELETE /jobs/{id}` **archives** (soft delete: `archived = true`, the record,
+bundle and PR links are kept); a RUNNING/PENDING/AWAITING_APPROVAL job can't be archived (409).
+
 Live logs: `redis_service.publish_log` stores a per-job, sequence-numbered history
 (`job:{id}:loghist`) alongside pub/sub; `GET /scan/{id}/logs` replays it on connect. Slow steps emit a
 heartbeat line every `TERRAAGENT_HEARTBEAT_SECONDS` (default 15). Every terraform/tofu command has a

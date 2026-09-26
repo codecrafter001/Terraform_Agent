@@ -9,7 +9,7 @@ import os
 from datetime import datetime, timedelta
 from typing import Any, Dict, List
 
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, inspect, or_, text
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:////tmp/terraagent/terraagent.db")
@@ -111,6 +111,10 @@ def mark_job_complete(job_id: str, final_state: Dict[str, Any]) -> None:
         record.pending_approval_summary = json.dumps(pending_approval) if pending_approval else None
         approval_decision = final_state.get("approval_decision")
         record.approval_decision_summary = json.dumps(approval_decision) if approval_decision else None
+        safety = final_state.get("migration_safety") or {}
+        score = safety.get("score")
+        record.migration_safety_score = int(score) if isinstance(score, (int, float)) else None
+        record.migration_safety_status = safety.get("status") or None
 
         record.completed_at = datetime.utcnow().isoformat()
         session.commit()
@@ -221,17 +225,36 @@ def mark_stale_jobs_failed(max_age_seconds: int) -> int:
         session.close()
 
 
-def list_job_records(limit: int = 100, offset: int = 0) -> List[Any]:
+def list_job_records(limit: int = 100, offset: int = 0, include_archived: bool = False) -> List[Any]:
     from models.orm import JobRecord
     session = SessionLocal()
     try:
+        query = session.query(JobRecord)
+        if not include_archived:
+            # archived is NULL on every row written before the column existed.
+            query = query.filter(or_(JobRecord.archived.is_(None), JobRecord.archived.is_(False)))
         return (
-            session.query(JobRecord)
+            query
             .order_by(JobRecord.created_at.desc())
             .offset(offset)
             .limit(limit)
             .all()
         )
+    finally:
+        session.close()
+
+
+def archive_job_record(job_id: str) -> bool:
+    """Hides a job from the default job list. Returns False if it doesn't exist."""
+    from models.orm import JobRecord
+    session = SessionLocal()
+    try:
+        record = session.get(JobRecord, job_id)
+        if record is None:
+            return False
+        record.archived = True
+        session.commit()
+        return True
     finally:
         session.close()
 

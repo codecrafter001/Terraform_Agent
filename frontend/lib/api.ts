@@ -2,7 +2,7 @@
  * API client utilities for TerraAgent frontend
  */
 
-import { HumanChoice, IntentAnalysisResult, JobProgress, JobResults, OperationType } from "./types";
+import { HumanChoice, IntentAnalysisResult, JobProgress, JobResults, MigrationSafety, OperationType } from "./types";
 
 export interface ScanRequestPayload {
   aws_access_key: string;
@@ -54,6 +54,10 @@ export interface AuditJobRecord {
   github_pr_number?: number | null;
   github_hardening_pr_url?: string | null;
   github_hardening_pr_number?: number | null;
+  // backend/tools/scores.py::migration_safety, kept on the audit record; null without evidence
+  migration_safety_score?: number | null;
+  migration_safety_status?: MigrationSafety["status"] | null;
+  archived?: boolean;
 }
 
 // Server Components/SSR run inside the frontend container, where NEXT_PUBLIC_API_URL
@@ -99,6 +103,15 @@ export async function fetchJobs(limit = 20): Promise<AuditJobRecord[]> {
     return await res.json();
   } catch {
     return [];
+  }
+}
+
+// Soft delete: the job leaves the default list; its audit record is kept.
+export async function archiveJob(jobId: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/jobs/${jobId}`, { method: "DELETE", headers: authHeaders() });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: "Failed to archive job" }));
+    throw new Error(_errorText(err.detail, "Failed to archive job"));
   }
 }
 

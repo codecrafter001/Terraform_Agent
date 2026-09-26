@@ -25,6 +25,7 @@ import {
   ApprovalDecision,
   ApprovalRequest,
   JobProgress,
+  JobResults,
   PendingApproval,
   PlanEquivalenceResult,
   RepairEntry,
@@ -137,6 +138,7 @@ export default function ScanProgress({ jobId }: ScanProgressProps) {
   const [planEquivalenceResults, setPlanEquivalenceResults] = useState<PlanEquivalenceResult | null>(null);
   const [approvalDecision, setApprovalDecision] = useState<ApprovalDecision | null>(null);
   const [approvalRequest, setApprovalRequest] = useState<ApprovalRequest | null>(null);
+  const [runSummary, setRunSummary] = useState<string | null>(null);
   const logContainerRef = useRef<HTMLDivElement>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
   const stickToBottom = useRef(true);
@@ -154,6 +156,7 @@ export default function ScanProgress({ jobId }: ScanProgressProps) {
       setPlanEquivalenceResults(results.plan_equivalence_results ?? null);
       setApprovalDecision(results.approval_decision ?? null);
       setApprovalRequest(results.approval_request ?? null);
+      setRunSummary(runSummaryLine(results));
       return true;
     } catch {
       return false;
@@ -335,6 +338,7 @@ export default function ScanProgress({ jobId }: ScanProgressProps) {
               ? `Verified after ${iterations.length} passes and ${repairAttempts} repair cycle${repairAttempts === 1 ? "" : "s"}. The bundle and reports are ready.`
               : "Verified on the first pass. The bundle and reports are ready."
           }
+          summary={runSummary}
           action={
             <button
               onClick={() => router.push(`/results/${jobId}`)}
@@ -503,17 +507,54 @@ export default function ScanProgress({ jobId }: ScanProgressProps) {
 
 // ---------------------------------------------------------------------------
 
+// The end-of-run line: "N found: X managed, Y referenced, Z excluded ·
+// Migration Safety N% · nothing changed in AWS · K findings ...". Every number
+// comes from the results; anything that wasn't measured says so instead of
+// showing a number. "Nothing changed in AWS" is about TerraAgent itself (it only
+// ever reads) - whether adopting would change anything is Migration Safety's job.
+function runSummaryLine(r: JobResults): string {
+  const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+  const parts: string[] = [];
+
+  const s = r.infra_model?.summary;
+  if (s) {
+    const split = [`${s.manage ?? 0} managed`, `${s.reference ?? 0} referenced`, `${s.exclude ?? 0} excluded`];
+    if (s.review) split.push(`${s.review} in review`);
+    parts.push(`${s.total} found: ${split.join(", ")}`);
+  } else {
+    parts.push(`${r.resources_count ?? 0} found`);
+  }
+
+  const ms = r.migration_safety;
+  parts.push(ms && ms.score !== null ? `Migration Safety ${ms.score}%` : "Migration Safety not measured");
+  parts.push("nothing changed in AWS");
+
+  const sp = r.security_posture;
+  // A rejected Hardening proposal ships no files, so its changes don't count.
+  const fixes = r.hardening?.files && Object.keys(r.hardening.files).length > 0 ? r.hardening.changes?.length ?? 0 : 0;
+  if (!sp || sp.score === null) {
+    parts.push("security findings not measured");
+  } else if (fixes > 0) {
+    parts.push(`${plural(sp.total_findings, "finding", "findings")}, ${plural(fixes, "fix", "fixes")} in a separate Hardening PR`);
+  } else {
+    parts.push(`${plural(sp.total_findings, "security finding", "security findings")} reported, no Hardening fixes`);
+  }
+  return parts.join(" · ");
+}
+
 function OutcomeBanner({
   tone,
   icon: Icon,
   title,
   body,
+  summary,
   action,
 }: {
   tone: "emerald" | "amber" | "rose" | "slate";
   icon: LucideIcon;
   title: string;
   body: string;
+  summary?: string | null;
   action: React.ReactNode;
 }) {
   const styles = {
@@ -533,6 +574,7 @@ function OutcomeBanner({
         <div className="min-w-0">
           <div className={`text-sm font-bold ${styles.title}`}>{title}</div>
           <p className={`text-xs leading-relaxed break-words ${styles.body}`}>{body}</p>
+          {summary && <p className={`text-xs font-semibold mt-1.5 break-words ${styles.title}`}>{summary}</p>}
         </div>
       </div>
       {action}

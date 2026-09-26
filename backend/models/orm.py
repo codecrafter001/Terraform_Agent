@@ -29,6 +29,13 @@ class JobRecord(Base):
     github_hardening_pr_url = Column(String, nullable=True)
     github_hardening_pr_number = Column(Integer, nullable=True)
     github_wave_prs_summary = Column(String, nullable=True)  # JSON-encoded {wave_number: {pr_url, pr_number, branch}}
+    # tools/scores.py::migration_safety, kept here so the dashboard can show it
+    # after the job's Redis state has expired. score is null without evidence.
+    migration_safety_score = Column(Integer, nullable=True)
+    migration_safety_status = Column(String, nullable=True)
+    # Soft delete: an archived job is hidden from GET /jobs, never removed -
+    # the audit trail stays intact.
+    archived = Column(Boolean, nullable=True)
     created_at = Column(String, nullable=False)
     completed_at = Column(String, nullable=True)
 

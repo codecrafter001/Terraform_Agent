@@ -22,3 +22,6 @@ class AuditLogRecord(BaseModel):
     github_pr_number: Optional[int] = None
     github_hardening_pr_url: Optional[str] = None
     github_hardening_pr_number: Optional[int] = None
+    migration_safety_score: Optional[int] = None
+    migration_safety_status: Optional[str] = None
+    archived: bool = False

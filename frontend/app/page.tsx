@@ -4,17 +4,21 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import {
   Activity,
+  Archive,
   ArrowRight,
   Boxes,
   CheckCircle2,
+  GitPullRequest,
   Inbox,
   Loader2,
   PauseCircle,
   PlusCircle,
   RefreshCw,
   Search,
+  SearchX,
+  ShieldCheck,
 } from "lucide-react";
-import { fetchJobs, AuditJobRecord } from "@/lib/api";
+import { archiveJob, fetchJobs, AuditJobRecord } from "@/lib/api";
 import { PageHeader, StatCard, StatusBadge } from "@/components/ui";
 
 type StatusFilter = "ALL" | "ACTIVE" | "COMPLETE" | "ATTENTION" | "FAILED";
@@ -45,12 +49,126 @@ function jobHref(job: AuditJobRecord): string {
   return job.status === "COMPLETE" ? `/results/${job.job_id}` : `/scan/${job.job_id}`;
 }
 
+const FINISHED = ["COMPLETE", "FAILED", "REJECTED"];
+
+// A completed scan that discovered nothing usually means the wrong region,
+// filters or role - worth calling out rather than looking like a success.
+function nothingFound(job: AuditJobRecord): boolean {
+  return job.status === "COMPLETE" && (job.resources_discovered ?? 0) === 0;
+}
+
+function NothingFoundBadge() {
+  return (
+    <span
+      className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-3xs font-semibold text-slate-600 whitespace-nowrap"
+      title="The scan finished but discovered no resources. Check the region, the resource filters and the role's permissions."
+    >
+      <SearchX className="w-3 h-3" />
+      Nothing found
+    </span>
+  );
+}
+
+const SAFETY_TONE: Record<string, string> = {
+  SAFE: "text-emerald-700",
+  CHANGES: "text-amber-700",
+  DESTRUCTIVE: "text-rose-700",
+  UNVERIFIED: "text-slate-500",
+};
+
+const SAFETY_LABEL: Record<string, string> = {
+  SAFE: "no changes on adoption",
+  CHANGES: "in-place changes on adoption",
+  DESTRUCTIVE: "destroy/replace on adoption",
+  UNVERIFIED: "not verified against live AWS",
+};
+
+function LatestScanCard({ job }: { job: AuditJobRecord }) {
+  const score = job.migration_safety_score;
+  const safetyStatus = job.migration_safety_status ?? null;
+  const measured = score !== null && score !== undefined;
+  return (
+    <div className="card p-4 sm:p-5">
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+        <div className="min-w-0 space-y-1.5">
+          <div className="text-2xs font-semibold uppercase tracking-wider text-slate-500">Latest scan</div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <Link href={jobHref(job)} className="font-mono text-sm font-semibold text-slate-900 hover:text-brand-700 truncate">
+              {job.job_id}
+            </Link>
+            <StatusBadge status={job.status} />
+            {nothingFound(job) && <NothingFoundBadge />}
+          </div>
+          <div className="text-2xs text-slate-500">
+            <span className="capitalize">{job.operation}</span> · <span className="font-mono">{job.region}</span> ·{" "}
+            <span title={new Date(job.created_at).toLocaleString()}>{relativeTime(job.created_at)}</span>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 lg:gap-8">
+          <div>
+            <div className="text-2xs font-semibold uppercase tracking-wider text-slate-500">Resources</div>
+            <div className="text-lg font-bold tabular-nums text-slate-900">{job.resources_discovered ?? 0}</div>
+          </div>
+          <div>
+            <div className="text-2xs font-semibold uppercase tracking-wider text-slate-500 flex items-center gap-1">
+              <ShieldCheck className="w-3 h-3" /> Migration Safety
+            </div>
+            <div
+              className={`text-lg font-bold tabular-nums ${
+                measured ? SAFETY_TONE[safetyStatus ?? ""] ?? "text-slate-900" : "text-slate-400"
+              }`}
+            >
+              {measured ? `${score}%` : "Not measured"}
+            </div>
+            {safetyStatus && <div className="text-3xs text-slate-500">{SAFETY_LABEL[safetyStatus] ?? safetyStatus}</div>}
+          </div>
+          <div className="col-span-2 sm:col-span-1">
+            <div className="text-2xs font-semibold uppercase tracking-wider text-slate-500 flex items-center gap-1">
+              <GitPullRequest className="w-3 h-3" /> Pull request
+            </div>
+            {job.github_pr_url ? (
+              <a
+                href={job.github_pr_url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-sm font-semibold text-brand-600 hover:text-brand-700"
+              >
+                Adoption PR #{job.github_pr_number}
+              </a>
+            ) : (
+              <div className="text-sm text-slate-400">Not opened yet</div>
+            )}
+            {job.github_hardening_pr_url && (
+              <a
+                href={job.github_hardening_pr_url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="block text-2xs font-semibold text-brand-600 hover:text-brand-700"
+              >
+                Hardening PR #{job.github_hardening_pr_number}
+              </a>
+            )}
+          </div>
+        </div>
+
+        <Link href={jobHref(job)} className="btn-secondary shrink-0 self-start lg:self-center">
+          {jobHref(job).startsWith("/results") ? "Results" : "Progress"}
+          <ArrowRight className="w-3.5 h-3.5" />
+        </Link>
+      </div>
+    </div>
+  );
+}
+
 export default function HomePage() {
   const [jobs, setJobs] = useState<AuditJobRecord[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [filter, setFilter] = useState<StatusFilter>("ALL");
   const [query, setQuery] = useState("");
+  const [archiving, setArchiving] = useState<string | null>(null);
+  const [archiveError, setArchiveError] = useState<string | null>(null);
   const mountedRef = useRef(true);
 
   const loadData = useCallback(async () => {
@@ -64,6 +182,22 @@ export default function HomePage() {
   const refresh = async () => {
     setIsRefreshing(true);
     await loadData();
+  };
+
+  const archive = async (job: AuditJobRecord) => {
+    if (!window.confirm(`Archive ${job.job_id}? It will be hidden from the dashboard. Its audit record, bundle and PR links are kept.`)) {
+      return;
+    }
+    setArchiving(job.job_id);
+    setArchiveError(null);
+    try {
+      await archiveJob(job.job_id);
+      await loadData();
+    } catch (e) {
+      setArchiveError(e instanceof Error ? e.message : "Failed to archive job");
+    } finally {
+      setArchiving(null);
+    }
   };
 
   useEffect(() => {
@@ -124,6 +258,8 @@ export default function HomePage() {
         }
       />
 
+      {!isLoading && jobs.length > 0 && <LatestScanCard job={jobs[0]} />}
+
       {/* KPI tiles */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
         <StatCard label="Total scans" value={isLoading ? "—" : stats.total} icon={Activity} tone="brand" />
@@ -167,6 +303,10 @@ export default function HomePage() {
             />
           </div>
         </div>
+
+        {archiveError && (
+          <div className="px-5 py-2 border-b border-rose-100 bg-rose-50 text-2xs text-rose-700">{archiveError}</div>
+        )}
 
         <div className="px-5 py-2.5 border-b border-slate-100 flex gap-1.5 overflow-x-auto">
           {FILTERS.map((f) => (
@@ -246,7 +386,10 @@ export default function HomePage() {
                       </Link>
                     </td>
                     <td className="px-5 py-3.5">
-                      <StatusBadge status={job.status} />
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <StatusBadge status={job.status} />
+                        {nothingFound(job) && <NothingFoundBadge />}
+                      </div>
                     </td>
                     <td className="px-5 py-3.5 font-mono text-xs text-slate-600">{job.region}</td>
                     <td className="px-5 py-3.5 text-xs text-slate-700 text-right tabular-nums">
@@ -264,13 +407,30 @@ export default function HomePage() {
                       {relativeTime(job.created_at)}
                     </td>
                     <td className="px-5 py-3.5 text-right">
-                      <Link
-                        href={jobHref(job)}
-                        className="inline-flex items-center gap-1 text-xs font-semibold text-brand-600 hover:text-brand-700 whitespace-nowrap"
-                      >
-                        {jobHref(job).startsWith("/results") ? "Results" : "Progress"}
-                        <ArrowRight className="w-3.5 h-3.5 group-hover:translate-x-0.5 transition-transform" />
-                      </Link>
+                      <div className="inline-flex items-center gap-3">
+                        {FINISHED.includes(job.status) && (
+                          <button
+                            onClick={() => archive(job)}
+                            disabled={archiving === job.job_id}
+                            className="p-1 rounded-md text-slate-400 hover:text-slate-700 hover:bg-slate-100 disabled:opacity-50"
+                            title="Archive (hide from the dashboard)"
+                            aria-label={`Archive ${job.job_id}`}
+                          >
+                            {archiving === job.job_id ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            ) : (
+                              <Archive className="w-3.5 h-3.5" />
+                            )}
+                          </button>
+                        )}
+                        <Link
+                          href={jobHref(job)}
+                          className="inline-flex items-center gap-1 text-xs font-semibold text-brand-600 hover:text-brand-700 whitespace-nowrap"
+                        >
+                          {jobHref(job).startsWith("/results") ? "Results" : "Progress"}
+                          <ArrowRight className="w-3.5 h-3.5 group-hover:translate-x-0.5 transition-transform" />
+                        </Link>
+                      </div>
                     </td>
                   </tr>
                 ))}

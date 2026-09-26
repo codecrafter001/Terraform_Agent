@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from models.audit_log import AuditLogRecord
 from services.auth import require_api_key
-from services.database import get_job_record, list_job_records
+from services.database import archive_job_record, get_job_record, list_job_records
 from services.redis_client import redis_service
 
 router = APIRouter(prefix="/jobs", tags=["jobs"], dependencies=[Depends(require_api_key)])
@@ -30,17 +30,37 @@ def _to_audit_record(r: Any) -> AuditLogRecord:
         github_pr_number=getattr(r, "github_pr_number", None),
         github_hardening_pr_url=getattr(r, "github_hardening_pr_url", None),
         github_hardening_pr_number=getattr(r, "github_hardening_pr_number", None),
+        migration_safety_score=getattr(r, "migration_safety_score", None),
+        migration_safety_status=getattr(r, "migration_safety_status", None),
+        archived=bool(getattr(r, "archived", None)),
     )
 
 
 @router.get("", response_model=List[AuditLogRecord])
 async def list_jobs(
     limit: int = Query(default=20, ge=1, le=100),
-    offset: int = Query(default=0, ge=0)
+    offset: int = Query(default=0, ge=0),
+    include_archived: bool = Query(default=False),
 ):
-    """Lists past scan jobs, paginated (credentials completely scrubbed/omitted)."""
-    records = list_job_records(limit=limit, offset=offset)
+    """Lists past scan jobs, paginated (credentials completely scrubbed/omitted).
+    Archived jobs are left out unless include_archived is set."""
+    records = list_job_records(limit=limit, offset=offset, include_archived=include_archived)
     return [_to_audit_record(r) for r in records]
+
+
+@router.delete("/{job_id}")
+async def archive_job(job_id: str) -> Dict[str, Any]:
+    """Archives a job (soft delete): it disappears from the default job list,
+    but its audit record, bundle and PR links are kept. A running or paused
+    job can't be archived - it would vanish from the dashboard while still
+    working or still waiting for a human."""
+    record = get_job_record(job_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if record.status in ("RUNNING", "PENDING", "AWAITING_APPROVAL"):
+        raise HTTPException(status_code=409, detail=f"Job is {record.status}; only finished jobs can be archived")
+    archive_job_record(job_id)
+    return {"job_id": job_id, "archived": True}
 
 
 @router.get("/{job_id}")
