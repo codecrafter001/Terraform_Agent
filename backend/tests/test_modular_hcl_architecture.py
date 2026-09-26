@@ -25,7 +25,7 @@ def test_modular_hcl_generation_full_estate():
         {"id": "kms-201", "resource_type": "aws_kms_key", "name": "data-key"},
         # Compute
         {"id": "i-300", "resource_type": "aws_instance", "name": "web-srv", "ami": "ami-0123456789abcdef0", "instance_type": "t3.medium", "subnet_id": "subnet-101", "security_groups": ["sg-200"]},
-        {"id": "alb-301", "resource_type": "aws_lb", "name": "web-alb", "scheme": "internet-facing", "subnets": ["subnet-101"], "security_groups": ["sg-200"]},
+        {"id": "alb-301", "resource_type": "aws_lb", "name": "web-alb", "scheme": "internet-facing", "load_balancer_type": "application", "subnets": ["subnet-101"], "security_groups": ["sg-200"]},
         # Storage & Data
         {"id": "s3-400", "resource_type": "aws_s3_bucket", "name": "production-assets-bucket"},
         {"id": "rds-401", "resource_type": "aws_db_instance", "name": "prod-db", "engine": "postgres", "instance_class": "db.t3.medium", "allocated_storage": 50, "security_groups": ["sg-200"]},
