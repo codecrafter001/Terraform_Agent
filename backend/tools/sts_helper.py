@@ -10,7 +10,8 @@ import boto3
 
 def assume_role(
     role_arn: str, access_key: str, secret_key: str, session_token: Optional[str],
-    region: str, session_name: str, endpoint_url: Optional[str] = None
+    region: str, session_name: str, endpoint_url: Optional[str] = None,
+    external_id: Optional[str] = None,
 ) -> Tuple[str, str, str]:
     """Exchanges the caller's credentials for a short-lived (1 hour) set
     scoped to role_arn. Returns (access_key, secret_key, session_token) as
@@ -23,10 +24,15 @@ def assume_role(
         region_name=region
     )
     sts = sts_session.client("sts", endpoint_url=endpoint_url)
+    # ExternalId: the per-tenant value the role's trust policy requires
+    # (docs/aws/read-only-role.md) - stops another TerraAgent tenant who
+    # learns this role ARN from assuming it (confused deputy).
+    kwargs = {"ExternalId": external_id} if external_id else {}
     response = sts.assume_role(
         RoleArn=role_arn,
         RoleSessionName=session_name[:64],
-        DurationSeconds=3600
+        DurationSeconds=3600,
+        **kwargs,
     )
     creds = response["Credentials"]
     return creds["AccessKeyId"], creds["SecretAccessKey"], creds["SessionToken"]

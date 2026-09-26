@@ -54,6 +54,7 @@ async def resource_explorer_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 access_key, secret_key, token = assume_role(
                     role_arn, access_key, secret_key, token, query_region,
                     session_name=f"terraagent-{job_id}-rex", endpoint_url=endpoint_url,
+                    external_id=state.get("external_id"),
                 )
             except ClientError:
                 # cloud_discovery reports the assume-role failure itself.

@@ -87,6 +87,8 @@ class TerraAgentState(TypedDict):
     aws_credentials: dict  # Secret values (Never printed/logged)
     aws_endpoint_url: Optional[str]  # LocalStack override for integration tests only
     role_arn: Optional[str]  # Optional STS AssumeRole target for multi-account scans
+    external_id: Optional[str]  # ExternalId the role's trust policy requires
+    discovery: dict  # AWSScanner.report(): {region, complete, counts, errors} - incomplete fails closed
     webhook_url: Optional[str]  # Optional URL to POST a result summary to on completion
     zip_password: Optional[str]  # Optional password to AES-256 encrypt the output ZIP with
     terraform_binary: str  # "terraform" | "tofu" - which CLI TerraformRunner shells out to
@@ -167,6 +169,8 @@ def build_initial_state(job_id: str, request: Dict[str, Any]) -> Dict[str, Any]:
         },
         "aws_endpoint_url": request.get("aws_endpoint_url"),
         "role_arn": request.get("role_arn"),
+        "external_id": request.get("external_id"),
+        "discovery": {},
         "webhook_url": request.get("webhook_url"),
         "zip_password": request.get("zip_password"),
         "terraform_binary": request.get("terraform_binary", "terraform"),
@@ -383,6 +387,9 @@ async def infrastructure_agent(state: Dict[str, Any]) -> Dict[str, Any]:
             f"{decided.get('exclude', 0)} exclude, {decided.get('review', 0)} review"
         )
     summary += f" · {_plural(edges, 'dependency')} · region {acc.get('region')}"
+    discovery = acc.get("discovery") or {}
+    if discovery and not discovery.get("complete", True):
+        summary += f" · INCOMPLETE: {_plural(len(discovery.get('errors') or []), 'AWS call')} failed"
     inv = acc.get("resource_inventory", {}) or {}
     if inv.get("available"):
         summary += (
@@ -496,6 +503,10 @@ def _incomplete_reasons(acc: Dict[str, Any]) -> List[str]:
     """Everything that stops us from claiming the code was verified. Any
     crash, timeout, missing tool or unparseable output counts - never 'clean'."""
     reasons: List[str] = []
+    discovery = acc.get("discovery") or {}
+    if discovery and not discovery.get("complete", True):
+        failed = ", ".join(f"{e.get('scope')} ({e.get('code')})" for e in (discovery.get("errors") or [])[:5])
+        reasons.append(f"discovery was incomplete - some AWS calls failed after retries: {failed}")
     if _has_system_failure(acc):
         system = next(c for c in acc["validation_results"]["checks"] if c.get("check_name") == "system")
         reasons.append(f"validation could not run ({str(system.get('output', ''))[:120]})")

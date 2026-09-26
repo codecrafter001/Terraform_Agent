@@ -1,0 +1,14 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "TerraAgentAssumeWithExternalId",
+      "Effect": "Allow",
+      "Principal": { "AWS": "arn:aws:iam::<TERRAAGENT_ACCOUNT_ID>:root" },
+      "Action": "sts:AssumeRole",
+      "Condition": {
+        "StringEquals": { "sts:ExternalId": "<YOUR_EXTERNAL_ID>" }
+      }
+    }
+  ]
+}

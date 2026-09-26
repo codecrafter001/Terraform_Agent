@@ -86,12 +86,13 @@ def test_scan_all_aggregates_across_pagination(monkeypatch):
     assert all(r["enable_dns_support"] is True and r["enable_dns_hostnames"] is False for r in results)
 
 
-def test_retry_config_uses_standard_mode_with_five_attempts():
+def test_retry_config_uses_adaptive_mode():
     """The scanner must configure botocore's built-in retry handler (rather
     than reinventing retry logic) so transient rate-limit errors like
     RequestLimitExceeded are retried automatically before giving up."""
-    assert RETRY_CONFIG.retries["mode"] == "standard"
-    assert RETRY_CONFIG.retries["max_attempts"] == 5
+    # adaptive = retries plus client-side rate limiting when AWS throttles
+    assert RETRY_CONFIG.retries["mode"] == "adaptive"
+    assert RETRY_CONFIG.retries["max_attempts"] == 8
 
 
 def test_scan_vpcs_degrades_gracefully_after_retries_exhausted():
@@ -103,7 +104,7 @@ def test_scan_vpcs_degrades_gracefully_after_retries_exhausted():
     stubber = Stubber(real_client)
 
     # Queue enough throttling errors to exhaust all retry attempts.
-    for _ in range(6):
+    for _ in range(9):
         stubber.add_client_error(
             "describe_vpcs",
             service_error_code="RequestLimitExceeded",
@@ -117,6 +118,10 @@ def test_scan_vpcs_degrades_gracefully_after_retries_exhausted():
         results = scanner.scan_vpcs()
 
     assert results == []
+    # ...but the failure is recorded: the scan is incomplete, not "no VPCs".
+    report = scanner.report()
+    assert report["complete"] is False
+    assert report["errors"][0]["scope"] == "VPCs" and report["errors"][0]["code"] == "RequestLimitExceeded"
 
 
 @mock_aws
@@ -134,3 +139,47 @@ def test_credentials_never_appear_in_scan_results():
 
     assert FAKE_ACCESS_KEY not in serialized
     assert FAKE_SECRET_KEY not in serialized
+
+
+READ_ONLY_PREFIXES = ("Describe", "Get", "List")
+
+
+@mock_aws
+def test_scanner_only_ever_calls_read_only_apis():
+    """CLAUDE.md rule #3, enforced: every AWS operation the scanner issues is
+    a Describe*/Get*/List* call. Recorded from boto's own before-call event."""
+    ec2 = boto3.client("ec2", region_name="us-east-1")
+    vpc = ec2.create_vpc(CidrBlock="10.0.0.0/16")["Vpc"]["VpcId"]
+    ec2.create_subnet(VpcId=vpc, CidrBlock="10.0.1.0/24")
+    ec2.create_security_group(GroupName="web", Description="web", VpcId=vpc)
+    boto3.client("s3", region_name="us-east-1").create_bucket(Bucket="read-only-check")
+    boto3.client("iam", region_name="us-east-1").create_role(
+        RoleName="r", AssumeRolePolicyDocument=json.dumps({"Version": "2012-10-17", "Statement": []}))
+
+    scanner = AWSScanner(access_key=FAKE_ACCESS_KEY, secret_key=FAKE_SECRET_KEY, region="us-east-1")
+    operations = []
+    scanner.session.events.register("before-call", lambda model, **kw: operations.append(model.name))
+
+    resources = scanner.scan_all(filters=["VPC", "SG", "EC2", "S3", "RDS", "IAM"])
+
+    assert resources and operations
+    offending = sorted({op for op in operations if not op.startswith(READ_ONLY_PREFIXES)})
+    assert offending == [], f"non read-only AWS calls: {offending}"
+    assert scanner.report()["complete"] is True
+
+
+def test_one_failing_service_does_not_sink_the_others(monkeypatch):
+    scanner = AWSScanner(access_key=FAKE_ACCESS_KEY, secret_key=FAKE_SECRET_KEY, region="us-east-1")
+
+    def boom():
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(scanner, "scan_vpcs", boom)
+    monkeypatch.setattr(scanner, "scan_subnets", lambda: [{"id": "subnet-1"}])
+    monkeypatch.setattr(scanner, "scan_route_tables", lambda: [])
+
+    results = scanner.scan_all(filters=["VPC"])
+
+    assert results == [{"id": "subnet-1"}]
+    report = scanner.report()
+    assert report["complete"] is False and report["counts"] == {"vpcs": 0, "subnets": 1, "route_tables": 0}

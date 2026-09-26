@@ -2,6 +2,7 @@
 Queries AWS APIs with strictly read-only calls to discover live infrastructure resources.
 """
 
+import asyncio
 import logging
 import os
 from typing import Any, Dict
@@ -37,6 +38,8 @@ async def cloud_discovery_node(state: Dict[str, Any]) -> Dict[str, Any]:
 
     discovered_resources = []
     errors = list(state.get("errors", []))
+    discovery: Dict[str, Any] = {}
+    assumed: Dict[str, Any] = {}
     if access_key and secret_key:
         scan_access_key, scan_secret_key, scan_session_token = access_key, secret_key, session_token
 
@@ -48,8 +51,15 @@ async def cloud_discovery_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 )
                 scan_access_key, scan_secret_key, scan_session_token = assume_role(
                     role_arn, access_key, secret_key, session_token, region,
-                    session_name=f"terraagent-{job_id}", endpoint_url=endpoint_url
+                    session_name=f"terraagent-{job_id}", endpoint_url=endpoint_url,
+                    external_id=state.get("external_id"),
                 )
+                # Every later live check (drift, plan, cross-check) must read the
+                # target account too - they use state["aws_credentials"], so it
+                # becomes the role's temporary credentials from here on, and the
+                # long-lived caller keys leave the run.
+                assumed = {"access_key": scan_access_key, "secret_key": scan_secret_key,
+                           "session_token": scan_session_token}
             except ClientError as e:
                 # Deliberately do NOT fall through to scanning with the
                 # caller's own raw credentials here: if the user asked to
@@ -63,6 +73,9 @@ async def cloud_discovery_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 errors.append(msg)
                 await redis_service.publish_log(job_id, f"[AGENT:cloud_discovery] {msg}", agent_name="cloud_discovery")
                 scan_access_key, scan_secret_key, scan_session_token = None, None, None
+                discovery = {"region": region, "complete": False, "counts": {},
+                             "errors": [{"scope": "sts:AssumeRole", "code": e.response["Error"].get("Code", ""),
+                                         "message": msg[:300]}]}
 
         if scan_access_key and scan_secret_key:
             scanner = AWSScanner(
@@ -72,7 +85,15 @@ async def cloud_discovery_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 session_token=scan_session_token,
                 endpoint_url=endpoint_url
             )
-            discovered_resources = scanner.scan_all(filters=filters)
+            discovered_resources = await asyncio.to_thread(scanner.scan_all, filters)
+            discovery = scanner.report()
+            if not discovery["complete"]:
+                await redis_service.publish_log(
+                    job_id,
+                    f"[AGENT:cloud_discovery] INCOMPLETE: {len(discovery['errors'])} AWS call(s) failed after "
+                    "retries - the inventory may be missing resources, so this scan can't be marked verified.",
+                    agent_name="cloud_discovery",
+                )
     else:
         logger.warning(f"[{job_id}] No AWS credentials provided, generating mock discovered resources for simulation.")
         discovered_resources = [
@@ -144,10 +165,14 @@ async def cloud_discovery_node(state: Dict[str, Any]) -> Dict[str, Any]:
     completed_agents = list(state.get("completed_agents", []))
     completed_agents.append("cloud_discovery")
 
-    return {
+    result = {
         "resources": discovered_resources,
+        "discovery": discovery,
         "completed_agents": completed_agents,
         "current_agent": "graph_agent",
         "progress_percentage": 30,
         "errors": errors
     }
+    if assumed:
+        result["aws_credentials"] = assumed
+    return result

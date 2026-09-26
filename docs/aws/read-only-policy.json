@@ -1,0 +1,88 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DiscoveryAndPlanReadOnly",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:Describe*",
+        "s3:ListAllMyBuckets",
+        "s3:GetBucketLocation",
+        "s3:GetBucketTagging",
+        "s3:GetBucketPublicAccessBlock",
+        "s3:GetEncryptionConfiguration",
+        "s3:GetBucket*",
+        "s3:GetAccelerateConfiguration",
+        "s3:GetLifecycleConfiguration",
+        "s3:GetReplicationConfiguration",
+        "rds:Describe*",
+        "rds:ListTagsForResource",
+        "iam:ListRoles",
+        "iam:GetRole",
+        "iam:ListAttachedRolePolicies",
+        "iam:ListRolePolicies",
+        "iam:ListRoleTags",
+        "iam:GetRolePolicy",
+        "resource-explorer-2:ListIndexes",
+        "resource-explorer-2:Search",
+        "sts:GetCallerIdentity"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "NeverReadData",
+      "Effect": "Deny",
+      "Action": [
+        "s3:GetObject",
+        "s3:GetObjectVersion",
+        "s3:GetObjectAcl",
+        "secretsmanager:GetSecretValue",
+        "ssm:GetParameter",
+        "ssm:GetParameters",
+        "ssm:GetParametersByPath",
+        "kms:Decrypt",
+        "kms:GenerateDataKey*",
+        "dynamodb:GetItem",
+        "dynamodb:BatchGetItem",
+        "dynamodb:Query",
+        "dynamodb:Scan",
+        "rds-data:*",
+        "sqs:ReceiveMessage",
+        "lambda:InvokeFunction",
+        "lambda:GetFunction",
+        "ec2:GetPasswordData",
+        "ec2:GetConsoleOutput",
+        "ec2:GetConsoleScreenshot",
+        "ecr:GetDownloadUrlForLayer",
+        "ecr:BatchGetImage",
+        "logs:GetLogEvents",
+        "logs:FilterLogEvents",
+        "athena:GetQueryResults",
+        "glue:GetConnection",
+        "glue:GetConnections"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "NeverChangeAnything",
+      "Effect": "Deny",
+      "NotAction": [
+        "ec2:Describe*",
+        "s3:List*",
+        "s3:GetBucket*",
+        "s3:GetAccelerateConfiguration",
+        "s3:GetLifecycleConfiguration",
+        "s3:GetReplicationConfiguration",
+        "s3:GetEncryptionConfiguration",
+        "rds:Describe*",
+        "rds:ListTagsForResource",
+        "iam:Get*",
+        "iam:List*",
+        "resource-explorer-2:ListIndexes",
+        "resource-explorer-2:Search",
+        "sts:GetCallerIdentity"
+      ],
+      "Resource": "*"
+    }
+  ]
+}

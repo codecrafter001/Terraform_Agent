@@ -28,6 +28,33 @@ class CheckpointMissing(Exception):
     """The paused run can't be resumed - its checkpoint is gone."""
 
 
+async def _target_account_credentials(job_id: str, saver: InMemorySaver, creds: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """A run that scanned through role_arn must re-verify in that same target
+    account: exchange the re-supplied keys for the role's temporary ones,
+    exactly as discovery did. None (-> checks can't be redone, INCOMPLETE)
+    if the role can't be assumed."""
+    import asyncio
+
+    from agents.graph import build_graph
+    from tools.sts_helper import assume_role
+
+    values = (await build_graph(checkpointer=saver).aget_state(_config(job_id))).values
+    role_arn = values.get("role_arn")
+    if not role_arn:
+        return creds
+    try:
+        ak, sk, token = await asyncio.to_thread(
+            assume_role, role_arn, creds.get("access_key"), creds.get("secret_key"), creds.get("session_token"),
+            values.get("region", "us-east-1"), f"terraagent-{job_id}-resume",
+            values.get("aws_endpoint_url"), values.get("external_id"),
+        )
+    except Exception as e:
+        logger.warning(f"[{job_id}] Could not assume {role_arn} for re-verification: "
+                       f"{CredentialScrubber.scrub_text(str(e))}")
+        return None
+    return {"access_key": ak, "secret_key": sk, "session_token": token}
+
+
 def _config(job_id: str) -> Dict[str, Any]:
     return {"configurable": {"thread_id": job_id}, "recursion_limit": RECURSION_LIMIT}
 
@@ -110,5 +137,7 @@ async def resume_pipeline(
         raise CheckpointMissing(job_id)
     saver = InMemorySaver()
     import_thread(saver, job_id, data)
+    if aws_credentials:
+        aws_credentials = await _target_account_credentials(job_id, saver, aws_credentials)
     update = {"aws_credentials": aws_credentials} if aws_credentials else None
     return await _run(job_id, saver, Command(resume=decision, update=update))

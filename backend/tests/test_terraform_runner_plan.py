@@ -135,11 +135,15 @@ async def test_plan_json_never_inherits_parent_process_env(monkeypatch):
     assert env["AWS_ACCESS_KEY_ID"] == _creds()["access_key"]
 
 
-async def test_run_command_times_out_instead_of_hanging(tmp_path):
+async def test_run_command_times_out_instead_of_hanging(tmp_path, monkeypatch):
     import sys
 
+    import tools.terraform_runner as runner_mod
     from tools.terraform_runner import TerraformRunner
 
+    # Only the timeout is under test here; the argv allowlist would (rightly)
+    # refuse to run python, so it's bypassed for this one sleeper process.
+    monkeypatch.setattr(runner_mod, "check_argv", lambda cmd: "version")
     with pytest.raises(TimeoutError):
         await TerraformRunner.run_command(
             [sys.executable, "-c", "import time; time.sleep(5)"], cwd=str(tmp_path), timeout_seconds=0.2

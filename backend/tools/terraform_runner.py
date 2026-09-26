@@ -1,13 +1,21 @@
 """Terraform CLI runner for validating HCL code in sandboxed directories.
-Enforces safety: only fmt, init (no backend), validate, plan and show are
-permitted - apply/destroy/import are hard-blocked in run_command below.
+Enforces safety in run_command: only the terraform/tofu binaries, only the
+allowlisted subcommands (version, fmt, init, validate, plan, show, providers),
+and apply/destroy/import refused anywhere in argv - including as a flag
+(`plan -destroy`).
 """
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
+
+try:  # POSIX only (the containers); on a Windows dev host init just isn't serialized
+    import fcntl
+except ImportError:  # pragma: no cover
+    fcntl = None  # type: ignore[assignment]
 
 from tools.credential_scrubber import CredentialScrubber
 from tools.sandbox_registry import create_sandbox, release_sandbox
@@ -17,6 +25,51 @@ logger = logging.getLogger("terraagent.terraform_runner")
 # Upper bound on any single terraform/tofu invocation. Generous by default: a
 # first `init` may legitimately download a large provider.
 TERRAFORM_COMMAND_TIMEOUT_SECONDS = float(os.getenv("TERRAAGENT_TF_COMMAND_TIMEOUT", "600"))
+
+ALLOWED_BINARIES = frozenset({"terraform", "tofu"})
+ALLOWED_SUBCOMMANDS = frozenset({"version", "fmt", "init", "validate", "plan", "show", "providers"})
+BLOCKED_WORDS = frozenset({"apply", "destroy", "import"})
+
+
+def check_argv(cmd: List[str]) -> str:
+    """Raise ValueError("Safety Violation: ...") unless cmd is an allowlisted
+    terraform/tofu subcommand with no apply/destroy/import anywhere. Returns
+    the subcommand."""
+    if not cmd:
+        raise ValueError("Safety Violation: empty command.")
+    for arg in cmd:
+        token = arg.lower().lstrip("-").split("=", 1)[0]
+        if token in BLOCKED_WORDS:
+            raise ValueError(f"Safety Violation: '{arg}' is strictly prohibited.")
+    binary = os.path.basename(cmd[0]).lower()
+    if binary.endswith(".exe"):
+        binary = binary[:-4]
+    if binary not in ALLOWED_BINARIES:
+        raise ValueError(f"Safety Violation: only terraform/tofu may run here, not '{cmd[0]}'.")
+    subcommand = next((a for a in cmd[1:] if not a.startswith("-")), None)
+    if subcommand not in ALLOWED_SUBCOMMANDS:
+        raise ValueError(f"Safety Violation: '{subcommand}' is not an allowed subcommand.")
+    return subcommand
+
+
+@contextlib.asynccontextmanager
+async def _plugin_cache_lock(env: Optional[Dict[str, str]]) -> AsyncIterator[None]:
+    """Terraform documents the plugin cache as unsafe for concurrent `init`s.
+    Several scans (Celery worker processes) share it, so inits take an
+    exclusive file lock on the cache - across processes, not just threads.
+    Everything else runs concurrently."""
+    cache = (env if env is not None else os.environ).get("TF_PLUGIN_CACHE_DIR")
+    if not cache or fcntl is None:
+        yield
+        return
+    os.makedirs(cache, exist_ok=True)
+    fd = os.open(os.path.join(cache, ".terraagent-init.lock"), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        await asyncio.to_thread(fcntl.flock, fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
 class TerraformRunner:
@@ -33,31 +86,30 @@ class TerraformRunner:
         explicit, minimal env dict scoped to a single subprocess call, since
         that's the only command in this file that ever needs real AWS
         credentials."""
-        # Hard safety validation
-        disallowed = ["apply", "destroy", "import"]
-        for arg in cmd:
-            if arg.lower() in disallowed:
-                raise ValueError(f"Safety Violation: '{arg}' is strictly prohibited.")
+        # Hard safety validation - before anything is started.
+        subcommand = check_argv(cmd)
 
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            cwd=cwd,
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=env
-        )
         # Without a bound, one stuck command (e.g. `init` downloading a large
         # provider over a slow link) hung the whole job silently. Raising
         # lets callers' existing exception handling report it - validate_hcl
         # turns it into a "system" check, which the graph never sends to repair.
         timeout = timeout_seconds if timeout_seconds is not None else TERRAFORM_COMMAND_TIMEOUT_SECONDS
-        try:
-            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
-        except asyncio.TimeoutError:
-            process.kill()
-            await process.wait()
-            raise TimeoutError(f"'{' '.join(cmd[:2])}' timed out after {int(timeout)}s")
+        lock = _plugin_cache_lock(env) if subcommand == "init" else contextlib.nullcontext()
+        async with lock:
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                cwd=cwd,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=env
+            )
+            try:
+                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+            except asyncio.TimeoutError:
+                process.kill()
+                await process.wait()
+                raise TimeoutError(f"'{' '.join(cmd[:2])}' timed out after {int(timeout)}s")
         return (
             process.returncode or 0,
             stdout.decode("utf-8", errors="replace"),

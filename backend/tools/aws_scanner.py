@@ -4,11 +4,13 @@ Never logs credentials or uses mutating calls.
 """
 
 import logging
-from typing import Any, Dict, List, Optional
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import boto3
 from botocore.config import Config
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 
 from tools.cloud_discovery_interface import CloudDiscoveryInterface
 
@@ -21,11 +23,17 @@ def _new_retry_config() -> Config:
     # client (normalizing "max_attempts" into an internal "total_max_attempts"
     # key), so sharing one Config singleton across the 8 client() calls in
     # this file would silently change retry behavior after the first call.
+    # "adaptive" = standard retries plus client-side rate limiting, so a
+    # throttled API slows this scanner down instead of burning its retries.
     return Config(
-        retries={"max_attempts": 5, "mode": "standard"},
+        retries={"max_attempts": 8, "mode": "adaptive"},
         connect_timeout=5,
         read_timeout=15
     )
+
+
+# Parallel service scans (VPC, SG, EC2, S3, RDS, IAM) - each with its own client.
+SCAN_WORKERS = 6
 
 
 # Kept for readability at call sites / introspection in tests. Never pass
@@ -53,12 +61,35 @@ class AWSScanner(CloudDiscoveryInterface):
             aws_session_token=session_token,
             region_name=region
         )
+        # A boto3 Session isn't safe for creating clients from several threads
+        # at once; the clients themselves are.
+        self._client_lock = threading.Lock()
+        # Every call that failed after retries (throttling, access denied,
+        # network). A scan with any of these is INCOMPLETE - a failed call must
+        # never look like an empty account.
+        self.errors: List[Dict[str, str]] = []
+        self._errors_lock = threading.Lock()
+        self.counts: Dict[str, int] = {}
+
+    def _client(self, service: str) -> Any:
+        with self._client_lock:
+            return self.session.client(service, config=_new_retry_config(), endpoint_url=self.endpoint_url)
+
+    def _failed(self, scope: str, error: Exception) -> None:
+        if isinstance(error, ClientError):
+            code = error.response.get("Error", {}).get("Code", "ClientError")
+            message = error.response.get("Error", {}).get("Message", "")
+        else:
+            code, message = type(error).__name__, str(error)
+        logger.warning(f"Error scanning {scope}: {code} {message}")
+        with self._errors_lock:
+            self.errors.append({"scope": scope, "code": code, "message": message[:300]})
 
     def scan_vpcs(self) -> List[Dict[str, Any]]:
         """Scan EC2 VPCs, subnets, and internet gateways."""
         results = []
         try:
-            ec2 = self.session.client("ec2", config=_new_retry_config(), endpoint_url=self.endpoint_url)
+            ec2 = self._client("ec2")
             for page in ec2.get_paginator("describe_vpcs").paginate():
                 for vpc in page.get("Vpcs", []):
                     vpc_id = vpc["VpcId"]
@@ -78,18 +109,18 @@ class AWSScanner(CloudDiscoveryInterface):
                         try:
                             value = ec2.describe_vpc_attribute(VpcId=vpc_id, Attribute=attribute)
                             record[field] = bool(value.get(key, {}).get("Value"))
-                        except ClientError as e:
-                            logger.warning(f"Could not read {attribute} for {vpc_id}: {e.response['Error']['Message']}")
+                        except (ClientError, BotoCoreError) as e:
+                            self._failed(f"{attribute} of {vpc_id}", e)
                     results.append(record)
-        except ClientError as e:
-            logger.warning(f"Error scanning VPCs: {e.response['Error']['Message']}")
+        except (ClientError, BotoCoreError) as e:
+            self._failed("VPCs", e)
         return results
 
     def scan_subnets(self) -> List[Dict[str, Any]]:
         """Scan Subnets."""
         results = []
         try:
-            ec2 = self.session.client("ec2", config=_new_retry_config(), endpoint_url=self.endpoint_url)
+            ec2 = self._client("ec2")
             for page in ec2.get_paginator("describe_subnets").paginate():
                 for s in page.get("Subnets", []):
                     sub_id = s["SubnetId"]
@@ -103,15 +134,15 @@ class AWSScanner(CloudDiscoveryInterface):
                         "map_public_ip_on_launch": s.get("MapPublicIpOnLaunch"),
                         "tags": s.get("Tags", [])
                     })
-        except ClientError as e:
-            logger.warning(f"Error scanning Subnets: {e.response['Error']['Message']}")
+        except (ClientError, BotoCoreError) as e:
+            self._failed("Subnets", e)
         return results
 
     def scan_route_tables(self) -> List[Dict[str, Any]]:
         """Scan VPC Route Tables and their routes."""
         results = []
         try:
-            ec2 = self.session.client("ec2", config=_new_retry_config(), endpoint_url=self.endpoint_url)
+            ec2 = self._client("ec2")
             for page in ec2.get_paginator("describe_route_tables").paginate():
                 for rt in page.get("RouteTables", []):
                     rt_id = rt["RouteTableId"]
@@ -149,15 +180,15 @@ class AWSScanner(CloudDiscoveryInterface):
                         "associated_subnets": associated_subnets,
                         "tags": rt.get("Tags", [])
                     })
-        except ClientError as e:
-            logger.warning(f"Error scanning Route Tables: {e.response['Error']['Message']}")
+        except (ClientError, BotoCoreError) as e:
+            self._failed("Route Tables", e)
         return results
 
     def scan_security_groups(self) -> List[Dict[str, Any]]:
         """Scan EC2 Security Groups."""
         results = []
         try:
-            ec2 = self.session.client("ec2", config=_new_retry_config(), endpoint_url=self.endpoint_url)
+            ec2 = self._client("ec2")
             for page in ec2.get_paginator("describe_security_groups").paginate():
                 for sg in page.get("SecurityGroups", []):
                     sg_id = sg["GroupId"]
@@ -171,15 +202,15 @@ class AWSScanner(CloudDiscoveryInterface):
                         "ip_permissions_egress": sg.get("IpPermissionsEgress", []),
                         "tags": sg.get("Tags", [])
                     })
-        except ClientError as e:
-            logger.warning(f"Error scanning Security Groups: {e.response['Error']['Message']}")
+        except (ClientError, BotoCoreError) as e:
+            self._failed("Security Groups", e)
         return results
 
     def scan_ec2_instances(self) -> List[Dict[str, Any]]:
         """Scan EC2 Instances."""
         results = []
         try:
-            ec2 = self.session.client("ec2", config=_new_retry_config(), endpoint_url=self.endpoint_url)
+            ec2 = self._client("ec2")
             for page in ec2.get_paginator("describe_instances").paginate():
                 for res in page.get("Reservations", []):
                     for inst in res.get("Instances", []):
@@ -204,15 +235,15 @@ class AWSScanner(CloudDiscoveryInterface):
                             "iam_instance_profile_arn": inst.get("IamInstanceProfile", {}).get("Arn"),
                             "tags": inst.get("Tags", [])
                         })
-        except ClientError as e:
-            logger.warning(f"Error scanning EC2 instances: {e.response['Error']['Message']}")
+        except (ClientError, BotoCoreError) as e:
+            self._failed("EC2 instances", e)
         return results
 
     def scan_s3_buckets(self) -> List[Dict[str, Any]]:
         """Scan S3 Buckets in region. (list_buckets is not a paginated API.)"""
         results = []
         try:
-            s3 = self.session.client("s3", config=_new_retry_config(), endpoint_url=self.endpoint_url)
+            s3 = self._client("s3")
             buckets = s3.list_buckets().get("Buckets", [])
             for b in buckets:
                 b_name = b["Name"]
@@ -233,12 +264,11 @@ class AWSScanner(CloudDiscoveryInterface):
                     "creation_date": b.get("CreationDate", "").isoformat() if b.get("CreationDate") else None,
                     **self._s3_bucket_details(s3, b_name),
                 })
-        except ClientError as e:
-            logger.warning(f"Error scanning S3: {e.response['Error']['Message']}")
+        except (ClientError, BotoCoreError) as e:
+            self._failed("S3", e)
         return results
 
-    @staticmethod
-    def _s3_bucket_details(s3: Any, bucket: str) -> Dict[str, Any]:
+    def _s3_bucket_details(self, s3: Any, bucket: str) -> Dict[str, Any]:
         """Tags (rendered exactly in the adoption code) plus the public access
         block and default encryption (read for the Hardening proposal only).
         Read-only: GetBucketTagging, GetPublicAccessBlock, GetBucketEncryption.
@@ -260,7 +290,10 @@ class AWSScanner(CloudDiscoveryInterface):
                 code = e.response.get("Error", {}).get("Code", "")
                 details[field] = absent_value if code in absent_codes else None
                 if code not in absent_codes:
-                    logger.warning(f"Could not read {field} for bucket {bucket}: {code}")
+                    self._failed(f"{field} of bucket {bucket}", e)
+            except BotoCoreError as e:
+                details[field] = None
+                self._failed(f"{field} of bucket {bucket}", e)
         if details.get("tags") is None:
             details.pop("tags")
         return details
@@ -269,7 +302,7 @@ class AWSScanner(CloudDiscoveryInterface):
         """Scan RDS DB Instances."""
         results = []
         try:
-            rds = self.session.client("rds", config=_new_retry_config(), endpoint_url=self.endpoint_url)
+            rds = self._client("rds")
             for page in rds.get_paginator("describe_db_instances").paginate():
                 for db in page.get("DBInstances", []):
                     db_id = db["DBInstanceIdentifier"]
@@ -293,15 +326,15 @@ class AWSScanner(CloudDiscoveryInterface):
                         ],
                         "tags": db.get("TagList", [])
                     })
-        except ClientError as e:
-            logger.warning(f"Error scanning RDS: {e.response['Error']['Message']}")
+        except (ClientError, BotoCoreError) as e:
+            self._failed("RDS", e)
         return results
 
     def scan_iam_roles(self) -> List[Dict[str, Any]]:
         """Scan IAM Roles and their attached managed policies. IAM is a global (non-regional) service."""
         results = []
         try:
-            iam = self.session.client("iam", config=_new_retry_config(), endpoint_url=self.endpoint_url)
+            iam = self._client("iam")
             for page in iam.get_paginator("list_roles").paginate():
                 for role in page.get("Roles", []):
                     role_name = role["RoleName"]
@@ -311,8 +344,8 @@ class AWSScanner(CloudDiscoveryInterface):
                             attached_policies.extend(
                                 p.get("PolicyArn") for p in pol_page.get("AttachedPolicies", [])
                             )
-                    except ClientError as e:
-                        logger.warning(f"Error listing policies for role {role_name}: {e.response['Error']['Message']}")
+                    except (ClientError, BotoCoreError) as e:
+                        self._failed(f"attached policies of role {role_name}", e)
 
                     results.append({
                         "resource_type": "aws_iam_role",
@@ -326,31 +359,48 @@ class AWSScanner(CloudDiscoveryInterface):
                         "attached_policy_arns": attached_policies,
                         "tags": role.get("Tags", [])
                     })
-        except ClientError as e:
-            logger.warning(f"Error scanning IAM roles: {e.response['Error']['Message']}")
+        except (ClientError, BotoCoreError) as e:
+            self._failed("IAM roles", e)
         return results
 
     def scan_all(self, filters: Optional[List[str]] = None) -> List[Dict[str, Any]]:
-        """Run all resource scans according to enabled category filters."""
-        all_resources: List[Dict[str, Any]] = []
+        """Run the enabled service scans in parallel. Results keep a fixed
+        order (same as a sequential scan); self.counts has one entry per scan
+        and self.errors every call that failed after retries."""
         f = [x.upper() for x in (filters or ["VPC", "EC2", "S3", "RDS", "SG"])]
-
+        plan: List[Tuple[str, Callable[[], List[Dict[str, Any]]]]] = []
         if "VPC" in f:
-            all_resources.extend(self.scan_vpcs())
-            all_resources.extend(self.scan_subnets())
-            all_resources.extend(self.scan_route_tables())
+            plan += [("vpcs", self.scan_vpcs), ("subnets", self.scan_subnets), ("route_tables", self.scan_route_tables)]
         if "SG" in f:
-            all_resources.extend(self.scan_security_groups())
+            plan.append(("security_groups", self.scan_security_groups))
         if "EC2" in f:
-            all_resources.extend(self.scan_ec2_instances())
+            plan.append(("ec2_instances", self.scan_ec2_instances))
         if "S3" in f:
-            all_resources.extend(self.scan_s3_buckets())
+            plan.append(("s3_buckets", self.scan_s3_buckets))
         if "RDS" in f:
-            all_resources.extend(self.scan_rds_instances())
+            plan.append(("rds_instances", self.scan_rds_instances))
         if "IAM" in f:
-            all_resources.extend(self.scan_iam_roles())
+            plan.append(("iam_roles", self.scan_iam_roles))
 
+        def run(fn: Callable[[], List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+            try:
+                return fn()
+            except Exception as e:  # never let one service sink the others
+                self._failed(fn.__name__, e)
+                return []
+
+        with ThreadPoolExecutor(max_workers=SCAN_WORKERS) as pool:
+            results = list(pool.map(run, [fn for _, fn in plan]))
+        all_resources: List[Dict[str, Any]] = []
+        for (name, _), found in zip(plan, results):
+            self.counts[name] = len(found)
+            all_resources.extend(found)
         return all_resources
+
+    def report(self) -> Dict[str, Any]:
+        """Per-service counts and failures for this scan."""
+        return {"region": self.region, "complete": not self.errors, "counts": dict(self.counts),
+                "errors": list(self.errors)}
 
     @staticmethod
     def _get_tag(tags: List[Dict[str, str]], key: str, default: str) -> str:

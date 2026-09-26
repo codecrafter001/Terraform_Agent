@@ -76,6 +76,14 @@ class ScanRequest(BaseModel):
                      "what actually scans the target account, and are discarded at the end "
                      "of the scan - never persisted beyond the scan session."
     )
+    external_id: Optional[str] = Field(
+        None,
+        min_length=2,
+        max_length=1224,
+        pattern=r"^[\w+=,.@:/-]+$",
+        description="ExternalId the target role's trust policy requires (per tenant) - "
+                    "passed to sts:AssumeRole with role_arn. See docs/aws/read-only-role.md.",
+    )
     webhook_url: Optional[str] = Field(
         None, description="Optional URL to POST a scan result summary to on completion"
     )

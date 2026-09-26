@@ -93,6 +93,7 @@ async def start_scan(request: Request, scan_request: ScanRequest):
         "operation": scan_request.operation.value,
         "resource_filters": scan_request.resource_filters,
         "role_arn": scan_request.role_arn,
+        "external_id": scan_request.external_id,
         "webhook_url": scan_request.webhook_url,
         "zip_password": scan_request.zip_password.get_secret_value() if scan_request.zip_password else None,
         "terraform_binary": scan_request.terraform_binary,

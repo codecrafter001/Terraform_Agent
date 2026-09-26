@@ -8,6 +8,8 @@ export interface ScanRequestPayload {
   aws_access_key: string;
   aws_secret_key: string;
   aws_session_token?: string;
+  role_arn?: string;
+  external_id?: string;
   region: string;
   environment?: string;
   user_request?: string;

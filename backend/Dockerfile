@@ -9,7 +9,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONPATH=/app \
     TERRAFORM_VERSION=1.8.5 \
     OPENTOFU_VERSION=1.8.5 \
-    TFSEC_VERSION=v1.28.1 \
     TRIVY_VERSION=0.74.0 \
     CONFTEST_VERSION=0.69.0 \
     CHECKOV_VERSION=3.3.16 \
@@ -24,7 +23,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     unzip \
     ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p "${TF_PLUGIN_CACHE_DIR}"
 
 # Install Terraform CLI
 RUN curl -sSL "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip" -o terraform.zip \
@@ -40,11 +40,6 @@ RUN curl -sSL "https://github.com/opentofu/opentofu/releases/download/v${OPENTOF
     && unzip tofu.zip -d /usr/local/bin \
     && rm tofu.zip \
     && tofu --version
-
-# Install tfsec binary
-RUN curl -sSL "https://github.com/aquasecurity/tfsec/releases/download/${TFSEC_VERSION}/tfsec-linux-amd64" -o /usr/local/bin/tfsec \
-    && chmod +x /usr/local/bin/tfsec \
-    && tfsec --version
 
 # Install Trivy binary
 RUN curl -sSL "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" -o trivy.tar.gz \

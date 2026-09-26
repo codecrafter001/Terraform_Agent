@@ -108,6 +108,8 @@ export default function CredentialForm() {
   const [accessKey, setAccessKey] = useState("");
   const [secretKey, setSecretKey] = useState("");
   const [sessionToken, setSessionToken] = useState("");
+  const [roleArn, setRoleArn] = useState("");
+  const [externalId, setExternalId] = useState("");
   const [showSecret, setShowSecret] = useState(false);
 
   // Configuration
@@ -184,6 +186,8 @@ export default function CredentialForm() {
         aws_access_key: accessKey,
         aws_secret_key: secretKey,
         aws_session_token: sessionToken || undefined,
+        role_arn: roleArn.trim() || undefined,
+        external_id: roleArn.trim() && externalId.trim() ? externalId.trim() : undefined,
         region,
         environment,
         user_request: activeTab === "request" ? userRequest : undefined,
@@ -366,6 +370,43 @@ export default function CredentialForm() {
                 className="field-input font-mono"
               />
             </div>
+
+            <details className="rounded-xl border border-slate-200 bg-slate-50/60 p-3">
+              <summary className="cursor-pointer text-xs font-medium text-slate-700">
+                Scan through a read-only role <span className="text-2xs text-slate-400 font-normal">recommended</span>
+              </summary>
+              <p className="text-2xs text-slate-500 mt-2">
+                The keys above are only used to assume this role; discovery and every check then use the role&apos;s
+                one-hour credentials. Set the role up with docs/aws/read-only-role.md (read-only, explicit denies on
+                data reads, ExternalId in its trust policy).
+              </p>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-2">
+                <div className="space-y-1.5">
+                  <label htmlFor="aws-role-arn" className="text-xs font-medium text-slate-700">Role ARN</label>
+                  <input
+                    id="aws-role-arn"
+                    type="text"
+                    autoComplete="off"
+                    placeholder="arn:aws:iam::123456789012:role/terraagent-read-only"
+                    value={roleArn}
+                    onChange={(e) => setRoleArn(e.target.value)}
+                    className="field-input font-mono"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <label htmlFor="aws-external-id" className="text-xs font-medium text-slate-700">ExternalId</label>
+                  <input
+                    id="aws-external-id"
+                    type="password"
+                    autoComplete="off"
+                    placeholder="the value in the role's trust policy"
+                    value={externalId}
+                    onChange={(e) => setExternalId(e.target.value)}
+                    className="field-input font-mono"
+                  />
+                </div>
+              </div>
+            </details>
           </FormSection>
 
           {/* Tab 2: Classic Manual Target & Engine & Mode Selection */}

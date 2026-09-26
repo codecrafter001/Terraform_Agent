@@ -19,9 +19,10 @@
 ## Terraform Execution Guardrail (Mandatory for Every Agent)
 
 Rules #1–#2 above are enforced by one real, code-level mechanism, not just convention:
-`backend/tools/terraform_runner.py::TerraformRunner.run_command`'s disallowed-argv check — it
-substring-matches every argv token against `apply`/`destroy`/`import` and raises before the
-subprocess ever starts. **This is a chokepoint only for callers that actually go through it.**
+`backend/tools/terraform_runner.py::check_argv`, called by `TerraformRunner.run_command` before the
+subprocess ever starts: the binary must be `terraform`/`tofu`, the subcommand must be one of
+`version`/`fmt`/`init`/`validate`/`plan`/`show`/`providers`, and no argv token may be
+`apply`/`destroy`/`import`, bare or as a flag (`plan -destroy`) - otherwise it raises. **This is a chokepoint only for callers that actually go through it.**
 Verified: five other tools (`checkov_runner.py`, `conftest_runner.py`, `trivy_runner.py`,
 `tfsec_runner.py`, `infracost_runner.py`) already shell out via their own independent
 `asyncio.create_subprocess_exec` calls with fixed argv, bypassing `run_command` entirely — benign
@@ -73,6 +74,14 @@ infrastructure -> iac_engineering -> verification --PASS / INCOMPLETE / NEEDS_AP
 ```
 
 1. **Infrastructure Agent** - steps: `intent_router`, `resource_explorer`, `cloud_discovery` (boto3, read-only), `graph_agent`, `classification_agent`.
+   **Access**: `role_arn` + per-tenant `external_id` (`sts:AssumeRole`, trust-policy condition); the
+   caller's keys are used only for AssumeRole, then `state["aws_credentials"]` becomes the role's 1-hour
+   credentials, so drift / plan / cross-check read the same target account. Customer setup:
+   `docs/aws/read-only-role.md` (read-only allow list + explicit denies on data reads and on anything
+   else). `cloud_discovery` runs the service scans in parallel with adaptive retries; every call that
+   still fails is recorded in `state["discovery"]` and makes the verdict **INCOMPLETE** (a failed call
+   never looks like an empty account). A test records every boto operation and fails on anything not
+   `Describe*`/`Get*`/`List*`.
    `resource_explorer` (`tools/resource_explorer.py`) queries AWS Resource Explorer for an all-region
    inventory using only `ListIndexes` + `Search` (`READ_ONLY_OPERATIONS`, enforced by tests). It never
    creates/changes indexes or views - if Resource Explorer isn't turned on it reports why and discovery
@@ -228,8 +237,9 @@ terraagent/
 
 ### 5. Centralized Runner Safety
 - All execution of `terraform` or `tofu` CLI commands MUST go through `IaCEngine.run_command()` / `TerraformRunner.run_command()`.
-- Allowed commands in this phase: `version`, `fmt`, `init`, `validate`.
-- Blocked commands: `apply`, `destroy`, `import`. Direct execution without runner validation is strictly forbidden.
+- Allowed subcommands: `version`, `fmt`, `init`, `validate`, `plan`, `show`, `providers` (`check_argv` allowlist).
+- Blocked anywhere in argv: `apply`, `destroy`, `import` (also as flags). Direct execution without runner validation is strictly forbidden.
+- `init` takes an exclusive file lock on `TF_PLUGIN_CACHE_DIR` (shared by all worker processes; Terraform's cache isn't safe for concurrent inits).
 
 ### 6. Validation Flow & Status Granularity
 - Validation executes in temporary isolated sandboxes:
