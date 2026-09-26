@@ -3,15 +3,18 @@ import { demoJobResults } from "@/lib/demo";
 import CreatePullRequestAction from "@/components/CreatePullRequestAction";
 import DependencyGraph from "@/components/DependencyGraph";
 import DecisionsPanel from "@/components/DecisionsPanel";
+import HardeningPanel from "@/components/HardeningPanel";
 import InventoryPanel from "@/components/InventoryPanel";
 import ResultsApprovalSection from "@/components/ResultsApprovalSection";
 import ResultsTabs from "@/components/ResultsTabs";
+import ScoresPanel from "@/components/ScoresPanel";
 import ValidationReport from "@/components/ValidationReport";
 import ZipDownload from "@/components/ZipDownload";
 import { PageHeader, SectionHeading, StatCard, StatusBadge, Tone } from "@/components/ui";
 import Link from "next/link";
 import {
   AlertTriangle,
+  ArrowLeftRight,
   Boxes,
   CheckCheck,
   Download,
@@ -180,7 +183,24 @@ export default async function JobResultsPage({ params }: ResultsPageProps) {
 
   const security = results.security_results;
   const findingsCount = security?.findings?.length ?? 0;
-  const scannersSkipped = security?.scanners_skipped ?? [];
+  const safety = results.migration_safety;
+  const posture = results.security_posture;
+  const safetyTone: Tone =
+    !safety || safety.score === null
+      ? "slate"
+      : safety.status === "SAFE"
+      ? "emerald"
+      : safety.status === "DESTRUCTIVE"
+      ? "rose"
+      : "amber";
+  const postureTone: Tone =
+    !posture || posture.score === null
+      ? "slate"
+      : posture.rating === "GOOD"
+      ? "emerald"
+      : posture.rating === "POOR"
+      ? "rose"
+      : "amber";
   const validationPassed = results.validation_results?.passed ?? false;
   const checksCount = results.validation_results?.checks?.length ?? 0;
   const edgeCount = results.dependency_graph?.edge_count ?? 0;
@@ -193,6 +213,7 @@ export default async function JobResultsPage({ params }: ResultsPageProps) {
       icon: <LayoutGrid className="w-3.5 h-3.5" />,
       content: (
         <>
+          <ScoresPanel safety={safety} posture={posture} />
           <DecisionsPanel model={results.infra_model} />
           {results.adoption_plan ? (
             <AdoptionPlanCard results={results} plan={results.adoption_plan} />
@@ -273,6 +294,7 @@ export default async function JobResultsPage({ params }: ResultsPageProps) {
             githubWavePrs={results.github_wave_prs}
             adoptionPlan={results.adoption_plan}
           />
+          <HardeningPanel hardening={results.hardening} />
         </>
       ),
     },
@@ -335,12 +357,13 @@ export default async function JobResultsPage({ params }: ResultsPageProps) {
         jobId={id}
         status={results.status}
         pendingApproval={results.pending_approval}
+        approvalRequest={results.approval_request}
         planEquivalenceResults={results.plan_equivalence_results}
         approvalDecision={results.approval_decision}
       />
 
       {/* At-a-glance KPIs */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-3 sm:gap-4">
         <StatCard label="Resources" value={results.resources_count} icon={Boxes} tone="brand" compact hint={`${nodeCount} graph nodes`} />
         <StatCard
           label="Validation"
@@ -351,16 +374,20 @@ export default async function JobResultsPage({ params }: ResultsPageProps) {
           hint={`${checksCount} check${checksCount === 1 ? "" : "s"}`}
         />
         <StatCard
-          label="Security findings"
-          value={findingsCount}
-          icon={ShieldCheck}
-          tone={scannersSkipped.length > 0 ? "amber" : findingsCount > 0 ? "amber" : "emerald"}
+          label="Migration safety"
+          value={safety && safety.score !== null ? `${safety.score}%` : "—"}
+          icon={ArrowLeftRight}
+          tone={safetyTone}
           compact
-          hint={
-            scannersSkipped.length > 0
-              ? `${scannersSkipped.length} scanner${scannersSkipped.length === 1 ? "" : "s"} skipped`
-              : `risk score ${security?.risk_score ?? 0}`
-          }
+          hint={safety ? `${safety.status.toLowerCase()} · ${safety.destroy_or_replace} destroy/replace` : "not measured"}
+        />
+        <StatCard
+          label="Security posture"
+          value={posture && posture.score !== null ? `${posture.score}/100` : "—"}
+          icon={ShieldCheck}
+          tone={postureTone}
+          compact
+          hint={posture ? `${findingsCount} finding${findingsCount === 1 ? "" : "s"}${posture.complete ? "" : " · partial scan"}` : "not measured"}
         />
         <StatCard label="Dependencies" value={edgeCount} icon={Network} tone="indigo" compact hint={results.dependency_graph?.is_dag ? "acyclic graph" : "cycles detected"} />
       </div>

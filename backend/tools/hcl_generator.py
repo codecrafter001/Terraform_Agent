@@ -4,17 +4,19 @@ Transforms structured AWS resource discovery data and adoption plans into clean,
 production-grade, modular, dependency-aware, and reproducible Terraform / OpenTofu HCL code.
 
 Architecture:
-1. Modular Hierarchy: Generates encapsulated reusable modules:
-   - modules/networking/ (VPC, Subnets, Route Tables, IGW, NAT Gateways)
-   - modules/security/ (Security Groups, IAM Roles/Policies, KMS Keys)
-   - modules/compute/ (EC2 Instances, ALBs, Target Groups, Launch Templates)
-   - modules/storage_and_data/ (S3 Buckets, RDS Instances, DynamoDB Tables)
-2. Root Orchestration: Root main.tf, variables.tf, outputs.tf, locals.tf, versions.tf, providers.tf,
+1. Root Orchestration: variables.tf, outputs.tf, locals.tf, versions.tf, providers.tf,
    terraform.tfvars.example, and backend.tf.example (S3 remote backend + DynamoDB locking).
-3. Stack Compatibility: Emits domain stack files (foundation.tf, security.tf, data.tf, application.tf)
-   to ensure full compatibility with single-directory sandbox validations and repair cycles.
-4. Zero Fake Defaults: Missing required attributes trigger review_required with explicit reasons.
+2. Stack files: every resource lives exactly once, in a root domain stack file
+   (foundation.tf, security.tf, data.tf, application.tf) - the same root module
+   that is validated, planned and imported (imports.tf uses root addresses).
+   No modules/ copies: the root never called them, so they were dead code that
+   the scanners still scanned, doubling every finding.
+3. Zero Fake Defaults: Missing required attributes trigger review_required with explicit reasons;
+   missing optional ones are omitted so the import keeps the live value.
+4. Adoption only: exact live tags, no provider default_tags, no security hardening
+   (that's the separate Hardening proposal, tools/hardening.py).
 5. Real Dependency Preservation: Replaces raw IDs with typed references.
+6. Untrusted input: every discovered string is escaped (tools/hcl_render.py).
 """
 
 import json
@@ -22,6 +24,7 @@ import logging
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from models.manifest import GenerationManifest, UnresolvedAttribute
+from tools.hcl_render import escape_template, hcl_bool, hcl_str, route_lines, security_group_rules, tags_block
 from tools.import_blocks import IMPORTS_FILENAME, ImportEntry, compose_imports_tf
 from tools.infra_model import import_id_for
 from tools.naming import unique_clean_name
@@ -103,19 +106,6 @@ class HCLGenerator:
         resource_blocks_by_stack: Dict[str, List[str]] = {}
         output_blocks_by_stack: Dict[str, List[str]] = {}
 
-        # Module categorized resource blocks
-        module_blocks: Dict[str, List[str]] = {
-            "networking": [],
-            "security": [],
-            "compute": [],
-            "storage_and_data": []
-        }
-        module_outputs: Dict[str, List[str]] = {
-            "networking": [],
-            "security": [],
-            "compute": [],
-            "storage_and_data": []
-        }
 
         import_entries: List[ImportEntry] = []
 
@@ -135,7 +125,6 @@ class HCLGenerator:
             r_type = res.get("resource_type", "aws_resource")
             clean_name = unique_clean_name(res.get("name", r_id), r_id)
             stack_name = stack_by_resource_id.get(r_id, self._default_stack_for_type(r_type))
-            mod_category = self._module_category_for_type(r_type)
 
             action = classification_action_map.get(r_id, "import")
             category = classification_cat_map.get(r_id, "unmanaged")
@@ -152,7 +141,6 @@ class HCLGenerator:
                 manifest.resources_data_source += 1
                 ds_block = self._compose_data_source(r_type, res, clean_name)
                 resource_blocks_by_stack.setdefault(stack_name, []).append(ds_block)
-                module_blocks[mod_category].append(ds_block)
                 continue
 
             if plan_cat in ("review_required", "unsupported") or category in ("unsupported", "orphaned") or action == "manual_review":
@@ -193,11 +181,9 @@ class HCLGenerator:
 
             manifest.resources_generated += 1
             resource_blocks_by_stack.setdefault(stack_name, []).append(hcl_block)
-            module_blocks[mod_category].append(hcl_block)
 
             if outputs:
                 output_blocks_by_stack.setdefault(stack_name, []).extend(outputs)
-                module_outputs[mod_category].extend(outputs)
 
         # 4. Generate core project files (Root level)
         files: Dict[str, str] = {
@@ -224,96 +210,8 @@ class HCLGenerator:
         if import_entries:
             files[IMPORTS_FILENAME] = compose_imports_tf(import_entries, adoption_plan.get("import_order"))
 
-        # 5. Generate Reusable Submodules tree
-        self._compose_submodules(files, module_blocks, module_outputs)
-
         manifest.generated_files = sorted(files.keys())
         return files, manifest
-
-    def _compose_submodules(
-        self,
-        files: Dict[str, str],
-        module_blocks: Dict[str, List[str]],
-        module_outputs: Dict[str, List[str]]
-    ) -> None:
-        """Populates the modules/ hierarchy for enterprise modular deployments."""
-        # 1. Networking Module
-        net_blocks = module_blocks.get("networking", [])
-        if net_blocks:
-            files["modules/networking/main.tf"] = "\n\n".join(net_blocks)
-            files["modules/networking/variables.tf"] = """variable "environment" {
-  type        = string
-  description = "Deployment environment name"
-  default     = "production"
-}
-
-variable "aws_region" {
-  type        = string
-  description = "AWS region for networking infrastructure"
-  default     = "us-east-1"
-}
-"""
-            files["modules/networking/outputs.tf"] = "\n\n".join(module_outputs.get("networking", [])) or "# No networking outputs"
-
-        # 2. Security Module
-        sec_blocks = module_blocks.get("security", [])
-        if sec_blocks:
-            files["modules/security/main.tf"] = "\n\n".join(sec_blocks)
-            files["modules/security/variables.tf"] = """variable "environment" {
-  type        = string
-  description = "Deployment environment name"
-  default     = "production"
-}
-
-variable "vpc_id" {
-  type        = string
-  description = "Target VPC ID for security groups"
-  default     = null
-}
-"""
-            files["modules/security/outputs.tf"] = "\n\n".join(module_outputs.get("security", [])) or "# No security outputs"
-
-        # 3. Compute Module
-        comp_blocks = module_blocks.get("compute", [])
-        if comp_blocks:
-            files["modules/compute/main.tf"] = "\n\n".join(comp_blocks)
-            files["modules/compute/variables.tf"] = """variable "environment" {
-  type        = string
-  description = "Deployment environment name"
-  default     = "production"
-}
-
-variable "subnet_id" {
-  type        = string
-  description = "Target Subnet ID for compute instances"
-  default     = null
-}
-
-variable "security_group_ids" {
-  type        = list(string)
-  description = "Associated Security Group IDs"
-  default     = []
-}
-"""
-            files["modules/compute/outputs.tf"] = "\n\n".join(module_outputs.get("compute", [])) or "# No compute outputs"
-
-        # 4. Storage and Data Module
-        data_blocks = module_blocks.get("storage_and_data", [])
-        if data_blocks:
-            files["modules/storage_and_data/main.tf"] = "\n\n".join(data_blocks)
-            files["modules/storage_and_data/variables.tf"] = """variable "environment" {
-  type        = string
-  description = "Deployment environment name"
-  default     = "production"
-}
-
-variable "vpc_id" {
-  type        = string
-  description = "Target VPC ID for database subnet groups"
-  default     = null
-}
-"""
-            files["modules/storage_and_data/outputs.tf"] = "\n\n".join(module_outputs.get("storage_and_data", [])) or "# No storage/data outputs"
 
     def _compose_versions_tf(self) -> str:
         return """terraform {
@@ -328,11 +226,10 @@ variable "vpc_id" {
 """
 
     def _compose_providers_tf(self) -> str:
+        # No default_tags: they would add tags to every imported resource, so
+        # the adoption plan would show an update on all of them.
         return """provider "aws" {
   region = var.aws_region
-  default_tags {
-    tags = local.default_tags
-  }
 }
 """
 
@@ -357,12 +254,11 @@ variable "project_name" {{
 """
 
     def _compose_locals_tf(self) -> str:
+        # No shared tag map here: adoption code carries each resource's own live
+        # tags only (see _compose_providers_tf).
         return """locals {
-  default_tags = {
-    Environment = var.environment
-    Project     = var.project_name
-    ManagedBy   = "TerraAgent"
-  }
+  environment = var.environment
+  project     = var.project_name
 }
 """
 
@@ -389,22 +285,7 @@ project_name = "Cloud-Modernization"
 """
 
     def _compose_data_source(self, r_type: str, res: Dict[str, Any], clean_name: str) -> str:
-        r_id = res.get("id", "")
-        if r_type == "aws_security_group":
-            return f"""data "aws_security_group" "{clean_name}" {{
-  id = "{r_id}"
-}}"""
-        elif r_type == "aws_vpc":
-            return f"""data "aws_vpc" "{clean_name}" {{
-  id = "{r_id}"
-}}"""
-        elif r_type == "aws_subnet":
-            return f"""data "aws_subnet" "{clean_name}" {{
-  id = "{r_id}"
-}}"""
-        return f"""data "{r_type}" "{clean_name}" {{
-  id = "{r_id}"
-}}"""
+        return f'data "{r_type}" "{clean_name}" {{\n  id = {hcl_str(res.get("id", ""))}\n}}'
 
     def _compose_managed_resource(
         self,
@@ -413,544 +294,250 @@ project_name = "Cloud-Modernization"
         clean_name: str,
         resource_ref_map: Dict[str, Dict[str, Any]]
     ) -> Tuple[str, List[str], List[UnresolvedAttribute], List[str]]:
-        """Synthesizes resource HCL without fake defaults. Returns (hcl, outputs, unresolved, warnings)."""
+        """Synthesizes adoption HCL: exactly what is live, nothing more.
+        Returns (hcl, outputs, unresolved, warnings).
+
+        Adoption rules (the adoption PR must plan with zero changes):
+        - Every value comes from discovery. A required value that wasn't
+          discovered makes the resource unresolved (-> review), never a default.
+        - An optional attribute that wasn't discovered is omitted, so Terraform
+          keeps whatever the import reads from AWS.
+        - Tags are copied exactly (tags_block); no provider default_tags.
+        - No security hardening (encryption, IMDSv2, public access blocks...):
+          that is the Hardening proposal's job (tools/hardening.py).
+        - Every discovered string goes through hcl_str - names and tags are
+          untrusted text."""
         r_id = res.get("id", "")
         outputs: List[str] = []
         unresolved: List[UnresolvedAttribute] = []
         warnings: List[str] = []
+        address = f"{r_type}.{clean_name}"
+
+        def missing(attribute: str, reason: str) -> None:
+            unresolved.append(UnresolvedAttribute(
+                resource_id=r_id, resource_type=r_type, attribute_name=attribute, reason=reason))
+
+        def ref(target_id: Optional[str], attr: str = "id") -> str:
+            if target_id in resource_ref_map:
+                return f"{resource_ref_map[target_id]['tf_address']}.{attr}"
+            return hcl_str(target_id)
+
+        def output(name: str, attr: str, description: str) -> None:
+            outputs.append(f'output "{name}" {{\n  value       = {address}.{attr}\n'
+                           f'  description = {hcl_str(description)}\n}}')
+
+        def resource(body: List[str]) -> str:
+            lines = [line for line in body if line]
+            tags = tags_block(res.get("tags"))
+            if tags:
+                lines.append(tags)
+            return f'resource "{r_type}" "{clean_name}" {{\n' + "\n".join(lines) + "\n}"
 
         if r_type == "aws_vpc":
-            cidr = res.get("cidr_block")
-            if not cidr:
-                unresolved.append(UnresolvedAttribute(
-                    resource_id=r_id,
-                    resource_type=r_type,
-                    attribute_name="cidr_block",
-                    reason="VPC discovery record is missing 'cidr_block'."
-                ))
+            if not res.get("cidr_block"):
+                missing("cidr_block", "VPC discovery record is missing 'cidr_block'.")
                 return "", [], unresolved, warnings
-
-            hcl = f"""resource "aws_vpc" "{clean_name}" {{
-  cidr_block           = "{cidr}"
-  enable_dns_hostnames = true
-  enable_dns_support   = true
-
-  tags = {{
-    Name = "{res.get('name', clean_name)}"
-  }}
-}}"""
-            outputs.append(f"""output "vpc_{clean_name}_id" {{
-  value       = aws_vpc.{clean_name}.id
-  description = "VPC ID for {clean_name}"
-}}""")
+            body = [f"  cidr_block = {hcl_str(res['cidr_block'])}"]
+            for attr in ("enable_dns_support", "enable_dns_hostnames"):
+                if isinstance(res.get(attr), bool):
+                    body.append(f"  {attr} = {hcl_bool(res[attr])}")
+            hcl = resource(body)
+            output(f"vpc_{clean_name}_id", "id", f"VPC ID for {clean_name}")
             return hcl, outputs, [], warnings
 
         elif r_type == "aws_subnet":
-            cidr = res.get("cidr_block")
-            vpc_id = res.get("vpc_id")
-            if not cidr:
-                unresolved.append(UnresolvedAttribute(
-                    resource_id=r_id,
-                    resource_type=r_type,
-                    attribute_name="cidr_block",
-                    reason="Subnet discovery record is missing 'cidr_block'."
-                ))
-            if not vpc_id:
-                unresolved.append(UnresolvedAttribute(
-                    resource_id=r_id,
-                    resource_type=r_type,
-                    attribute_name="vpc_id",
-                    reason="Subnet discovery record is missing 'vpc_id'."
-                ))
+            if not res.get("cidr_block"):
+                missing("cidr_block", "Subnet discovery record is missing 'cidr_block'.")
+            if not res.get("vpc_id"):
+                missing("vpc_id", "Subnet discovery record is missing 'vpc_id'.")
             if unresolved:
                 return "", [], unresolved, warnings
-
-            # Dependency reference: use aws_vpc.<name>.id if available
-            vpc_ref = f'"{vpc_id}"'
-            if vpc_id in resource_ref_map:
-                target = resource_ref_map[vpc_id]
-                vpc_ref = f"{target['tf_address']}.id"
-
-            az_attr = f'\n  availability_zone       = "{res.get("availability_zone")}"' if res.get("availability_zone") else ""
-
-            hcl = f"""resource "aws_subnet" "{clean_name}" {{
-  vpc_id                  = {vpc_ref}
-  cidr_block              = "{cidr}"{az_attr}
-  map_public_ip_on_launch = false
-
-  tags = {{
-    Name = "{res.get('name', clean_name)}"
-  }}
-}}"""
-            outputs.append(f"""output "subnet_{clean_name}_id" {{
-  value       = aws_subnet.{clean_name}.id
-  description = "Subnet ID for {clean_name}"
-}}""")
+            body = [f"  vpc_id     = {ref(res['vpc_id'])}", f"  cidr_block = {hcl_str(res['cidr_block'])}"]
+            if res.get("availability_zone"):
+                body.append(f"  availability_zone = {hcl_str(res['availability_zone'])}")
+            if isinstance(res.get("map_public_ip_on_launch"), bool):
+                body.append(f"  map_public_ip_on_launch = {hcl_bool(res['map_public_ip_on_launch'])}")
+            else:
+                warnings.append(f"{address}: map_public_ip_on_launch not discovered - Terraform's default (false) applies")
+            hcl = resource(body)
+            output(f"subnet_{clean_name}_id", "id", f"Subnet ID for {clean_name}")
             return hcl, outputs, [], warnings
 
         elif r_type == "aws_internet_gateway":
-            vpc_id = res.get("vpc_id")
-            vpc_ref_attr = ""
-            if vpc_id:
-                if vpc_id in resource_ref_map:
-                    target = resource_ref_map[vpc_id]
-                    vpc_ref_attr = f"\n  vpc_id = {target['tf_address']}.id"
-                else:
-                    vpc_ref_attr = f'\n  vpc_id = "{vpc_id}"'
-
-            hcl = f"""resource "aws_internet_gateway" "{clean_name}" {{{vpc_ref_attr}
-
-  tags = {{
-    Name = "{res.get('name', clean_name)}"
-  }}
-}}"""
-            outputs.append(f"""output "igw_{clean_name}_id" {{
-  value       = aws_internet_gateway.{clean_name}.id
-  description = "Internet Gateway ID for {clean_name}"
-}}""")
+            body = [f"  vpc_id = {ref(res['vpc_id'])}"] if res.get("vpc_id") else []
+            hcl = resource(body)
+            output(f"igw_{clean_name}_id", "id", f"Internet Gateway ID for {clean_name}")
             return hcl, outputs, [], warnings
 
         elif r_type == "aws_nat_gateway":
-            subnet_id = res.get("subnet_id")
-            if not subnet_id:
-                unresolved.append(UnresolvedAttribute(
-                    resource_id=r_id,
-                    resource_type=r_type,
-                    attribute_name="subnet_id",
-                    reason="NAT Gateway discovery record is missing 'subnet_id'."
-                ))
+            if not res.get("subnet_id"):
+                missing("subnet_id", "NAT Gateway discovery record is missing 'subnet_id'.")
+            if not res.get("allocation_id") and res.get("connectivity_type", "public") == "public":
+                missing("allocation_id", "Public NAT Gateway discovery record is missing its Elastic IP 'allocation_id'.")
+            if unresolved:
                 return "", [], unresolved, warnings
-
-            sub_ref = f'"{subnet_id}"'
-            if subnet_id in resource_ref_map:
-                target = resource_ref_map[subnet_id]
-                sub_ref = f"{target['tf_address']}.id"
-
-            hcl = f"""resource "aws_eip" "{clean_name}_eip" {{
-  domain = "vpc"
-
-  tags = {{
-    Name = "{clean_name}-nat-eip"
-  }}
-}}
-
-resource "aws_nat_gateway" "{clean_name}" {{
-  allocation_id = aws_eip.{clean_name}_eip.id
-  subnet_id     = {sub_ref}
-
-  tags = {{
-    Name = "{res.get('name', clean_name)}"
-  }}
-}}"""
-            outputs.append(f"""output "nat_gw_{clean_name}_id" {{
-  value       = aws_nat_gateway.{clean_name}.id
-  description = "NAT Gateway ID for {clean_name}"
-}}""")
+            body = [f"  subnet_id = {ref(res['subnet_id'])}"]
+            if res.get("allocation_id"):
+                body.append(f"  allocation_id = {ref(res['allocation_id'])}")
+            if res.get("connectivity_type"):
+                body.append(f"  connectivity_type = {hcl_str(res['connectivity_type'])}")
+            hcl = resource(body)
+            output(f"nat_gw_{clean_name}_id", "id", f"NAT Gateway ID for {clean_name}")
             return hcl, outputs, [], warnings
 
         elif r_type == "aws_security_group":
-            vpc_id = res.get("vpc_id")
-            vpc_ref_attr = ""
-            if vpc_id:
-                if vpc_id in resource_ref_map:
-                    target = resource_ref_map[vpc_id]
-                    vpc_ref_attr = f"\n  vpc_id      = {target['tf_address']}.id"
-                else:
-                    vpc_ref_attr = f'\n  vpc_id      = "{vpc_id}"'
-
-            description = (res.get("description") or "Managed by TerraAgent").replace('"', "'")
-
-            def _format_rules(block_name: str, perms: list) -> str:
-                rules = []
-                for perm in perms:
-                    cidrs = [c.get("CidrIp") for c in perm.get("IpRanges", []) if c.get("CidrIp")]
-                    if not cidrs:
-                        continue
-                    from_p = perm.get("FromPort") or 0
-                    to_p = perm.get("ToPort") or 0
-                    proto = perm.get("IpProtocol", "-1")
-                    rules.append(f"""  {block_name} {{
-    from_port   = {from_p}
-    to_port     = {to_p}
-    protocol    = "{proto}"
-    cidr_blocks = [{", ".join(f'"{c}"' for c in cidrs)}]
-  }}""")
-                return "\n\n".join(rules)
-
-            ingress_hcl = _format_rules("ingress", res.get("ip_permissions", []))
-            egress_hcl = _format_rules("egress", res.get("ip_permissions_egress", []))
-
-            sections = [f'  name        = "{res.get("name", clean_name)}"\n  description = "{description}"{vpc_ref_attr}']
-            if ingress_hcl:
-                sections.append(ingress_hcl)
-            if egress_hcl:
-                sections.append(egress_hcl)
-            sections.append(f'  tags = {{\n    Name = "{res.get("name", clean_name)}"\n  }}')
-
-            hcl = f'resource "aws_security_group" "{clean_name}" {{\n' + "\n\n".join(sections) + "\n}"
-            outputs.append(f"""output "sg_{clean_name}_id" {{
-  value       = aws_security_group.{clean_name}.id
-  description = "Security Group ID for {clean_name}"
-}}""")
+            # description is ForceNew: a guessed value would replace the group.
+            if res.get("description") is None:
+                missing("description", "Security group description not discovered (changing it forces replacement).")
+                return "", [], unresolved, warnings
+            body = [f"  name        = {hcl_str(res.get('name') or r_id)}",
+                    f"  description = {hcl_str(res['description'])}"]
+            if res.get("vpc_id"):
+                body.append(f"  vpc_id      = {ref(res['vpc_id'])}")
+            # Every live rule, including SG-to-SG, IPv6 and prefix-list sources -
+            # a rule left out here would be deleted by the plan.
+            for block, perms in (("ingress", res.get("ip_permissions")), ("egress", res.get("ip_permissions_egress"))):
+                for rule in security_group_rules(perms or [], r_id, ref):
+                    body.append(f"\n  {block} {{\n" + "\n".join(f"    {line}" for line in rule) + "\n  }")
+            hcl = resource(body)
+            output(f"sg_{clean_name}_id", "id", f"Security Group ID for {clean_name}")
             return hcl, outputs, [], warnings
 
         elif r_type == "aws_instance":
-            ami = res.get("ami")
-            inst_type = res.get("instance_type")
-            if not ami:
-                unresolved.append(UnresolvedAttribute(
-                    resource_id=r_id,
-                    resource_type=r_type,
-                    attribute_name="ami",
-                    reason="EC2 Instance discovery record is missing required 'ami'."
-                ))
-            if not inst_type:
-                unresolved.append(UnresolvedAttribute(
-                    resource_id=r_id,
-                    resource_type=r_type,
-                    attribute_name="instance_type",
-                    reason="EC2 Instance discovery record is missing required 'instance_type'."
-                ))
+            if not res.get("ami"):
+                missing("ami", "EC2 Instance discovery record is missing required 'ami'.")
+            if not res.get("instance_type"):
+                missing("instance_type", "EC2 Instance discovery record is missing required 'instance_type'.")
             if unresolved:
                 return "", [], unresolved, warnings
-
-            # Dependency references for subnet & security groups
-            subnet_id = res.get("subnet_id")
-            subnet_attr = ""
-            if subnet_id:
-                if subnet_id in resource_ref_map:
-                    target = resource_ref_map[subnet_id]
-                    subnet_attr = f"\n  subnet_id     = {target['tf_address']}.id"
-                else:
-                    subnet_attr = f'\n  subnet_id     = "{subnet_id}"'
-
+            body = [f"  ami           = {hcl_str(res['ami'])}",
+                    f"  instance_type = {hcl_str(res['instance_type'])}"]
+            if res.get("subnet_id"):
+                body.append(f"  subnet_id     = {ref(res['subnet_id'])}")
             sg_ids = res.get("security_groups") or []
-            sg_attr = ""
             if sg_ids:
-                refs = []
-                for sid in sg_ids:
-                    if sid in resource_ref_map:
-                        refs.append(f"{resource_ref_map[sid]['tf_address']}.id")
-                    else:
-                        refs.append(f'"{sid}"')
-                sg_attr = f"\n  vpc_security_group_ids = [{', '.join(refs)}]"
-
-            # IAM profile reference if present
+                body.append(f"  vpc_security_group_ids = [{', '.join(ref(s) for s in sg_ids)}]")
             profile_arn = res.get("iam_instance_profile_arn")
-            iam_attr = ""
             if profile_arn:
-                role_name = profile_arn.rsplit("/", 1)[-1]
-                if role_name in resource_ref_map:
-                    iam_attr = f"\n  iam_instance_profile   = {resource_ref_map[role_name]['tf_address']}.name"
-                else:
-                    iam_attr = f'\n  iam_instance_profile   = "{role_name}"'
-
-            hcl = f"""resource "aws_instance" "{clean_name}" {{
-  ami           = "{ami}"
-  instance_type = "{inst_type}"{subnet_attr}{sg_attr}{iam_attr}
-
-  metadata_options {{
-    http_endpoint = "enabled"
-    http_tokens   = "required"
-  }}
-
-  root_block_device {{
-    encrypted = true
-  }}
-
-  tags = {{
-    Name = "{res.get('name', clean_name)}"
-  }}
-}}"""
-            outputs.append(f"""output "instance_{clean_name}_id" {{
-  value       = aws_instance.{clean_name}.id
-  description = "EC2 Instance ID for {clean_name}"
-}}""")
+                # The instance PROFILE name, not a role reference.
+                body.append(f"  iam_instance_profile = {hcl_str(profile_arn.rsplit('/', 1)[-1])}")
+            hcl = resource(body)
+            output(f"instance_{clean_name}_id", "id", f"EC2 Instance ID for {clean_name}")
             return hcl, outputs, [], warnings
 
         elif r_type in ("aws_lb", "aws_alb"):
-            subnets = res.get("subnets", [])
-            security_groups = res.get("security_groups", [])
-            internal = "true" if res.get("scheme") == "internal" else "false"
-
-            subnet_refs = [
-                f"{resource_ref_map[s]['tf_address']}.id" if s in resource_ref_map else f'"{s}"'
-                for s in subnets
-            ]
-            sg_refs = [
-                f"{resource_ref_map[s]['tf_address']}.id" if s in resource_ref_map else f'"{s}"'
-                for s in security_groups
-            ]
-
-            subnet_str = f"[{', '.join(subnet_refs)}]" if subnet_refs else "[]"
-            sg_str = f"\n  security_groups    = [{', '.join(sg_refs)}]" if sg_refs else ""
-
-            hcl = f"""resource "aws_lb" "{clean_name}" {{
-  name               = "{res.get('name', clean_name)}"
-  internal           = {internal}
-  load_balancer_type = "application"
-  subnets            = {subnet_str}{sg_str}
-
-  tags = {{
-    Name = "{res.get('name', clean_name)}"
-  }}
-}}"""
-            outputs.append(f"""output "alb_{clean_name}_dns_name" {{
-  value       = aws_lb.{clean_name}.dns_name
-  description = "DNS name of Application Load Balancer for {clean_name}"
-}}""")
+            body = [f"  name               = {hcl_str(res.get('name') or clean_name)}",
+                    f"  internal           = {hcl_bool(res.get('scheme') == 'internal')}",
+                    f"  load_balancer_type = {hcl_str(res.get('load_balancer_type') or 'application')}"]
+            if res.get("subnets"):
+                body.append(f"  subnets = [{', '.join(ref(s) for s in res['subnets'])}]")
+            if res.get("security_groups"):
+                body.append(f"  security_groups = [{', '.join(ref(s) for s in res['security_groups'])}]")
+            hcl = resource(body).replace(f'resource "{r_type}"', 'resource "aws_lb"', 1)
+            outputs.append(f'output "alb_{clean_name}_dns_name" {{\n  value       = aws_lb.{clean_name}.dns_name\n'
+                           f'  description = {hcl_str("DNS name of Application Load Balancer for " + clean_name)}\n}}')
             return hcl, outputs, [], warnings
 
         elif r_type == "aws_route_table":
-            vpc_id = res.get("vpc_id")
-            if not vpc_id:
-                unresolved.append(UnresolvedAttribute(
-                    resource_id=r_id,
-                    resource_type=r_type,
-                    attribute_name="vpc_id",
-                    reason="Route Table discovery record is missing 'vpc_id'."
-                ))
+            if not res.get("vpc_id"):
+                missing("vpc_id", "Route Table discovery record is missing 'vpc_id'.")
                 return "", [], unresolved, warnings
-
-            vpc_ref = f'"{vpc_id}"'
-            if vpc_id in resource_ref_map:
-                target = resource_ref_map[vpc_id]
-                vpc_ref = f"{target['tf_address']}.id"
-
-            route_blocks = []
-            for route in res.get("routes", []):
-                cidr = route.get("destination_cidr_block")
-                if not cidr:
-                    continue
-                route_attrs = [f'    cidr_block = "{cidr}"']
-                if route.get("gateway_id"):
-                    route_attrs.append(f'    gateway_id = "{route["gateway_id"]}"')
-                elif route.get("nat_gateway_id"):
-                    route_attrs.append(f'    nat_gateway_id = "{route["nat_gateway_id"]}"')
-                route_blocks.append("  route {\n" + "\n".join(route_attrs) + "\n  }")
-
-            body = [f"  vpc_id = {vpc_ref}"]
-            if route_blocks:
-                body.append("\n\n".join(route_blocks))
-            body.append(f'  tags = {{\n    Name = "{res.get("name", clean_name)}"\n  }}')
-
-            hcl_parts = [f'resource "aws_route_table" "{clean_name}" {{\n' + "\n\n".join(body) + "\n}"]
-
-            # Add Route Table Associations
-            for idx, subnet_id in enumerate(res.get("associated_subnets", [])):
-                sub_ref = f'"{subnet_id}"'
-                if subnet_id in resource_ref_map:
-                    sub_ref = f"{resource_ref_map[subnet_id]['tf_address']}.id"
-
-                hcl_parts.append(f"""resource "aws_route_table_association" "{clean_name}_assoc_{idx}" {{
-  subnet_id      = {sub_ref}
-  route_table_id = aws_route_table.{clean_name}.id
-}}""")
-
-            return "\n\n".join(hcl_parts), outputs, [], warnings
+            body = [f"  vpc_id = {ref(res['vpc_id'])}"]
+            for route in res.get("routes", []) or []:
+                lines = route_lines(route)
+                if lines is None:
+                    continue  # the implicit local route, or one AWS propagated
+                if not lines:
+                    missing("route", f"A route on {r_id} has a destination or target TerraAgent can't represent yet.")
+                    return "", [], unresolved, warnings
+                body.append("\n  route {\n" + "\n".join(f"    {line}" for line in lines) + "\n  }")
+            if res.get("associated_subnets"):
+                warnings.append(
+                    f"{address}: subnet associations are left unmanaged in this adoption "
+                    "(no import blocks for them yet)"
+                )
+            hcl = resource(body)
+            return hcl, outputs, [], warnings
 
         elif r_type == "aws_s3_bucket":
-            bucket_name = res.get("name") or r_id
-            hcl = f"""resource "aws_s3_bucket" "{clean_name}" {{
-  bucket = "{bucket_name}"
-
-  tags = {{
-    Name = "{bucket_name}"
-  }}
-}}
-
-resource "aws_s3_bucket_server_side_encryption_configuration" "{clean_name}_encryption" {{
-  bucket = aws_s3_bucket.{clean_name}.id
-
-  rule {{
-    apply_server_side_encryption_by_default {{
-      sse_algorithm = "AES256"
-    }}
-  }}
-}}
-
-resource "aws_s3_bucket_public_access_block" "{clean_name}_public_block" {{
-  bucket = aws_s3_bucket.{clean_name}.id
-
-  block_public_acls       = true
-  block_public_policy     = true
-  ignore_public_acls      = true
-  restrict_public_buckets = true
-}}"""
-            outputs.append(f"""output "s3_{clean_name}_bucket" {{
-  value       = aws_s3_bucket.{clean_name}.bucket
-  description = "S3 Bucket Name for {clean_name}"
-}}""")
+            hcl = resource([f"  bucket = {hcl_str(res.get('name') or r_id)}"])
+            output(f"s3_{clean_name}_bucket", "bucket", f"S3 Bucket Name for {clean_name}")
             return hcl, outputs, [], warnings
 
         elif r_type == "aws_db_instance":
-            engine = res.get("engine")
-            inst_class = res.get("instance_class")
-            storage = res.get("allocated_storage")
-            if not engine:
-                unresolved.append(UnresolvedAttribute(
-                    resource_id=r_id,
-                    resource_type=r_type,
-                    attribute_name="engine",
-                    reason="RDS instance discovery record is missing 'engine'."
-                ))
-            if not inst_class:
-                unresolved.append(UnresolvedAttribute(
-                    resource_id=r_id,
-                    resource_type=r_type,
-                    attribute_name="instance_class",
-                    reason="RDS instance discovery record is missing 'instance_class'."
-                ))
-            if not storage:
-                unresolved.append(UnresolvedAttribute(
-                    resource_id=r_id,
-                    resource_type=r_type,
-                    attribute_name="allocated_storage",
-                    reason="RDS instance discovery record is missing 'allocated_storage'."
-                ))
+            for attr, label in (("engine", "engine"), ("instance_class", "instance_class"),
+                                ("allocated_storage", "allocated_storage")):
+                if not res.get(attr):
+                    missing(label, f"RDS instance discovery record is missing '{attr}'.")
             if unresolved:
                 return "", [], unresolved, warnings
-
-            engine_ver_attr = f'\n  engine_version       = "{res.get("engine_version")}"' if res.get("engine_version") else ""
-            multi_az = "true" if res.get("multi_az") else "false"
-
+            body = [f"  identifier        = {hcl_str(res.get('name') or r_id)}",
+                    f"  engine            = {hcl_str(res['engine'])}"]
+            if res.get("engine_version"):
+                body.append(f"  engine_version    = {hcl_str(res['engine_version'])}")
+            body += [f"  instance_class    = {hcl_str(res['instance_class'])}",
+                     f"  allocated_storage = {int(res['allocated_storage'])}",
+                     f"  multi_az          = {hcl_bool(bool(res.get('multi_az')))}"]
             sg_ids = res.get("security_groups") or []
-            sg_attr = ""
             if sg_ids:
-                refs = [
-                    f"{resource_ref_map[sid]['tf_address']}.id" if sid in resource_ref_map else f'"{sid}"'
-                    for sid in sg_ids
-                ]
-                sg_attr = f"\n  vpc_security_group_ids = [{', '.join(refs)}]"
-
-            hcl = f"""resource "aws_db_instance" "{clean_name}" {{
-  identifier           = "{res.get('name', clean_name)}"
-  engine               = "{engine}"{engine_ver_attr}
-  instance_class       = "{inst_class}"
-  allocated_storage    = {storage}
-  multi_az             = {multi_az}{sg_attr}
-  skip_final_snapshot  = true
-
-  tags = {{
-    Name = "{res.get('name', clean_name)}"
-  }}
-}}"""
-            outputs.append(f"""output "rds_{clean_name}_endpoint" {{
-  value       = aws_db_instance.{clean_name}.endpoint
-  description = "RDS Endpoint for {clean_name}"
-}}""")
+                body.append(f"  vpc_security_group_ids = [{', '.join(ref(s) for s in sg_ids)}]")
+            hcl = resource(body)
+            output(f"rds_{clean_name}_endpoint", "endpoint", f"RDS Endpoint for {clean_name}")
             return hcl, outputs, [], warnings
 
         elif r_type == "aws_dynamodb_table":
-            hcl = f"""resource "aws_dynamodb_table" "{clean_name}" {{
-  name         = "{res.get('name', clean_name)}"
-  billing_mode = "PAY_PER_REQUEST"
-  hash_key     = "{res.get('hash_key', 'id')}"
-
-  attribute {{
-    name = "{res.get('hash_key', 'id')}"
-    type = "S"
-  }}
-
-  point_in_time_recovery {{
-    enabled = true
-  }}
-
-  server_side_encryption {{
-    enabled = true
-  }}
-
-  tags = {{
-    Name = "{res.get('name', clean_name)}"
-  }}
-}}"""
-            outputs.append(f"""output "dynamodb_{clean_name}_arn" {{
-  value       = aws_dynamodb_table.{clean_name}.arn
-  description = "DynamoDB Table ARN for {clean_name}"
-}}""")
+            if not res.get("hash_key") or not res.get("hash_key_type"):
+                missing("hash_key", "DynamoDB table discovery record is missing its hash key name/type.")
+                return "", [], unresolved, warnings
+            body = [f"  name         = {hcl_str(res.get('name') or r_id)}",
+                    f"  billing_mode = {hcl_str(res.get('billing_mode') or 'PROVISIONED')}",
+                    f"  hash_key     = {hcl_str(res['hash_key'])}",
+                    f"\n  attribute {{\n    name = {hcl_str(res['hash_key'])}\n    type = {hcl_str(res['hash_key_type'])}\n  }}"]
+            hcl = resource(body)
+            output(f"dynamodb_{clean_name}_arn", "arn", f"DynamoDB Table ARN for {clean_name}")
             return hcl, outputs, [], warnings
 
         elif r_type == "aws_iam_role":
             assume_role_policy = res.get("assume_role_policy")
             if not assume_role_policy or not isinstance(assume_role_policy, dict):
-                unresolved.append(UnresolvedAttribute(
-                    resource_id=r_id,
-                    resource_type=r_type,
-                    attribute_name="assume_role_policy",
-                    reason="IAM role discovery record is missing valid 'assume_role_policy' document."
-                ))
+                missing("assume_role_policy", "IAM role discovery record is missing valid 'assume_role_policy' document.")
                 return "", [], unresolved, warnings
-
-            policy_json = json.dumps(assume_role_policy, indent=2)
-            hcl = f"""resource "aws_iam_role" "{clean_name}" {{
-  name = "{res.get('name', clean_name)}"
-
-  assume_role_policy = jsonencode({policy_json})
-
-  tags = {{
-    Name = "{res.get('name', clean_name)}"
-  }}
-}}"""
-            outputs.append(f"""output "iam_role_{clean_name}_arn" {{
-  value       = aws_iam_role.{clean_name}.arn
-  description = "IAM Role ARN for {clean_name}"
-}}""")
+            # json.dumps output is valid HCL for jsonencode(); escape template
+            # sequences, since the policy document is discovered text too.
+            policy = escape_template(json.dumps(assume_role_policy, indent=2, sort_keys=True))
+            body = [f"  name = {hcl_str(res.get('name') or r_id)}"]
+            if res.get("path"):
+                body.append(f"  path = {hcl_str(res['path'])}")
+            if res.get("description"):
+                body.append(f"  description = {hcl_str(res['description'])}")
+            if res.get("max_session_duration"):
+                body.append(f"  max_session_duration = {int(res['max_session_duration'])}")
+            body.append(f"\n  assume_role_policy = jsonencode({policy})")
+            hcl = resource(body)
+            output(f"iam_role_{clean_name}_arn", "arn", f"IAM Role ARN for {clean_name}")
             return hcl, outputs, [], warnings
 
         elif r_type == "aws_kms_key":
-            hcl = f"""resource "aws_kms_key" "{clean_name}" {{
-  description             = "KMS Key for {clean_name} managed by TerraAgent"
-  deletion_window_in_days = 30
-  enable_key_rotation     = true
-
-  tags = {{
-    Name = "{res.get('name', clean_name)}"
-  }}
-}}"""
-            outputs.append(f"""output "kms_{clean_name}_arn" {{
-  value       = aws_kms_key.{clean_name}.arn
-  description = "KMS Key ARN for {clean_name}"
-}}""")
+            body = [f"  description = {hcl_str(res['description'])}"] if res.get("description") else []
+            if isinstance(res.get("enable_key_rotation"), bool):
+                body.append(f"  enable_key_rotation = {hcl_bool(res['enable_key_rotation'])}")
+            hcl = resource(body)
+            output(f"kms_{clean_name}_arn", "arn", f"KMS Key ARN for {clean_name}")
             return hcl, outputs, [], warnings
 
         elif r_type == "aws_sqs_queue":
-            hcl = f"""resource "aws_sqs_queue" "{clean_name}" {{
-  name                      = "{res.get('name', clean_name)}"
-  sqs_managed_sse_enabled   = true
-  message_retention_seconds = 86400
-
-  tags = {{
-    Name = "{res.get('name', clean_name)}"
-  }}
-}}"""
-            outputs.append(f"""output "sqs_{clean_name}_url" {{
-  value       = aws_sqs_queue.{clean_name}.url
-  description = "SQS Queue URL for {clean_name}"
-}}""")
+            hcl = resource([f"  name = {hcl_str(res.get('name') or r_id)}"])
+            output(f"sqs_{clean_name}_url", "url", f"SQS Queue URL for {clean_name}")
             return hcl, outputs, [], warnings
 
         elif r_type == "aws_sns_topic":
-            hcl = f"""resource "aws_sns_topic" "{clean_name}" {{
-  name = "{res.get('name', clean_name)}"
-
-  tags = {{
-    Name = "{res.get('name', clean_name)}"
-  }}
-}}"""
-            outputs.append(f"""output "sns_{clean_name}_arn" {{
-  value       = aws_sns_topic.{clean_name}.arn
-  description = "SNS Topic ARN for {clean_name}"
-}}""")
+            hcl = resource([f"  name = {hcl_str(res.get('name') or r_id)}"])
+            output(f"sns_{clean_name}_arn", "arn", f"SNS Topic ARN for {clean_name}")
             return hcl, outputs, [], warnings
 
         else:
             # Unsupported resource type for deterministic template
-            unresolved.append(UnresolvedAttribute(
-                resource_id=r_id,
-                resource_type=r_type,
-                attribute_name="resource_type",
-                reason=f"Resource type '{r_type}' does not have a verified deterministic template in P2 engine."
-            ))
+            missing("resource_type", f"Resource type '{r_type}' does not have a verified deterministic template in P2 engine.")
             return "", [], unresolved, warnings
 
     @staticmethod
@@ -966,15 +553,3 @@ resource "aws_s3_bucket_public_access_block" "{clean_name}_public_block" {{
         elif "security_group" in resource_type or "iam" in resource_type or "kms" in resource_type:
             return "security"
         return "application"
-
-    @staticmethod
-    def _module_category_for_type(resource_type: str) -> str:
-        if "db" in resource_type or "rds" in resource_type or "s3" in resource_type or "dynamo" in resource_type or "sqs" in resource_type or "sns" in resource_type:
-            return "storage_and_data"
-        elif "vpc" in resource_type or "subnet" in resource_type or "gateway" in resource_type or "route" in resource_type:
-            return "networking"
-        elif "security_group" in resource_type or "iam" in resource_type or "kms" in resource_type:
-            return "security"
-        elif "instance" in resource_type or "ec2" in resource_type or "lb" in resource_type or "alb" in resource_type:
-            return "compute"
-        return "storage_and_data"

@@ -1,8 +1,8 @@
 """API tests for POST /scan/{job_id}/approve and /reject - the human
-approval gate that Real Terraform Plan + Human Approval Gate introduces.
-Requires a reachable Redis, same as test_api.py, since these endpoints
-read/write job state through it, and the resumed tail (cost_agent +
-documentation_agent) persists its own result through it too."""
+approval gate. A job is paused for real (a stubbed graph run through
+services/pipeline.py, stopping at the Delivery & Approval Agent's interrupt),
+then decided through the API. Requires a reachable Redis, same as
+test_api.py."""
 
 import asyncio
 import time
@@ -10,8 +10,14 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
+import agents.graph as graph_mod
+import routers.scan as scan_router
 from main import app
+from services.pipeline import run_pipeline
 from services.redis_client import redis_service
+from tests.test_graph_agent_loop import (  # noqa: F401
+    DRIFT_FINDING, REVIEW_CLASSIFICATION, _stub, _validation_passing_after, calls,
+)
 
 
 def _redis_reachable() -> bool:
@@ -28,145 +34,118 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.fixture
-def client(monkeypatch):
-    # documentation_agent_node's LLM call and cost_agent_node's Infracost
-    # subprocess are irrelevant to what these tests verify (the
-    # approve/reject HTTP contract and state-machine transitions) - force
-    # both onto their fast, deterministic fallback paths, same pattern as
-    # test_documentation_agent.py's truncation test.
-    import agents.documentation_agent as doc_module
+def client(monkeypatch, calls):  # noqa: F811
+    monkeypatch.setattr(graph_mod, "validation_agent_node",
+                        _stub("validation_agent", calls, _validation_passing_after(0)))
+    monkeypatch.setattr(graph_mod, "drift_reconciliation_agent_node", _stub(
+        "drift_reconciliation_agent", calls, {"pending_approval": {"reason": "drift", "findings": [DRIFT_FINDING]}}))
+    monkeypatch.setattr(graph_mod, "classification_agent_node",
+                        _stub("classification_agent", calls, {"classification_results": REVIEW_CLASSIFICATION}))
 
-    monkeypatch.delenv("INFRACOST_API_KEY", raising=False)
-
-    async def _raise(*a, **k):
-        raise RuntimeError("LLM unavailable in test")
-
-    monkeypatch.setattr(doc_module.ollama_client, "generate", _raise)
+    # Resume in-process instead of through a Celery broker.
+    async def dispatch(job_id, decision, aws_credentials):
+        await scan_router._resume_inline(job_id, decision, aws_credentials)
+    monkeypatch.setattr(scan_router, "_dispatch_resume", dispatch)
 
     with TestClient(app) as c:
         yield c
 
 
-def _finding():
-    return {
-        "tool": "terraform_plan", "rule_id": "plan-equivalence", "severity": "HIGH",
-        "description": "terraform plan reports a `replace` action against `aws_db_instance.mydb`.",
-        "resource": "aws_db_instance.mydb", "tier": "behavior_changing",
-    }
-
-
-def _seed_awaiting_approval_state(job_id: str, findings):
-    state = {
-        "job_id": job_id,
-        "status": "AWAITING_APPROVAL",
-        "operation": "generate",
-        "region": "us-east-1",
-        "resources": [],
-        "terraform_files": {"application.tf": 'resource "aws_db_instance" "mydb" {}'},
-        "dependency_graph": {},
-        "classification_results": {"classifications": []},
-        "adoption_plan": {},
-        "validation_results": {"passed": True, "checks": []},
-        "security_results": {"risk_score": 20, "findings": []},
-        "cost_results": {},
-        "plan_equivalence_results": {
-            "passed": False,
-            "blocking_actions": [{"address": "aws_db_instance.mydb", "action": "replace"}],
-        },
-        "pending_approval": {"reason": "plan_equivalence_requires_human_approval", "findings": findings},
-        "repair_risk_tier": "behavior_changing",
-        "approval_decision": None,
-        "completed_agents": [
-            "intent_router", "cloud_discovery", "graph_agent", "classification_agent",
-            "adoption_planning_agent", "terraform_composer", "validation_agent", "plan_equivalence_agent",
-        ],
-        "current_agent": "awaiting_approval",
-        "progress_percentage": 70,
-        "agent_timings": {},
-        "created_at": "2026-01-01T00:00:00",
-        "webhook_url": None,
-        "zip_password": None,
-    }
-    asyncio.run(redis_service.set_job_state(job_id, state))
-    return state
+def _pause(client, job_id: str) -> dict:
+    client.portal.call(run_pipeline, job_id, {"created_at": "2026-01-01T00:00:00"})
+    status = client.get(f"/api/scan/{job_id}/status").json()
+    assert status["status"] == "AWAITING_APPROVAL"
+    return client.get(f"/api/scan/{job_id}/results").json()
 
 
 def _wait_for_status(client, job_id, terminal_statuses, timeout=15):
     deadline = time.monotonic() + timeout
     last_body = None
     while time.monotonic() < deadline:
-        resp = client.get(f"/api/scan/{job_id}/status")
-        last_body = resp.json()
+        last_body = client.get(f"/api/scan/{job_id}/status").json()
         if last_body.get("status") in terminal_statuses:
             return last_body
-        time.sleep(0.2)
+        time.sleep(0.1)
     raise AssertionError(f"Job {job_id} never reached {terminal_statuses}, last seen: {last_body}")
 
 
 def test_approve_requires_awaiting_approval_status(client):
     job_id = "job-approve0001"
     asyncio.run(redis_service.set_job_state(job_id, {"job_id": job_id, "status": "RUNNING"}))
-
-    resp = client.post(f"/api/scan/{job_id}/approve")
-    assert resp.status_code == 409
+    assert client.post(f"/api/scan/{job_id}/approve").status_code == 409
 
 
 def test_reject_requires_awaiting_approval_status(client):
     job_id = "job-reject00001"
     asyncio.run(redis_service.set_job_state(job_id, {"job_id": job_id, "status": "RUNNING"}))
-
-    resp = client.post(f"/api/scan/{job_id}/reject")
-    assert resp.status_code == 409
+    assert client.post(f"/api/scan/{job_id}/reject").status_code == 409
 
 
 def test_approve_unknown_job_404s(client):
-    resp = client.post("/api/scan/job-doesnotexist/approve")
-    assert resp.status_code == 404
+    assert client.post("/api/scan/job-doesnotexist/approve").status_code == 404
 
 
-def test_approve_resumes_pipeline_to_complete(client):
+def test_paused_job_lists_findings_and_review_resources(client):
+    results = _pause(client, "job-gatelist01")
+    request = results["approval_request"]
+    assert request["findings"] == [DRIFT_FINDING]
+    assert [r["resource_id"] for r in request["review_resources"]] == ["role-1"]
+
+
+def test_approve_must_decide_every_review_resource(client):
+    job_id = "job-approvemiss"
+    _pause(client, job_id)
+    resp = client.post(f"/api/scan/{job_id}/approve", json={"reason": "ok"})
+    assert resp.status_code == 422
+    assert resp.json()["detail"]["missing"] == ["role-1"]
+    bad = client.post(f"/api/scan/{job_id}/approve", json={"resource_decisions": {"role-1": "delete"}})
+    assert bad.status_code == 422
+
+
+def test_approve_resumes_pipeline_to_complete(client, calls):  # noqa: F811
     job_id = "job-approveok01"
-    _seed_awaiting_approval_state(job_id, [_finding()])
+    _pause(client, job_id)
 
-    resp = client.post(f"/api/scan/{job_id}/approve", json={"reason": "Reviewed, safe to proceed"})
-    assert resp.status_code == 200
-    assert resp.json()["status"] == "RUNNING"
+    resp = client.post(f"/api/scan/{job_id}/approve",
+                       json={"reason": "Reviewed, safe to proceed", "resource_decisions": {"role-1": "exclude"}})
+    assert resp.status_code == 200 and resp.json()["status"] == "RUNNING"
 
-    final = _wait_for_status(client, job_id, {"COMPLETE", "FAILED"})
-    assert final["status"] == "COMPLETE"
-
+    assert _wait_for_status(client, job_id, {"COMPLETE", "FAILED"})["status"] == "COMPLETE"
     results = client.get(f"/api/scan/{job_id}/results").json()
     assert results["approval_decision"]["decision"] == "approved"
     assert results["approval_decision"]["reason"] == "Reviewed, safe to proceed"
-    # The finding stays visible for audit even after approval - approving
-    # means proceeding despite it, not erasing that it happened.
-    assert results["pending_approval"]["findings"][0]["resource"] == "aws_db_instance.mydb"
-    assert results["zip_available"] is True
+    # Approving means proceeding despite the finding, not erasing it.
+    assert results["pending_approval"]["findings"][0]["resource"] == "aws_vpc.main"
+    assert results["approval_request"] is None
+    assert calls.count("cloud_discovery") == 1  # resumed, not re-run
 
 
-def test_reject_halts_permanently_with_audit_trail(client):
+def test_reject_halts_permanently_with_audit_trail(client, calls):  # noqa: F811
     job_id = "job-rejectok01"
-    _seed_awaiting_approval_state(job_id, [_finding()])
+    _pause(client, job_id)
 
     resp = client.post(f"/api/scan/{job_id}/reject", json={"reason": "Not safe to adopt"})
-    assert resp.status_code == 200
-    assert resp.json()["status"] == "REJECTED"
+    assert resp.status_code == 200 and resp.json()["status"] == "REJECTED"
 
-    final = _wait_for_status(client, job_id, {"REJECTED", "FAILED"})
-    assert final["status"] == "REJECTED"
-
+    assert _wait_for_status(client, job_id, {"REJECTED", "FAILED"})["status"] == "REJECTED"
     results = client.get(f"/api/scan/{job_id}/results").json()
     assert results["approval_decision"]["decision"] == "rejected"
     assert results["approval_decision"]["reason"] == "Not safe to adopt"
+    assert "documentation_agent" in calls and "cost_agent" not in calls
 
 
 def test_second_approve_after_already_resolved_is_conflict(client):
     job_id = "job-doubleapprv"
-    _seed_awaiting_approval_state(job_id, [_finding()])
+    _pause(client, job_id)
+    body = {"resource_decisions": {"role-1": "exclude"}}
 
-    first = client.post(f"/api/scan/{job_id}/approve")
-    assert first.status_code == 200
+    assert client.post(f"/api/scan/{job_id}/approve", json=body).status_code == 200
     _wait_for_status(client, job_id, {"COMPLETE", "FAILED"})
+    assert client.post(f"/api/scan/{job_id}/approve", json=body).status_code == 409
 
-    second = client.post(f"/api/scan/{job_id}/approve")
-    assert second.status_code == 409
+
+def test_paused_job_without_checkpoint_cannot_be_resumed(client):
+    job_id = "job-legacypause"
+    asyncio.run(redis_service.set_job_state(job_id, {"job_id": job_id, "status": "AWAITING_APPROVAL"}))
+    resp = client.post(f"/api/scan/{job_id}/reject")
+    assert resp.status_code == 409 and "re-run the scan" in resp.json()["detail"]

@@ -51,7 +51,7 @@ replace/destroy (that's the planned `drift_reconciliation_agent`'s job), what de
 ## Tech Stack
 - **Frontend**: Next.js 14 (App Router), TypeScript (Strict Mode), Tailwind CSS, D3.js (Dependency Graphs), Lucide Icons
 - **Backend API**: FastAPI (Python 3.11+ async), Pydantic v2 (SecretStr for credentials), Uvicorn
-- **Agent Orchestration**: LangGraph (StateGraph), LangChain
+- **Agent Orchestration**: LangGraph 1.x (StateGraph, `interrupt()` + checkpointer for the approval gate)
 - **Asynchronous Task Queue**: Celery + Redis 7 (broker & result backend) + Redis Pub/Sub for SSE live logs
 - **Local LLM**: Ollama (`codellama`, `llama3`) running locally / containerized
 - **Security & Validation Pipeline**: Terraform CLI (`fmt`, `init`, `validate`), `Checkov`, `Trivy` (includes the former tfsec rules), `Conftest` (OPA policies)
@@ -67,8 +67,9 @@ module stays individually unit-tested; the graph only wires agents.
 
 ```
 infrastructure -> iac_engineering -> verification --PASS / INCOMPLETE / NEEDS_APPROVAL--> delivery -> END
-                        ^                  |
-                        +------ FAIL ------+   (validation errors only, max N repair cycles)
+                     ^  ^                |                                                  |
+                     |  +---- FAIL ------+   (validation errors only, max N repair cycles)  |
+                     +------- a human turned Review resources into manage/reference --------+
 ```
 
 1. **Infrastructure Agent** - steps: `intent_router`, `resource_explorer`, `cloud_discovery` (boto3, read-only), `graph_agent`, `classification_agent`.
@@ -94,7 +95,15 @@ infrastructure -> iac_engineering -> verification --PASS / INCOMPLETE / NEEDS_AP
    adoption-plan order), IDs from `IMPORT_ID_FIELDS` only (`tools/import_blocks.py`). A managed resource
    with no derivable import ID goes to review instead of being generated. Import blocks are reviewable
    text - they take effect only when someone applies in their own pipeline (rule #2); `plan` with them is
-   read-only. Per-wave GitHub PRs filter `imports.tf` to that wave's resources. When the
+   read-only. Per-wave GitHub PRs filter `imports.tf` to that wave's resources.
+   **Adoption code is exactly what is live** (the adoption PR must plan with zero changes): every value
+   from discovery, an optional attribute that wasn't discovered is omitted (the import keeps the live
+   value), a required one that wasn't makes the resource review. Exact live tags, **no provider
+   `default_tags`**, and **no hardening** (encryption, IMDSv2, public access blocks...) - that's the
+   Hardening proposal's job. Every discovered string reaches HCL only through
+   `tools/hcl_render.py::hcl_str` (escapes quotes, newlines and `${`/`%{`) - names, tags, descriptions and
+   policy documents are untrusted text. Security-group rules keep every source (IPv4/IPv6, prefix
+   lists, other groups, self); routes keep every target kind or send the table to review. When the
    verifier returns FAIL: `repair_agent` step = `agents/validation_repair.py`, which fixes only blocks
    that fail `terraform validate`/`init` (mapped via `tools/validation_diagnostics.py`) with the
    value-preserving `prompts/repair_validation.txt`. **Every fix must pass
@@ -111,19 +120,37 @@ infrastructure -> iac_engineering -> verification --PASS / INCOMPLETE / NEEDS_AP
    or unparseable output (runner `tool_error` -> `security_results.scanners_failed`), a `system`
    validation check, or a plan-equivalence init failure makes the verdict INCOMPLETE, never PASS.
    Verdicts: PASS | FAIL | INCOMPLETE | NEEDS_APPROVAL, one `verification_iterations` entry per pass.
-4. **Delivery & Approval Agent** - risk gate first: `pending_approval` without an approved
-   `approval_decision` pauses at `AWAITING_APPROVAL` (`POST /scan/{id}/approve` re-runs this agent with
-   the decision set). Then `cost_agent`, `documentation_agent`. Its summary states whether the bundle was
-   verified.
+   Two **separate** scores per pass (`tools/scores.py`): **Migration Safety** (will adopting change
+   anything? - from the plan's per-address `changes`, else drift; SAFE / CHANGES / DESTRUCTIVE /
+   UNVERIFIED) and **Security Posture** (what's wrong today? - scanner findings only). Security findings
+   never move Migration Safety and vice versa; no evidence = `score: null`, never 100. A plan `replace`
+   is destructive, same as `destroy`.
+4. **Delivery & Approval Agent** - risk gate first: unapproved behavior-changing/destructive findings
+   (`pending_approval` minus `approved_finding_keys`) or resources still in **Review** pause the run with
+   LangGraph `interrupt()`. `services/pipeline.py` then saves the thread (`services/checkpoints.py`, one
+   `graph_checkpoints` row per paused job, **credential channels and credential-named keys removed** -
+   rule #4) and sets `AWAITING_APPROVAL` with `approval_request` {findings, review_resources}.
+   `POST /scan/{id}/approve` must decide every Review resource (manage/reference/exclude; unsupported
+   types: exclude only) and resumes the same run with `Command(resume=...)`; optional re-supplied AWS
+   credentials go into that run's memory only. Review decisions that add code route back to
+   iac_engineering -> verification (without credentials, live checks can't be redone -> INCOMPLETE).
+   `/reject` writes the audit README only. Then it packages: `hardening_agent` (the optional **Hardening
+   proposal**, `tools/hardening.py`: deterministic, explained fixes only where discovery shows the setting
+   missing - S3 public access block, S3 default encryption, EC2 IMDSv2 - plus manual recommendations;
+   must pass `check_repair_invariants` and `validate` or no files ship; `hardening/` in the bundle, never
+   merged into `terraform/`), `cost_agent` (Infracost **only** for the hardening delta - the adoption has
+   no cost delta), `documentation_agent`. Approval never runs apply or import.
 
-The old security-driven `agents/repair_agent.py::repair_agent_node` is no longer in the graph - kept
-for the planned separate hardening PR. Routing: `route_after_verification` (FAIL and
+The old security-driven `agents/repair_agent.py::repair_agent_node` is no longer in the graph (its
+deterministic S3 fix now lives in `tools/hardening.py`). Routing: `route_after_verification` (FAIL and
 `repair_attempts < max_repair_iterations` -> iac_engineering; everything else -> delivery;
-env `TERRAAGENT_MAX_REPAIR_ITERATIONS`, default 2).
+env `TERRAAGENT_MAX_REPAIR_ITERATIONS`, default 2) and `route_after_delivery` (`regenerate_requested`
+-> iac_engineering, else END).
 
 Progress fields for the UI: `current_stage`, `completed_stages`, `stage_summaries`,
-`verification_iterations`, `verification_verdict`, `repair_history`, `max_repair_iterations` (exposed
-by `GET /scan/{id}/status`). Step-level `current_agent`/`completed_agents`/`agent_timings` are kept for
+`verification_iterations`, `verification_verdict`, `repair_history`, `max_repair_iterations`,
+`migration_safety`, `security_posture` (exposed by `GET /scan/{id}/status`; `/results` adds
+`approval_request`, `hardening`, `cost_results`). Step-level `current_agent`/`completed_agents`/`agent_timings` are kept for
 metrics.
 
 Live logs: `redis_service.publish_log` stores a per-job, sequence-numbered history
@@ -226,10 +253,10 @@ terraagent/
 - `destructive_equivalent`: Mismatches on ForceNew attributes (e.g. VPC CIDR, subnet CIDR, AMI) or resources missing/deleted in live AWS; mapped to `destructive` tier in `pending_approval`.
 
 ### 3. Human Approval Gate
-- If blocking findings (`destructive` or `behavior_changing`) are detected in Drift Reconciliation or Plan Equivalence:
-  - Execution halts before downstream actions.
-  - State is set to `status: "AWAITING_APPROVAL"`, `current_agent: "awaiting_approval"`.
-  - Approval (`POST /scan/{job_id}/approve`) resumes the remaining pipeline tail (documentation, ZIP bundle packaging).
+- If blocking findings (`destructive` or `behavior_changing`) are detected in Drift Reconciliation or Plan Equivalence, or resources are in Review:
+  - The Delivery & Approval Agent pauses the run with LangGraph `interrupt()`; the checkpoint is stored without credentials.
+  - State is set to `status: "AWAITING_APPROVAL"`, `current_agent: "awaiting_approval"`, with `approval_request`.
+  - Approval (`POST /scan/{job_id}/approve`, deciding every Review resource) resumes the same run; findings a human approved are never asked about again.
   - Approval **NEVER** runs `terraform apply` or `terraform import`.
 
 ### 4. Runner Safety & Sandbox Isolation

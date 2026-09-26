@@ -139,43 +139,8 @@ async def start_scan(request: Request, scan_request: ScanRequest):
 
 
 async def run_scan_inline(job_id: str, request_dict: dict):
-    from agents.graph import build_graph, build_initial_state
-    from routers.metrics import record_job_outcome
-    try:
-        app = build_graph()
-        initial_state = build_initial_state(job_id, request_dict)
-        final_state = await app.ainvoke(initial_state)
-        await redis_service.set_job_state(job_id, final_state)
-        mark_job_complete(job_id, final_state)
-        record_job_outcome(final_state.get("status", "COMPLETE"), final_state.get("agent_timings"))
-
-        webhook_url = final_state.get("webhook_url")
-        if webhook_url:
-            from services.webhook import send_scan_summary
-            await send_scan_summary(webhook_url, job_id, final_state)
-    except Exception as e:
-        # This catches failures from cloud_discovery_node, the one node that
-        # actually holds raw AWS credentials - same gap already fixed in
-        # services/celery_app.py::run_scan_task's exception handler, just
-        # never applied here too. Scrub before it ever leaves this function:
-        # it gets published live over Redis pub/sub, persisted into Postgres,
-        # and served back verbatim by routers/jobs.py and this file's own
-        # DB-fallback path.
-        from tools.credential_scrubber import CredentialScrubber
-        error_msg = CredentialScrubber.scrub_text(str(e))
-        await redis_service.publish_log(job_id, f"Pipeline error: {error_msg}", "error")
-        # Merge into the last published (already scrubbed) state rather than
-        # replacing it, so the UI can still show which agent failed and
-        # everything that ran before it.
-        previous = await redis_service.get_job_state(job_id) or {}
-        await redis_service.set_job_state(job_id, {
-            **previous,
-            "job_id": job_id,
-            "status": JobStatus.FAILED.value,
-            "error": error_msg
-        })
-        mark_job_failed(job_id, error_msg)
-        record_job_outcome("FAILED")
+    from services.pipeline import run_pipeline
+    await run_pipeline(job_id, request_dict)
 
 
 @router.get("/{job_id}/status", response_model=JobProgress)
@@ -230,7 +195,8 @@ async def get_scan_status(job_id: str):
         max_repair_iterations=state.get("max_repair_iterations"),
         verification_verdict=state.get("verification_verdict") or None,
         repair_history=state.get("repair_history", []) or [],
-        migration_confidence=state.get("migration_confidence"),
+        migration_safety=state.get("migration_safety"),
+        security_posture=state.get("security_posture"),
         created_at=state.get("created_at", datetime.utcnow().isoformat()),
         error=state.get("error")
     )
@@ -305,9 +271,13 @@ async def get_scan_results(job_id: str):
         drift_results=state.get("drift_results", {}),
         plan_equivalence_results=state.get("plan_equivalence_results", {}),
         security_results=state.get("security_results", {}),
-        migration_confidence=state.get("migration_confidence"),
+        migration_safety=state.get("migration_safety"),
+        security_posture=state.get("security_posture"),
         pending_approval=state.get("pending_approval"),
+        approval_request=state.get("approval_request"),
         approval_decision=state.get("approval_decision"),
+        hardening=state.get("hardening") or {},
+        cost_results=state.get("cost_results") or {},
         github_pr=state.get("github_pr"),
         github_wave_prs=state.get("github_wave_prs", {}),
         zip_available=bool(state.get("zip_path")),
@@ -317,13 +287,7 @@ async def get_scan_results(job_id: str):
     )
 
 
-@router.post("/{job_id}/approve", response_model=JobDecisionResponse)
-async def approve_scan(job_id: str, body: ApprovalActionRequest = ApprovalActionRequest()):
-    """Human approval for a job halted by plan_equivalence_agent or repair_agent
-    over a destructive/behavior_changing finding. Resumes the remaining
-    pipeline tail (cost estimation + documentation/ZIP packaging) - the two
-    nodes the graph never reached, since it routed straight to END instead of
-    continuing past the halt (see agents/graph.py::plan_gate/repair_or_done)."""
+async def _awaiting_state(job_id: str) -> Dict[str, Any]:
     state = await redis_service.get_job_state(job_id)
     if not state:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -332,111 +296,89 @@ async def approve_scan(job_id: str, body: ApprovalActionRequest = ApprovalAction
             status_code=409,
             detail=f"Job is not awaiting approval (current status: {state.get('status')})"
         )
+    return state
 
-    asyncio.create_task(_resume_after_decision(job_id, state, approved=True, reason=body.reason))
 
+def _validate_resource_decisions(state: Dict[str, Any], decisions: Dict[str, str]) -> None:
+    """Approving means deciding every resource the gate listed as in Review,
+    each with a choice allowed for it (an unsupported type can only be
+    excluded) - nothing else."""
+    review = (state.get("approval_request") or {}).get("review_resources") or []
+    allowed = {r["resource_id"]: r.get("choices") or ["manage", "reference", "exclude"] for r in review}
+    missing = sorted(set(allowed) - set(decisions))
+    unknown = sorted(set(decisions) - set(allowed))
+    invalid = sorted(rid for rid, d in decisions.items() if rid in allowed and d not in allowed[rid])
+    if missing or unknown or invalid:
+        raise HTTPException(status_code=422, detail={
+            "message": "Every resource in Review needs one allowed decision",
+            "missing": missing, "unknown": unknown, "not_allowed": invalid,
+        })
+
+
+async def _dispatch_resume(job_id: str, decision: Dict[str, Any], aws_credentials: Optional[Dict[str, Any]]) -> None:
+    from services.celery_app import resume_scan_task
+    if redis_service._redis_available:
+        try:
+            resume_scan_task.apply_async(args=[job_id, decision, aws_credentials], retry=False)
+            return
+        except Exception:
+            pass
+    asyncio.create_task(_resume_inline(job_id, decision, aws_credentials))
+
+
+async def _resume_inline(job_id: str, decision: Dict[str, Any], aws_credentials: Optional[Dict[str, Any]]) -> None:
+    from services.pipeline import resume_pipeline
+    await resume_pipeline(job_id, decision, aws_credentials)
+
+
+async def _decide(job_id: str, state: Dict[str, Any], decision: Dict[str, Any],
+                  aws_credentials: Optional[Dict[str, Any]], status_now: JobStatus) -> None:
+    from services.checkpoints import load_checkpoint
+    if not load_checkpoint(job_id):
+        raise HTTPException(
+            status_code=409,
+            detail="This paused run has no saved checkpoint (it was paused by an older version) - re-run the scan",
+        )
+    # Flip the status first so a second click can't resume the same run twice.
+    await redis_service.set_job_state(job_id, {**state, "status": status_now.value, "approval_decision": decision})
+    await redis_service.publish_log(
+        job_id,
+        f"[AGENT:system] Human {decision['decision']} the gate - resuming the paused run.",
+        agent_name="system",
+    )
+    await _dispatch_resume(job_id, decision, aws_credentials)
+
+
+@router.post("/{job_id}/approve", response_model=JobDecisionResponse)
+async def approve_scan(job_id: str, body: ApprovalActionRequest = ApprovalActionRequest()):
+    """Resume a run paused at the Delivery & Approval Agent's risk gate. The
+    body must decide every resource in Review. Review decisions that add code
+    send the run back through IaC Engineering and Verification; otherwise it
+    packages the bundle. Never runs terraform apply or import."""
+    state = await _awaiting_state(job_id)
+    _validate_resource_decisions(state, body.resource_decisions)
+    creds = None
+    if body.aws_access_key and body.aws_secret_key:
+        creds = {
+            "access_key": body.aws_access_key.get_secret_value(),
+            "secret_key": body.aws_secret_key.get_secret_value(),
+            "session_token": body.aws_session_token.get_secret_value() if body.aws_session_token else None,
+        }
+    decision = {"decision": "approved", "reason": body.reason, "resource_decisions": body.resource_decisions,
+                "decided_at": datetime.utcnow().isoformat()}
+    await _decide(job_id, state, decision, creds, JobStatus.RUNNING)
     return JobDecisionResponse(job_id=job_id, status=JobStatus.RUNNING, message="Approved - resuming pipeline.")
 
 
 @router.post("/{job_id}/reject", response_model=JobDecisionResponse)
 async def reject_scan(job_id: str, body: ApprovalActionRequest = ApprovalActionRequest()):
-    """Human rejection - the job stops here permanently. Still runs
-    documentation_agent once so there's an audit-trail README explaining
-    what was found and why it was rejected, but never proceeds to a
-    completed, adoptable bundle."""
-    state = await redis_service.get_job_state(job_id)
-    if not state:
-        raise HTTPException(status_code=404, detail="Job not found")
-    if state.get("status") != JobStatus.AWAITING_APPROVAL.value:
-        raise HTTPException(
-            status_code=409,
-            detail=f"Job is not awaiting approval (current status: {state.get('status')})"
-        )
-
-    asyncio.create_task(_resume_after_decision(job_id, state, approved=False, reason=body.reason))
-
+    """Human rejection - the run ends here. It still writes the audit README,
+    but never an adoptable bundle."""
+    state = await _awaiting_state(job_id)
+    decision = {"decision": "rejected", "reason": body.reason, "resource_decisions": {},
+                "decided_at": datetime.utcnow().isoformat()}
+    await _decide(job_id, state, decision, None, JobStatus.REJECTED)
     return JobDecisionResponse(job_id=job_id, status=JobStatus.REJECTED, message="Rejected - pipeline will not continue.")
-
-
-async def _resume_after_decision(job_id: str, state: Dict[str, Any], approved: bool, reason: Optional[str]):
-    """Runs the tail the halted graph never reached. Called as a background
-    task from approve_scan/reject_scan so the HTTP request returns
-    immediately - cost_agent/documentation_agent can take real time (Infracost
-    subprocess, an LLM call, ZIP packaging)."""
-    from agents.documentation_agent import documentation_agent_node
-    from agents.graph import _timed, delivery_agent
-    from routers.metrics import record_job_outcome
-
-    # _timed wraps each node the exact same way build_graph() does for every
-    # other node in the pipeline - records its duration into agent_timings
-    # and calls record_scan_error on failure. Calling cost_agent_node/
-    # documentation_agent_node directly (as this function did before) meant
-    # neither ever showed up in agent_timings for a resumed job, and a
-    # failure here never incremented scan_errors_total.
-    documentation_node = _timed("documentation_agent", documentation_agent_node)
-
-    state = dict(state)
-    state["approval_decision"] = {
-        "decision": "approved" if approved else "rejected",
-        "reason": reason,
-        "decided_at": datetime.utcnow().isoformat(),
-    }
-
-    # redis_service.set_job_state round-trips every persisted job state
-    # through CredentialScrubber.scrub_dict, which redacts any field named
-    # "zip_password" to the literal string "[REDACTED]" before it's ever
-    # written to Redis. That's correct for keeping it out of Redis/logs, but
-    # it means the value read back here (via get_job_state, the only way
-    # this endpoint can see the halted job's state at all) is no longer the
-    # user's real password - encrypting the ZIP with the literal string
-    # "[REDACTED]" would be worse than not encrypting it at all (a fixed,
-    # guessable password on every resumed job). Treat it as "no password"
-    # instead, same as if the user had never supplied one.
-    if state.get("zip_password") == "[REDACTED]":
-        state["zip_password"] = None
-
-    try:
-        if approved:
-            state["status"] = "RUNNING"
-            await redis_service.set_job_state(job_id, state)
-            await redis_service.publish_log(
-                job_id, "[AGENT:system] Human approval received - resuming pipeline.", agent_name="system"
-            )
-
-            # The Delivery & Approval Agent again - with approval_decision now
-            # set, its risk gate lets the job through to cost + docs + bundle.
-            state["current_stage"] = "delivery"
-            result = await delivery_agent(state)
-            state = {**state, **result}  # documentation sets status back to COMPLETE
-        else:
-            state["status"] = "REJECTED"
-            await redis_service.set_job_state(job_id, state)
-            note = f": {reason}" if reason else "."
-            await redis_service.publish_log(
-                job_id,
-                f"[AGENT:system] Human rejected the pending findings{note} Pipeline halted permanently.",
-                agent_name="system",
-            )
-
-            result = await documentation_node(state)
-            state = {**state, **result}
-            state["status"] = "REJECTED"  # documentation_agent_node hardcodes COMPLETE - override
-
-        await redis_service.set_job_state(job_id, state)
-        mark_job_complete(job_id, state)
-        record_job_outcome(state.get("status", "COMPLETE"), state.get("agent_timings"))
-
-        webhook_url = state.get("webhook_url")
-        if webhook_url:
-            from services.webhook import send_scan_summary
-            await send_scan_summary(webhook_url, job_id, state)
-    except Exception as e:
-        from tools.credential_scrubber import CredentialScrubber
-        error_msg = CredentialScrubber.scrub_text(str(e))
-        await redis_service.publish_log(job_id, f"Pipeline error during approval resume: {error_msg}", "error")
-        await redis_service.set_job_state(job_id, {**state, "status": "FAILED", "error": error_msg})
-        mark_job_failed(job_id, error_msg)
-        record_job_outcome("FAILED")
 
 
 @router.post("/{job_id}/pull-request", response_model=PullRequestResponse)

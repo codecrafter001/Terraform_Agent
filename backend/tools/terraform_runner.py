@@ -289,6 +289,7 @@ class TerraformRunner:
             "no_op": 0,
             "imported": 0,  # resources bound by an import {} block
             "blocking_actions": [],
+            "changes": [],  # every managed address whose action isn't no-op: {address, action}
             "checks": [],
         }
 
@@ -346,16 +347,23 @@ class TerraformRunner:
                     result["imported"] += 1
                 if actions in (["no-op"], ["read"]):
                     result["no_op"] += 1
-                elif actions == ["create"]:
+                    continue
+                if change.get("mode") == "data":
+                    continue
+                if actions == ["create"]:
                     result["create"] += 1
+                    result["changes"].append({"address": address, "action": "create"})
                 elif actions == ["update"]:
                     result["update"] += 1
+                    result["changes"].append({"address": address, "action": "update"})
                 elif "delete" in actions and "create" in actions:
                     result["replace"] += 1
                     blocking.append({"address": address, "action": "replace"})
+                    result["changes"].append({"address": address, "action": "replace"})
                 elif actions == ["delete"]:
                     result["destroy"] += 1
                     blocking.append({"address": address, "action": "destroy"})
+                    result["changes"].append({"address": address, "action": "destroy"})
 
             result["blocking_actions"] = blocking
             result["passed"] = not blocking

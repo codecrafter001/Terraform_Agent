@@ -154,7 +154,8 @@ async def plan_equivalence_agent_node(state: Dict[str, Any]) -> Dict[str, Any]:
                     "the real, already-discovered resource."
                 ),
                 "resource": item["address"],
-                "tier": "destructive" if item["action"] == "destroy" else "behavior_changing",
+                # replace = destroy + recreate: just as destructive as a destroy.
+                "tier": "destructive" if item["action"] in ("destroy", "replace") else "behavior_changing",
             }
             for item in blocking_actions
         ]

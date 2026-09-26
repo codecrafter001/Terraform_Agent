@@ -58,7 +58,8 @@ _FIELD_MAP: Dict[str, Dict[str, Tuple[str, Any, bool]]] = {
     },
     "aws_security_group": {
         "vpc_id": ("vpc_id", "", True),
-        "description": ("description", "Managed by TerraAgent", False),
+        # ForceNew in the provider; the composer only ever writes the discovered value.
+        "description": ("description", None, True),
     },
     "aws_instance": {
         "ami": ("ami", "ami-0c55b159cbfafe1f0", True),

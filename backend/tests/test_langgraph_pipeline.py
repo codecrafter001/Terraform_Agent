@@ -56,9 +56,13 @@ def localstack_resources():
 
 @pytest.mark.asyncio
 async def test_full_pipeline_against_localstack(localstack_resources):
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.types import Command
+
     from agents.graph import build_graph
 
-    graph = build_graph()
+    graph = build_graph(checkpointer=InMemorySaver())
+    config = {"configurable": {"thread_id": "job-integration-test"}}
     initial_state = {
         "job_id": "job-integration-test",
         "created_at": "2026-01-01T00:00:00",
@@ -102,7 +106,16 @@ async def test_full_pipeline_against_localstack(localstack_resources):
         "agent_timings": {},
     }
 
-    final_state = await graph.ainvoke(initial_state)
+    await graph.ainvoke(initial_state, config)
+    snapshot = await graph.aget_state(config)
+    gate = [i.value for t in snapshot.tasks for i in (t.interrupts or ())]
+    if gate:
+        # Paused at the risk gate (e.g. LocalStack's default VPC pieces can land
+        # in Review): leave every Review resource out and accept the findings.
+        decisions = {r["resource_id"]: "exclude" for r in gate[0]["review_resources"]}
+        await graph.ainvoke(Command(resume={"decision": "approved", "resource_decisions": decisions}), config)
+        snapshot = await graph.aget_state(config)
+    final_state = snapshot.values
 
     assert len(final_state["resources"]) > 0
     # terraform_composer now splits resource output across stack-based files

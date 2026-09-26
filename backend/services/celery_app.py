@@ -1,6 +1,7 @@
 """Celery task queue configuration and task dispatcher."""
 
 import asyncio
+from typing import Optional
 import logging
 import os
 import time
@@ -106,62 +107,17 @@ def sweep_stale_jobs():
 
 @celery_app.task(name="run_scan_task")
 def run_scan_task(job_id: str, scan_request_dict: dict):
-    """Celery background worker task that orchestrates the LangGraph pipeline."""
-    from agents.graph import build_graph, build_initial_state
-    from routers.metrics import record_job_outcome
-    from services.database import mark_job_complete, mark_job_failed
-    from services.redis_client import redis_service
+    """Celery background worker task that runs the LangGraph pipeline."""
+    from services.pipeline import run_pipeline
 
     logger.info(f"Starting Celery scan task for Job ID: {job_id}")
+    return asyncio.run(run_pipeline(job_id, scan_request_dict))
 
-    async def _execute():
-        # Publish initial status
-        await redis_service.publish_log(job_id, f"Initializing TerraAgent pipeline for job {job_id}...", "system")
 
-        # Build state graph
-        app = build_graph()
-        initial_state = build_initial_state(job_id, scan_request_dict)
+@celery_app.task(name="resume_scan_task")
+def resume_scan_task(job_id: str, decision: dict, aws_credentials: Optional[dict] = None):
+    """Resume a run paused at the approval gate with a human's decision."""
+    from services.pipeline import resume_pipeline
 
-        # Run pipeline
-        try:
-            final_state = await app.ainvoke(initial_state)
-        except Exception as e:
-            # This catches failures from cloud_discovery_node, the one node that
-            # actually holds raw AWS credentials - unlike every other exception
-            # boundary in this codebase (e.g. main.py's global handler), nothing
-            # here scrubbed the message before it was logged/stored/returned.
-            # Scrub before it ever leaves this function: it gets published live
-            # over Redis pub/sub, persisted into Postgres, and served back
-            # verbatim by routers/jobs.py and routers/scan.py's DB-fallback path.
-            from tools.credential_scrubber import CredentialScrubber
-            error_msg = CredentialScrubber.scrub_text(str(e))
-            logger.error(f"[{job_id}] Pipeline execution failed: {error_msg}")
-            await redis_service.publish_log(job_id, f"Pipeline error: {error_msg}", "error")
-            # Merge into the last published (already scrubbed) state rather than
-            # replacing it, so the UI can still show which agent failed and
-            # everything that ran before it.
-            previous = await redis_service.get_job_state(job_id) or {}
-            await redis_service.set_job_state(job_id, {
-                **previous,
-                "job_id": job_id,
-                "status": "FAILED",
-                "error": error_msg
-            })
-            mark_job_failed(job_id, error_msg)
-            record_job_outcome("FAILED")
-            return {"status": "FAILED", "job_id": job_id, "error": error_msg}
-
-        # Save state in Redis cache
-        await redis_service.set_job_state(job_id, final_state)
-        mark_job_complete(job_id, final_state)
-        record_job_outcome(final_state.get("status", "COMPLETE"), final_state.get("agent_timings"))
-        await redis_service.publish_log(job_id, f"Scan job {job_id} completed with status: {final_state.get('status')}", "system")
-
-        webhook_url = final_state.get("webhook_url")
-        if webhook_url:
-            from services.webhook import send_scan_summary
-            await send_scan_summary(webhook_url, job_id, final_state)
-
-        return {"status": final_state.get("status"), "job_id": job_id}
-
-    return asyncio.run(_execute())
+    logger.info(f"Resuming job {job_id} after a human decision")
+    return asyncio.run(resume_pipeline(job_id, decision, aws_credentials))

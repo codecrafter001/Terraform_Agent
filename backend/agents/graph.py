@@ -1,8 +1,9 @@
 """LangGraph StateGraph: four agents with a repair loop and a risk gate.
 
     infrastructure -> iac_engineering -> verification --PASS/INCOMPLETE/NEEDS_APPROVAL--> delivery -> END
-                          ^                  |
-                          +------ FAIL ------+   (validation errors, max N repair cycles)
+                          ^  ^               |                                           |
+                          |  +---- FAIL -----+  (validation errors, max N repair cycles)  |
+                          +-------- a human turned Review resources into manage/reference-+
 
 1. Infrastructure Agent - read-only discovery (Resource Explorer + boto3),
    dependency graph, ownership classification.
@@ -14,9 +15,13 @@
    findings are reported, never auto-fixed in adoption code. Fails closed: a
    crash, timeout, missing tool or unparseable output makes the verdict
    INCOMPLETE, never PASS.
-4. Delivery & Approval Agent - risk gate (pending_approval pauses the job at
-   AWAITING_APPROVAL until POST /scan/{id}/approve), then cost, docs and the
-   bundle.
+4. Delivery & Approval Agent - risk gate: unapproved behavior-changing or
+   destructive findings, or resources still in Review, pause the run with
+   LangGraph's interrupt() (status AWAITING_APPROVAL, checkpoint saved by
+   services/pipeline.py). POST /scan/{id}/approve|reject resumes the same run.
+   Review decisions that add code send it back through IaC Engineering and
+   Verification; otherwise it packages: hardening proposal, cost, docs, bundle.
+   Approval never runs apply or import.
 
 Repair lives in IaC Engineering, not Verification, so the verifier never
 grades its own fix. Each agent runs *steps* - the original per-concern node
@@ -31,6 +36,7 @@ from datetime import datetime
 from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Tuple, TypedDict
 
 from langgraph.graph import END, StateGraph
+from langgraph.types import interrupt
 
 logger = logging.getLogger("terraagent.graph")
 
@@ -42,6 +48,7 @@ from .cost_agent import cost_agent_node
 from .documentation_agent import documentation_agent_node
 from .drift_reconciliation_agent import drift_reconciliation_agent_node
 from .graph_agent import graph_agent_node
+from .hardening_agent import hardening_agent_node
 from .intent_router import intent_router_node
 from .plan_equivalence_agent import plan_equivalence_agent_node
 from .policy_agent import policy_agent_node
@@ -49,6 +56,9 @@ from .resource_explorer_step import resource_explorer_node
 from .terraform_composer import terraform_composer_node
 from .validation_agent import validation_agent_node
 from .validation_repair import repair_validation_node
+from tools.infra_model import build_infra_model
+from tools.resource_classifier import allowed_human_choices, apply_human_decisions
+from tools.scores import migration_safety, security_posture
 
 # Previously hardcoded as `attempts < 2` in should_repair - same default.
 MAX_REPAIR_ITERATIONS = int(os.getenv("TERRAAGENT_MAX_REPAIR_ITERATIONS", "2"))
@@ -100,10 +110,18 @@ class TerraAgentState(TypedDict):
     config_crosscheck: dict  # generated attributes vs `plan -generate-config-out` (agents/config_crosscheck_agent.py)
     security_results: dict
     cost_results: dict  # Infracost breakdown: total_monthly_cost/currency/resources/tool_skipped
+    migration_safety: dict  # tools/scores.py - will adopting change anything? (plan/drift evidence only)
+    security_posture: dict  # tools/scores.py - what's wrong with the current setup? (scanner findings only)
     repair_attempts: int
     repair_risk_tier: Optional[str]  # last repair cycle's tier: "safe_auto"|"behavior_changing"|"destructive"
     pending_approval: Optional[dict]  # non-empty when repair or plan-equivalence needs a human decision
-    approval_decision: Optional[dict]  # {decision, reason, decided_at} - set by POST /scan/{id}/approve|reject
+    approval_decision: Optional[dict]  # {decision, reason, decided_at, resource_decisions} - from POST /scan/{id}/approve|reject
+    approval_request: Optional[dict]  # what the gate is waiting on: {findings, review_resources, ...}
+    approved_finding_keys: List[str]  # findings a human already approved - never asked about twice
+    human_decisions: Dict[str, str]  # resource_id -> manage|reference|exclude, for resources that were in Review
+    regenerate_requested: bool  # delivery -> iac_engineering after code-changing Review decisions
+    reverify_without_credentials: bool  # resumed without AWS credentials: live checks can't be redone
+    hardening: dict  # optional Hardening proposal (security fixes) - never merged into the adoption code
     documentation: dict
     github_pr: Optional[dict]  # {pr_url, branch, ...} whole-job PR - set only via the separate /pull-request endpoint
     github_wave_prs: Dict[str, dict]  # wave number (str) -> {pr_url, branch, ...} - same endpoint, ?wave= set
@@ -170,10 +188,18 @@ def build_initial_state(job_id: str, request: Dict[str, Any]) -> Dict[str, Any]:
         "config_crosscheck": {},
         "security_results": {},
         "cost_results": {},
+        "migration_safety": {},
+        "security_posture": {},
         "repair_attempts": 0,
         "repair_risk_tier": None,
         "pending_approval": None,
         "approval_decision": None,
+        "approval_request": None,
+        "approved_finding_keys": [],
+        "human_decisions": {},
+        "regenerate_requested": False,
+        "reverify_without_credentials": False,
+        "hardening": {},
         "documentation": {},
         "github_pr": None,
         "github_wave_prs": {},
@@ -401,8 +427,12 @@ async def iac_engineering_agent(state: Dict[str, Any]) -> Dict[str, Any]:
         await _log(job_id, "iac_engineering", f"Done. {summary}. Sending back to verification.")
         return _finish_stage("iac_engineering", acc, delta, summary, 55)
 
-    await _log(job_id, "iac_engineering", "IaC Engineering Agent: adoption plan, then Terraform generation.")
-    delta, acc = await _run_steps("iac_engineering", state, [
+    regenerating = bool(state.get("regenerate_requested"))
+    await _log(job_id, "iac_engineering", (
+        "IaC Engineering Agent: regenerating with the human Review decisions."
+        if regenerating else "IaC Engineering Agent: adoption plan, then Terraform generation."
+    ))
+    delta, acc = await _run_steps("iac_engineering", {**state, "regenerate_requested": False}, [
         ("adoption_planning_agent", "planning adoption waves and import order", adoption_planning_agent_node),
         ("terraform_composer", "generating Terraform HCL", terraform_composer_node),
     ])
@@ -417,6 +447,9 @@ async def iac_engineering_agent(state: Dict[str, Any]) -> Dict[str, Any]:
     )
     if waves:
         summary += f" · {_plural(waves, 'wave')}"
+    if regenerating:
+        summary += " · regenerated after human Review decisions"
+    delta["regenerate_requested"] = False
     await _log(job_id, "iac_engineering", f"Done. {summary}.")
     return _finish_stage("iac_engineering", acc, delta, summary, 45)
 
@@ -424,6 +457,30 @@ async def iac_engineering_agent(state: Dict[str, Any]) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Agent 3 - Verification & Risk: judge only, never edit
 # ---------------------------------------------------------------------------
+
+def _finding_key(finding: Dict[str, Any]) -> str:
+    return "|".join(str(finding.get(k) or "") for k in ("tool", "rule_id", "resource", "attribute"))
+
+
+def _unapproved_findings(state: Dict[str, Any]) -> List[Dict[str, Any]]:
+    approved = set(state.get("approved_finding_keys") or [])
+    findings = (state.get("pending_approval") or {}).get("findings", []) or []
+    return [f for f in findings if _finding_key(f) not in approved]
+
+
+def _dedupe_pending(pending: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Drift and plan append to any findings already pending; a re-verification
+    would otherwise list the same finding twice."""
+    if not pending:
+        return pending
+    seen, unique = set(), []
+    for f in pending.get("findings", []) or []:
+        key = _finding_key(f)
+        if key not in seen:
+            seen.add(key)
+            unique.append(f)
+    return {**pending, "findings": unique}
+
 
 VERDICT_PASS = "PASS"
 VERDICT_FAIL = "FAIL"  # validation errors - repairable by IaC Engineering
@@ -455,6 +512,11 @@ def _incomplete_reasons(acc: Dict[str, Any]) -> List[str]:
     cross = acc.get("config_crosscheck") or {}
     if cross and not cross.get("skipped") and cross.get("error"):
         reasons.append(f"config cross-check could not run ({cross['error']})")
+    if acc.get("reverify_without_credentials"):
+        reasons.append(
+            "re-verified after the Review decisions without AWS credentials (they are never stored), "
+            "so drift and plan checks against live AWS were not redone"
+        )
     return reasons
 
 
@@ -471,7 +533,7 @@ def _record_iteration(acc: Dict[str, Any], validation_only: bool) -> Dict[str, A
         sum(int(plan.get(k, 0) or 0) for k in ("create", "update", "replace", "destroy")) if plan_ran else None
     )
     incomplete = _incomplete_reasons(acc)
-    if acc.get("pending_approval"):
+    if _unapproved_findings(acc):
         verdict = VERDICT_NEEDS_APPROVAL
     elif _has_system_failure(acc):
         verdict = VERDICT_INCOMPLETE
@@ -549,17 +611,28 @@ async def verification_agent(state: Dict[str, Any]) -> Dict[str, Any]:
                 ("config_crosscheck", "cross-check against plan -generate-config-out", config_crosscheck_node),
                 ("policy_agent", "Checkov / Trivy / OPA (report only)", policy_agent_node),
             ],
-            # Same halts as before: a destructive or behavior-changing finding
-            # stops the pass before anything else runs.
-            stop_if=lambda s: bool(s.get("pending_approval")),
+            # A destructive or behavior-changing finding a human hasn't
+            # approved yet stops the pass before anything else runs.
+            stop_if=lambda s: bool(_unapproved_findings(s)),
         )
         delta.update(more)
+        if acc.get("pending_approval"):
+            acc["pending_approval"] = delta["pending_approval"] = _dedupe_pending(acc["pending_approval"])
 
     iteration = _record_iteration(acc, validation_only)
     iterations = list(acc.get("verification_iterations", []) or []) + [iteration]
     delta["verification_iterations"] = iterations
     delta["verification_verdict"] = iteration["verdict"]
     acc["verification_iterations"] = iterations
+
+    # Two separate scores - adoption risk and security posture never mix.
+    delta["migration_safety"] = migration_safety(
+        acc.get("generation_manifest"), acc.get("plan_equivalence_results"), acc.get("drift_results"),
+        acc.get("config_crosscheck"), iteration["verdict"],
+    )
+    delta["security_posture"] = security_posture(None if validation_only else acc.get("security_results"))
+    iteration["migration_safety"] = delta["migration_safety"].get("score")
+    iteration["security_posture"] = delta["security_posture"].get("score")
 
     summary = _iteration_summary(iteration, max_iters)
     if iteration["incomplete_reasons"]:
@@ -582,29 +655,57 @@ def route_after_verification(state: Dict[str, Any]) -> str:
 # Agent 4 - Delivery & Approval: risk gate, then package
 # ---------------------------------------------------------------------------
 
-async def delivery_agent(state: Dict[str, Any]) -> Dict[str, Any]:
-    """Risk gate first: behavior-changing or destructive findings pause the job
-    at AWAITING_APPROVAL until a human decides. Also called directly by
-    routers/scan.py::_resume_after_decision once a human approves - with
-    approval_decision set, the gate lets it through to packaging."""
-    job_id = state.get("job_id", "")
-    decision = (state.get("approval_decision") or {}).get("decision")
-
-    if state.get("pending_approval") and decision != "approved":
-        findings = len((state.get("pending_approval") or {}).get("findings", []) or [])
-        await _log(job_id, "delivery", f"Risk gate: {_plural(findings, 'finding')} need a human decision. Pausing.")
-        summaries = dict(state.get("stage_summaries") or {})
-        summaries["delivery"] = f"Paused at the risk gate: {_plural(findings, 'finding')} awaiting approval"
-        return {
-            "status": "AWAITING_APPROVAL",
-            "current_stage": "awaiting_approval",
-            "current_agent": "awaiting_approval",
-            "stage_summaries": summaries,
+def _review_items(state: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return [
+        {
+            "resource_id": c.get("resource_id"),
+            "resource_type": c.get("resource_type"),
+            "category": c.get("category"),
+            "reasons": c.get("reason") or [],
+            "evidence": c.get("evidence") or {},
+            "choices": allowed_human_choices(c),
         }
+        for c in (state.get("classification_results") or {}).get("classifications", []) or []
+        if c.get("decision") == "review"
+    ]
 
-    await _log(job_id, "delivery", "Delivery & Approval Agent: cost estimate, documentation, import plan and bundle.")
+
+def approval_request(state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """What the risk gate needs a human to decide, or None if nothing."""
+    findings, review = _unapproved_findings(state), _review_items(state)
+    if not findings and not review:
+        return None
+    return {
+        "findings": findings,
+        "review_resources": review,
+        "verdict": state.get("verification_verdict"),
+        "migration_safety": state.get("migration_safety") or {},
+    }
+
+
+def _had_live_checks(state: Dict[str, Any]) -> bool:
+    drift, plan = state.get("drift_results") or {}, state.get("plan_equivalence_results") or {}
+    return (bool(drift) and not drift.get("skipped")) or (bool(plan) and not plan.get("skipped"))
+
+
+def _with_human_decisions(state: Dict[str, Any], human: Dict[str, str]) -> Dict[str, Any]:
+    classification = apply_human_decisions(state.get("classification_results") or {}, human)
+    return {
+        "human_decisions": human,
+        "classification_results": classification,
+        "infra_model": build_infra_model(
+            state.get("resources") or [], state.get("dependency_graph") or {},
+            classification, state.get("region", "us-east-1"),
+        ),
+    }
+
+
+async def _package(state: Dict[str, Any]) -> Dict[str, Any]:
+    job_id = state.get("job_id", "")
+    await _log(job_id, "delivery", "Delivery & Approval Agent: hardening proposal, cost delta, documentation and bundle.")
     delta, acc = await _run_steps("delivery", state, [
-        ("cost_agent", "Infracost cost estimate", cost_agent_node),
+        ("hardening_agent", "building the optional Hardening proposal", hardening_agent_node),
+        ("cost_agent", "Infracost cost delta of the hardening proposal", cost_agent_node),
         ("documentation_agent", "writing docs and packaging the bundle", documentation_agent_node),
     ])
     files = len(acc.get("zip_manifest", []) or [])
@@ -615,14 +716,82 @@ async def delivery_agent(state: Dict[str, Any]) -> Dict[str, Any]:
         VERDICT_INCOMPLETE: "NOT fully verified: see verification",
         VERDICT_NEEDS_APPROVAL: "approved by a human",
     }.get(verdict, verdict)
+    if (acc.get("approval_decision") or {}).get("decision") == "approved" and verdict != VERDICT_NEEDS_APPROVAL:
+        note += " · approved by a human"
     delta = _finish_stage("delivery", acc, delta, f"Bundle ready · {_plural(files, 'file')} · {note}", 100)
     delta["current_stage"] = "complete"
     return delta
 
 
+async def delivery_agent(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Risk gate first. Unapproved behavior-changing/destructive findings, or
+    resources still in Review, pause the run with interrupt(); the human's
+    decision comes back as interrupt()'s return value when the run is resumed
+    (services/pipeline.py). Everything before interrupt() re-runs on resume,
+    so it must stay side-effect free."""
+    request = approval_request(state)
+    if request is None:
+        return await _package(state)
 
-def build_graph():
-    """Compiles the four-agent LangGraph workflow."""
+    response = interrupt(request) or {}
+    return await _apply_decision(state, request, response)
+
+
+async def _apply_decision(state: Dict[str, Any], request: Dict[str, Any], response: Dict[str, Any]) -> Dict[str, Any]:
+    job_id = state.get("job_id", "")
+    resource_decisions = dict(response.get("resource_decisions") or {})
+    decision = {
+        "decision": "approved" if response.get("decision") == "approved" else "rejected",
+        "reason": response.get("reason"),
+        "decided_at": response.get("decided_at") or datetime.utcnow().isoformat(),
+        "resource_decisions": resource_decisions,
+    }
+    summaries = dict(state.get("stage_summaries") or {})
+
+    if decision["decision"] == "rejected":
+        note = f": {decision['reason']}" if decision["reason"] else "."
+        await _log(job_id, "delivery", f"Rejected by a human{note} Writing the audit README only; no adoptable bundle.")
+        delta, acc = await _run_steps("delivery", {**state, "approval_decision": decision}, [
+            ("documentation_agent", "writing the audit trail", documentation_agent_node),
+        ])
+        summaries["delivery"] = f"Rejected by a human{note}"
+        delta.update({"approval_decision": decision, "status": "REJECTED", "stage_summaries": summaries,
+                      "approval_request": None, "current_agent": "rejected"})
+        return delta
+
+    keys = list(state.get("approved_finding_keys") or []) + [_finding_key(f) for f in request["findings"]]
+    human = {**(state.get("human_decisions") or {}), **resource_decisions}
+    update = {"approval_decision": decision, "approved_finding_keys": keys, "approval_request": None,
+              **_with_human_decisions(state, human)}
+    adds_code = [rid for rid, d in resource_decisions.items() if d in ("manage", "reference")]
+    await _log(job_id, "delivery", (
+        f"Approved by a human: {_plural(len(request['findings']), 'finding')} accepted, "
+        f"{_plural(len(resource_decisions), 'Review decision')}."
+    ))
+
+    if adds_code:
+        creds = state.get("aws_credentials") or {}
+        no_creds = not (creds.get("access_key") and creds.get("secret_key"))
+        summaries["delivery"] = (
+            f"Approved · {_plural(len(adds_code), 'Review resource')} now in code - regenerating and re-verifying"
+        )
+        await _log(job_id, "delivery", summaries["delivery"] + ".")
+        return {**update, "regenerate_requested": True, "status": "RUNNING",
+                "reverify_without_credentials": no_creds and _had_live_checks(state),
+                "stage_summaries": summaries, "current_stage": "iac_engineering"}
+
+    delta = await _package({**state, **update, "status": "RUNNING"})
+    return {**update, **delta, "regenerate_requested": False}
+
+
+def route_after_delivery(state: Dict[str, Any]) -> str:
+    return "iac_engineering" if state.get("regenerate_requested") else END
+
+
+def build_graph(checkpointer: Any = None):
+    """Compiles the four-agent LangGraph workflow. The approval gate uses
+    interrupt(), which needs a checkpointer and a thread_id - services/pipeline.py
+    supplies both."""
     workflow = StateGraph(TerraAgentState)
 
     workflow.add_node("infrastructure", infrastructure_agent)
@@ -638,6 +807,10 @@ def build_graph():
         route_after_verification,
         {"iac_engineering": "iac_engineering", "delivery": "delivery"},
     )
-    workflow.add_edge("delivery", END)
+    workflow.add_conditional_edges(
+        "delivery",
+        route_after_delivery,
+        {"iac_engineering": "iac_engineering", END: END},
+    )
 
-    return workflow.compile()
+    return workflow.compile(checkpointer=checkpointer)

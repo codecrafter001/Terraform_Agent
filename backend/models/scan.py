@@ -117,6 +117,16 @@ class ApprovalActionRequest(BaseModel):
     reason: Optional[str] = Field(
         None, description="Optional human-readable note explaining this approve/reject decision"
     )
+    resource_decisions: Dict[str, Literal["manage", "reference", "exclude"]] = Field(
+        default_factory=dict,
+        description="Approve only: a decision for every resource the gate listed as in Review",
+    )
+    # Credentials are never stored, so a run resumed after Review decisions
+    # that add code can only redo live-AWS checks if they are supplied again.
+    # Used for that resumed run only, then discarded like the originals.
+    aws_access_key: Optional[SecretStr] = None
+    aws_secret_key: Optional[SecretStr] = None
+    aws_session_token: Optional[SecretStr] = None
 
 
 class CreatePullRequestRequest(BaseModel):

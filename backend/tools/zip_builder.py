@@ -147,14 +147,16 @@ class ZipBuilder:
         pending_approval: Optional[Dict[str, Any]] = None,
         drift_results: Optional[Dict[str, Any]] = None,
         generation_manifest: Optional[Dict[str, Any]] = None,
-        migration_confidence: Optional[Dict[str, Any]] = None,
+        scores: Optional[Dict[str, Any]] = None,
+        hardening: Optional[Dict[str, Any]] = None,
         infra_model: Optional[Dict[str, Any]] = None,
         docs: Optional[Dict[str, str]] = None,
         output_dir: Optional[str] = None,
         password: Optional[str] = None
     ) -> Dict[str, Any]:
         """Package Terraform HCL, discovery inventory, dependency graph, security/validation
-        reports, generation manifest, migration confidence score, and documentation into a single downloadable ZIP bundle.
+        reports, generation manifest, both verification scores, the optional hardening
+        changes (under hardening/, never mixed into terraform/), and documentation into a single downloadable ZIP bundle.
 
         If `password` is given, the bundle is AES-256 encrypted (via pyzipper -
         the stdlib zipfile module can only produce the legacy, trivially-crackable
@@ -198,8 +200,15 @@ class ZipBuilder:
                 zf.writestr("infra_model.json", json.dumps(infra_model, indent=2, default=str))
             if generation_manifest:
                 zf.writestr("reports/generation_manifest.json", json.dumps(generation_manifest, indent=2, default=str))
-            if migration_confidence:
-                zf.writestr("reports/migration_confidence.json", json.dumps(migration_confidence, indent=2, default=str))
+            if scores:
+                zf.writestr("reports/scores.json", json.dumps(scores, indent=2, default=str))
+            # Adoption (terraform/) plans with zero changes; hardening/ is a separate,
+            # behavior-changing proposal and is never merged into it.
+            if hardening and hardening.get("files"):
+                for filename, content in hardening["files"].items():
+                    zf.writestr(f"hardening/terraform/{filename}".replace("\\", "/"), content)
+                zf.writestr("hardening/changes.json", json.dumps(
+                    {k: v for k, v in hardening.items() if k != "files"}, indent=2, default=str))
 
         manifest: List[Dict[str, Any]] = []
         with zip_cls(zip_path, "r") as zf:

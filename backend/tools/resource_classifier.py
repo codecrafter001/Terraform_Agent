@@ -306,3 +306,38 @@ def classify_resources(resources: List[Dict[str, Any]], dependency_graph: Dict[s
         decisions[decision] = decisions.get(decision, 0) + 1
 
     return ClassificationReport(classifications=classifications, summary=summary, decisions=decisions)
+
+
+# What a human may turn a Review resource into. A resource we have no
+# Terraform template for can only be left out.
+HUMAN_CHOICES = ("manage", "reference", "exclude")
+_CATEGORY_FOR_HUMAN_DECISION = {"manage": "unmanaged", "reference": "shared"}
+
+
+def allowed_human_choices(classification: Dict[str, Any]) -> List[str]:
+    if classification.get("category") == "unsupported":
+        return ["exclude"]
+    return list(HUMAN_CHOICES)
+
+
+def apply_human_decisions(report: Dict[str, Any], human_decisions: Dict[str, str]) -> Dict[str, Any]:
+    """Return a copy of a ClassificationReport dict with each Review resource a
+    human decided on turned into that decision. Evidence records the rule as
+    human_decision and keeps the original decision. Only Review resources are
+    touched, and only with a choice allowed for them."""
+    classifications = []
+    summary: Dict[str, int] = {}
+    decisions: Dict[str, int] = {"manage": 0, "reference": 0, "exclude": 0, "review": 0}
+    for c in report.get("classifications", []) or []:
+        c = dict(c)
+        choice = human_decisions.get(c.get("resource_id", ""))
+        if c.get("decision") == "review" and choice in allowed_human_choices(c):
+            c["evidence"] = {**(c.get("evidence") or {}), "rule": "human_decision", "previous_decision": "review"}
+            c["reason"] = list(c.get("reason") or []) + [f"a human reviewer decided: {choice}"]
+            c["decision"] = choice
+            c["recommended_action"] = DECISION_TO_ACTION[choice]
+            c["category"] = _CATEGORY_FOR_HUMAN_DECISION.get(choice, c.get("category"))
+        classifications.append(c)
+        summary[c["category"]] = summary.get(c["category"], 0) + 1
+        decisions[c["decision"]] = decisions.get(c["decision"], 0) + 1
+    return {**report, "classifications": classifications, "summary": summary, "decisions": decisions}

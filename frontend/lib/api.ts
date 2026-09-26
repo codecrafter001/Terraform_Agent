@@ -2,7 +2,7 @@
  * API client utilities for TerraAgent frontend
  */
 
-import { IntentAnalysisResult, JobProgress, JobResults, OperationType } from "./types";
+import { HumanChoice, IntentAnalysisResult, JobProgress, JobResults, OperationType } from "./types";
 
 export interface ScanRequestPayload {
   aws_access_key: string;
@@ -126,30 +126,51 @@ export async function fetchJobResults(jobId: string): Promise<JobResults> {
   return await res.json();
 }
 
-async function _postDecision(jobId: string, action: "approve" | "reject", reason?: string): Promise<JobDecisionResponse> {
+export interface DecisionPayload {
+  reason?: string;
+  // Approve only: one allowed choice for every resource the gate listed as in Review.
+  resource_decisions?: Record<string, HumanChoice>;
+  // Optional, approve only: lets a re-verification redo live-AWS checks.
+  // Sent for that one resumed run; the backend never stores them.
+  aws_access_key?: string;
+  aws_secret_key?: string;
+  aws_session_token?: string;
+}
+
+function _errorText(detail: unknown, fallback: string): string {
+  if (typeof detail === "string") return detail;
+  if (detail && typeof detail === "object" && "message" in detail) {
+    const d = detail as { message: string; missing?: string[]; not_allowed?: string[] };
+    const extra = [...(d.missing ?? []), ...(d.not_allowed ?? [])];
+    return extra.length ? `${d.message}: ${extra.join(", ")}` : d.message;
+  }
+  return fallback;
+}
+
+async function _postDecision(jobId: string, action: "approve" | "reject", payload: DecisionPayload): Promise<JobDecisionResponse> {
   const res = await fetch(`${API_BASE}/scan/${jobId}/${action}`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       ...authHeaders(),
     },
-    body: JSON.stringify({ reason: reason ?? null }),
+    body: JSON.stringify({ ...payload, reason: payload.reason ?? null }),
   });
 
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: `Failed to ${action} job` }));
-    throw new Error(err.detail || `${action} request failed`);
+    throw new Error(_errorText(err.detail, `${action} request failed`));
   }
 
   return await res.json();
 }
 
-export async function approveJob(jobId: string, reason?: string): Promise<JobDecisionResponse> {
-  return _postDecision(jobId, "approve", reason);
+export async function approveJob(jobId: string, payload: DecisionPayload = {}): Promise<JobDecisionResponse> {
+  return _postDecision(jobId, "approve", payload);
 }
 
 export async function rejectJob(jobId: string, reason?: string): Promise<JobDecisionResponse> {
-  return _postDecision(jobId, "reject", reason);
+  return _postDecision(jobId, "reject", { reason });
 }
 
 export interface CreatePullRequestPayload {

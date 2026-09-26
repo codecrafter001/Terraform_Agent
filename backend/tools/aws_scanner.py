@@ -62,14 +62,25 @@ class AWSScanner(CloudDiscoveryInterface):
             for page in ec2.get_paginator("describe_vpcs").paginate():
                 for vpc in page.get("Vpcs", []):
                     vpc_id = vpc["VpcId"]
-                    results.append({
+                    record = {
                         "resource_type": "aws_vpc",
                         "id": vpc_id,
                         "name": self._get_tag(vpc.get("Tags", []), "Name", vpc_id),
                         "cidr_block": vpc.get("CidrBlock"),
                         "is_default": vpc.get("IsDefault", False),
                         "tags": vpc.get("Tags", [])
-                    })
+                    }
+                    # Rendered as-is in the adoption code; unknown -> omitted there.
+                    for attribute, field, key in (
+                        ("enableDnsSupport", "enable_dns_support", "EnableDnsSupport"),
+                        ("enableDnsHostnames", "enable_dns_hostnames", "EnableDnsHostnames"),
+                    ):
+                        try:
+                            value = ec2.describe_vpc_attribute(VpcId=vpc_id, Attribute=attribute)
+                            record[field] = bool(value.get(key, {}).get("Value"))
+                        except ClientError as e:
+                            logger.warning(f"Could not read {attribute} for {vpc_id}: {e.response['Error']['Message']}")
+                    results.append(record)
         except ClientError as e:
             logger.warning(f"Error scanning VPCs: {e.response['Error']['Message']}")
         return results
@@ -89,6 +100,7 @@ class AWSScanner(CloudDiscoveryInterface):
                         "vpc_id": s.get("VpcId"),
                         "cidr_block": s.get("CidrBlock"),
                         "availability_zone": s.get("AvailabilityZone"),
+                        "map_public_ip_on_launch": s.get("MapPublicIpOnLaunch"),
                         "tags": s.get("Tags", [])
                     })
         except ClientError as e:
@@ -106,11 +118,24 @@ class AWSScanner(CloudDiscoveryInterface):
                     associated_subnets = [
                         a.get("SubnetId") for a in rt.get("Associations", []) if a.get("SubnetId")
                     ]
+                    # Every destination and target kind, so the adoption code can
+                    # render each route exactly (tools/hcl_render.py::route_lines).
                     routes = [
                         {
                             "destination_cidr_block": r.get("DestinationCidrBlock"),
+                            "destination_ipv6_cidr_block": r.get("DestinationIpv6CidrBlock"),
+                            "destination_prefix_list_id": r.get("DestinationPrefixListId"),
                             "gateway_id": r.get("GatewayId"),
                             "nat_gateway_id": r.get("NatGatewayId"),
+                            "transit_gateway_id": r.get("TransitGatewayId"),
+                            "vpc_peering_connection_id": r.get("VpcPeeringConnectionId"),
+                            "egress_only_internet_gateway_id": r.get("EgressOnlyInternetGatewayId"),
+                            "carrier_gateway_id": r.get("CarrierGatewayId"),
+                            "local_gateway_id": r.get("LocalGatewayId"),
+                            "core_network_arn": r.get("CoreNetworkArn"),
+                            "network_interface_id": r.get("NetworkInterfaceId"),
+                            "instance_id": r.get("InstanceId"),
+                            "origin": r.get("Origin"),
                             "state": r.get("State"),
                         }
                         for r in rt.get("Routes", [])
@@ -165,6 +190,9 @@ class AWSScanner(CloudDiscoveryInterface):
                             "resource_type": "aws_instance",
                             "id": inst_id,
                             "name": self._get_tag(inst.get("Tags", []), "Name", inst_id),
+                            "ami": inst.get("ImageId"),
+                            # Read for the Hardening proposal (IMDSv2); never written into adoption code.
+                            "metadata_http_tokens": inst.get("MetadataOptions", {}).get("HttpTokens"),
                             "instance_type": inst.get("InstanceType"),
                             "subnet_id": inst.get("SubnetId"),
                             "vpc_id": inst.get("VpcId"),
@@ -202,11 +230,40 @@ class AWSScanner(CloudDiscoveryInterface):
                     "resource_type": "aws_s3_bucket",
                     "id": b_name,
                     "name": b_name,
-                    "creation_date": b.get("CreationDate", "").isoformat() if b.get("CreationDate") else None
+                    "creation_date": b.get("CreationDate", "").isoformat() if b.get("CreationDate") else None,
+                    **self._s3_bucket_details(s3, b_name),
                 })
         except ClientError as e:
             logger.warning(f"Error scanning S3: {e.response['Error']['Message']}")
         return results
+
+    @staticmethod
+    def _s3_bucket_details(s3: Any, bucket: str) -> Dict[str, Any]:
+        """Tags (rendered exactly in the adoption code) plus the public access
+        block and default encryption (read for the Hardening proposal only).
+        Read-only: GetBucketTagging, GetPublicAccessBlock, GetBucketEncryption.
+        A missing configuration is recorded as absent; an unreadable one as
+        None (unknown), never guessed."""
+        details: Dict[str, Any] = {}
+        calls = (
+            ("tags", lambda: s3.get_bucket_tagging(Bucket=bucket).get("TagSet", []), ("NoSuchTagSet",), []),
+            ("public_access_block", lambda: s3.get_public_access_block(Bucket=bucket)
+             .get("PublicAccessBlockConfiguration", {}), ("NoSuchPublicAccessBlockConfiguration",), {}),
+            ("encryption_rules", lambda: s3.get_bucket_encryption(Bucket=bucket)
+             .get("ServerSideEncryptionConfiguration", {}).get("Rules", []),
+             ("ServerSideEncryptionConfigurationNotFoundError",), []),
+        )
+        for field, call, absent_codes, absent_value in calls:
+            try:
+                details[field] = call()
+            except ClientError as e:
+                code = e.response.get("Error", {}).get("Code", "")
+                details[field] = absent_value if code in absent_codes else None
+                if code not in absent_codes:
+                    logger.warning(f"Could not read {field} for bucket {bucket}: {code}")
+        if details.get("tags") is None:
+            details.pop("tags")
+        return details
 
     def scan_rds_instances(self) -> List[Dict[str, Any]]:
         """Scan RDS DB Instances."""
@@ -262,6 +319,9 @@ class AWSScanner(CloudDiscoveryInterface):
                         "id": role_name,
                         "name": role_name,
                         "arn": role.get("Arn"),
+                        "path": role.get("Path"),
+                        "description": role.get("Description"),
+                        "max_session_duration": role.get("MaxSessionDuration"),
                         "assume_role_policy": role.get("AssumeRolePolicyDocument"),
                         "attached_policy_arns": attached_policies,
                         "tags": role.get("Tags", [])

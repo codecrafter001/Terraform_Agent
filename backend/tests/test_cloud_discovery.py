@@ -74,11 +74,16 @@ def test_scan_all_aggregates_across_pagination(monkeypatch):
             assert name == "describe_vpcs"
             return FakePaginator()
 
+        def describe_vpc_attribute(self, VpcId, Attribute):
+            key = Attribute[0].upper() + Attribute[1:]
+            return {key: {"Value": Attribute == "enableDnsSupport"}}
+
     monkeypatch.setattr(scanner.session, "client", lambda *a, **kw: FakeEC2())
 
     results = scanner.scan_vpcs()
     ids = {r["id"] for r in results}
     assert ids == {"vpc-page1", "vpc-page2"}
+    assert all(r["enable_dns_support"] is True and r["enable_dns_hostnames"] is False for r in results)
 
 
 def test_retry_config_uses_standard_mode_with_five_attempts():

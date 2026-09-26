@@ -23,7 +23,8 @@ class JobProgress(BaseModel):
     max_repair_iterations: Optional[int] = None
     verification_verdict: Optional[str] = None
     repair_history: List[Dict[str, Any]] = []
-    migration_confidence: Optional[Dict[str, Any]] = None
+    migration_safety: Optional[Dict[str, Any]] = None
+    security_posture: Optional[Dict[str, Any]] = None
     created_at: str
     updated_at: Optional[str] = None
     error: Optional[str] = None
@@ -48,9 +49,13 @@ class JobResults(BaseModel):
     drift_results: Dict[str, Any] = {}
     plan_equivalence_results: Dict[str, Any] = {}
     security_results: Dict[str, Any] = {}
-    migration_confidence: Optional[Dict[str, Any]] = None
+    migration_safety: Optional[Dict[str, Any]] = None
+    security_posture: Optional[Dict[str, Any]] = None
     pending_approval: Optional[Dict[str, Any]] = None
+    approval_request: Optional[Dict[str, Any]] = None  # what the risk gate is waiting on
     approval_decision: Optional[Dict[str, Any]] = None
+    hardening: Dict[str, Any] = {}  # optional Hardening proposal - separate from the adoption code
+    cost_results: Dict[str, Any] = {}  # Infracost delta of the hardening proposal only
     github_pr: Optional[Dict[str, Any]] = None
     github_wave_prs: Dict[str, Any] = {}
     zip_available: bool = False

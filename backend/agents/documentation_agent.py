@@ -8,7 +8,7 @@ from typing import Any, Dict, List
 
 from services.ollama_client import ollama_client
 from services.redis_client import redis_service
-from tools.confidence_scorer import MigrationConfidenceScorer
+from tools.scores import migration_safety, security_posture
 from tools.naming import unique_clean_name
 from tools.zip_builder import ZipBuilder
 
@@ -385,17 +385,20 @@ Verify that Terraform reports: `No changes. Your infrastructure matches the conf
     # Same honesty discipline as scanners_skipped above - tool_skipped means
     # Infracost never ran (missing binary or INFRACOST_API_KEY), which must
     # never be presented as "estimated cost: $0.00".
-    if cost_res.get("tool_skipped"):
-        cost_summary = "not estimated - Infracost was unavailable for this run"
-        cost_line = "- **Estimated Monthly Cost**: not estimated (Infracost unavailable - missing binary or API key)"
+    # Cost is only estimated for the Hardening proposal (agents/cost_agent.py) -
+    # the adoption itself changes nothing, so it has no cost delta.
+    if cost_res.get("skipped") or not cost_res:
+        cost_summary = "no cost delta - the adoption imports existing resources unchanged"
+        cost_line = "- **Cost Impact**: none - the adoption imports existing resources with no changes"
+    elif cost_res.get("tool_skipped"):
+        cost_summary = "hardening cost delta not estimated - Infracost was unavailable for this run"
+        cost_line = "- **Hardening Cost Delta**: not estimated (Infracost unavailable - missing binary or API key)"
     else:
-        total_cost = cost_res.get("total_monthly_cost", 0.0)
+        delta = float(cost_res.get("monthly_delta") or 0.0)
         currency = cost_res.get("currency", "USD")
-        cost_summary = f"${total_cost:.2f} {currency}/month across {len(cost_res.get('resources', []))} priced resource(s)"
-        cost_line = f"- **Estimated Monthly Cost**: ${total_cost:.2f} {currency}/month"
-        unsupported = cost_res.get("unsupported_resource_count", 0)
-        if unsupported:
-            cost_line += f" ({unsupported} resource(s) not supported by Infracost, excluded from this total)"
+        cost_summary = f"hardening changes the monthly cost by {delta:+.2f} {currency}"
+        cost_line = (f"- **Cost Impact**: none for the adoption; the optional Hardening changes "
+                     f"add {delta:+.2f} {currency}/month")
 
     # repair_agent.py deliberately leaves behavior_changing/destructive
     # findings unfixed rather than risk an incorrect automated change - a job
@@ -421,21 +424,20 @@ Verify that Terraform reports: `No changes. Your infrastructure matches the conf
     is_rejected = bool(approval_decision) and approval_decision.get("decision") == "rejected"
     adoption_section = REJECTED_SECTION if is_rejected else ADOPTION_INSTRUCTIONS
 
-    # Calculate Migration Confidence & Blast Radius
-    confidence_data = MigrationConfidenceScorer.calculate_score(
-        drift_results=drift_res,
-        plan_equivalence_results=state.get("plan_equivalence_results"),
-        validation_results=val_res,
-        security_results=sec_res,
-        generation_manifest=state.get("generation_manifest"),
-        dependency_graph=dep_graph,
+    # The verifier computes both scores; recompute only if this node runs on its own.
+    safety = state.get("migration_safety") or migration_safety(
+        state.get("generation_manifest"), state.get("plan_equivalence_results"), drift_res,
+        state.get("config_crosscheck"), state.get("verification_verdict"),
     )
+    posture = state.get("security_posture") or security_posture(sec_res)
+    safety_score = f"{safety['score']}%" if safety.get("score") is not None else "not measured"
+    posture_score = f"{posture['score']}/100" if posture.get("score") is not None else "not measured"
     confidence_line = (
-        f"- **Migration Confidence Score**: {confidence_data['score']} / 100 "
-        f"({confidence_data['tier']} CONFIDENCE - {confidence_data['verdict']})\n"
-        f"- **Blast-Radius Breakdown**: {confidence_data['blast_radius']['no_op_count']} No-Op, "
-        f"{confidence_data['blast_radius']['behavior_changing_count']} Behavior-Changing, "
-        f"{confidence_data['blast_radius']['destructive_count']} Destructive"
+        f"- **Migration Safety**: {safety_score} ({safety['status']}; basis: {safety['basis']}) - "
+        f"{safety.get('destroy_or_replace', 0)} destroy/replace, "
+        f"{len(safety.get('changing_resources') or [])} resource(s) would change\n"
+        f"- **Security Posture**: {posture_score} ({posture['rating']}) - reported only, "
+        "never auto-fixed in this adoption code; see the Hardening changes"
     )
 
     readme_fallback = f"""# TerraAgent Generated Infrastructure Bundle
@@ -459,6 +461,8 @@ Verify that Terraform reports: `No changes. Your infrastructure matches the conf
 - `reports/`: Granular validation, static security analysis, Infracost cost, and pending-approval reports.
 - `migration/import_plan.md`: The raw, ordered `terraform import` commands.
 - `migration/migration_checklist.md`: Step-by-step non-destructive resource adoption procedure.
+- `hardening/` (only when there are fixes): the optional Hardening proposal - changed files to apply on top of `terraform/` in a separate PR, and `changes.json` explaining each change. Never part of the adoption.
+- `reports/scores.json`: Migration Safety (will adopting change anything?) and Security Posture (what's wrong today?), kept separate.
 
 {pending_approval_section}
 
@@ -498,7 +502,8 @@ Verify that Terraform reports: `No changes. Your infrastructure matches the conf
         pending_approval=pending_approval,
         drift_results=drift_res,
         generation_manifest=state.get("generation_manifest"),
-        migration_confidence=confidence_data,
+        scores={"migration_safety": safety, "security_posture": posture},
+        hardening=state.get("hardening"),
         infra_model=state.get("infra_model"),
         docs=docs,
         output_dir=output_dir,
@@ -517,7 +522,6 @@ Verify that Terraform reports: `No changes. Your infrastructure matches the conf
 
     return {
         "documentation": docs,
-        "migration_confidence": confidence_data,
         "zip_path": zip_info["zip_path"],
         "zip_sha256": zip_info["sha256"],
         "zip_manifest": zip_info["manifest"],

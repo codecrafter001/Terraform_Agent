@@ -7,6 +7,8 @@ Infrastructure -> IaC Engineering <-> Verification & Risk -> Delivery & Approval
 from typing import Any, Dict, List
 
 import pytest
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.types import Command
 
 import agents.graph as graph_mod
 
@@ -38,7 +40,7 @@ def calls(monkeypatch) -> List[str]:
     for name in (
         "intent_router_node", "resource_explorer_node", "graph_agent_node", "classification_agent_node",
         "adoption_planning_agent_node", "drift_reconciliation_agent_node",
-        "plan_equivalence_agent_node", "config_crosscheck_node", "cost_agent_node",
+        "plan_equivalence_agent_node", "config_crosscheck_node", "cost_agent_node", "hardening_agent_node",
     ):
         monkeypatch.setattr(graph_mod, name, _stub(name.replace("_node", ""), calls))
     monkeypatch.setattr(graph_mod, "cloud_discovery_node",
@@ -66,10 +68,33 @@ def _validation_passing_after(n_repairs: int):
     return result
 
 
+class Run:
+    """One graph run with a checkpointer, so the risk gate's interrupt() can
+    pause it and a decision can resume it - what services/pipeline.py does,
+    minus Redis and the database."""
+
+    def __init__(self, job_id: str = "job-test"):
+        self.app = graph_mod.build_graph(checkpointer=InMemorySaver())
+        self.config = {"configurable": {"thread_id": job_id}}
+
+    async def start(self, **overrides) -> Dict[str, Any]:
+        state = graph_mod.build_initial_state(self.config["configurable"]["thread_id"], {})
+        state.update(overrides)
+        await self.app.ainvoke(state, self.config)
+        return await self.values()
+
+    async def resume(self, decision: Dict[str, Any], update=None) -> Dict[str, Any]:
+        await self.app.ainvoke(Command(resume=decision, update=update), self.config)
+        return await self.values()
+
+    async def values(self) -> Dict[str, Any]:
+        snap = await self.app.aget_state(self.config)
+        return {**snap.values, "_request": next(
+            (i.value for t in snap.tasks for i in (t.interrupts or ())), None)}
+
+
 async def _run(**overrides) -> Dict[str, Any]:
-    state = graph_mod.build_initial_state("job-test", {})
-    state.update(overrides)
-    return await graph_mod.build_graph().ainvoke(state)
+    return await Run().start(**overrides)
 
 
 async def test_happy_path_runs_four_agents_once(monkeypatch, calls):
@@ -185,34 +210,155 @@ async def test_drift_approval_pauses_at_the_risk_gate(monkeypatch, calls):
     monkeypatch.setattr(graph_mod, "validation_agent_node",
                         _stub("validation_agent", calls, _validation_passing_after(0)))
     monkeypatch.setattr(graph_mod, "drift_reconciliation_agent_node", _stub("drift_reconciliation_agent", calls, {
-        "pending_approval": {"reason": "drift", "findings": [{"tier": "destructive"}]},
-        "status": "AWAITING_APPROVAL",
+        "pending_approval": {"reason": "drift", "findings": [DRIFT_FINDING]},
     }))
 
     final = await _run()
 
-    # Same halt as before: nothing after drift runs, nothing is packaged.
+    # Nothing after drift runs and nothing is packaged: the run is paused.
     assert "plan_equivalence_agent" not in calls and "policy_agent" not in calls
     assert "repair_agent" not in calls
     assert "cost_agent" not in calls and "documentation_agent" not in calls
-    assert final["status"] == "AWAITING_APPROVAL"
+    assert final["_request"]["findings"] == [DRIFT_FINDING]
     assert final["current_stage"] == "awaiting_approval"
     assert final["verification_verdict"] == "NEEDS_APPROVAL"
 
 
-async def test_delivery_packages_once_a_human_approves(monkeypatch, calls):
-    state = graph_mod.build_initial_state("job-approved", {})
-    state.update({
-        "pending_approval": {"findings": [{"tier": "behavior_changing"}]},
-        "approval_decision": {"decision": "approved"},
-        "verification_verdict": "NEEDS_APPROVAL",
-    })
+DRIFT_FINDING = {"tool": "drift", "resource": "aws_vpc.main", "attribute": "cidr_block", "tier": "destructive"}
 
-    out = await graph_mod.delivery_agent(state)
 
-    assert "documentation_agent" in calls
-    assert out["current_stage"] == "complete"
-    assert "approved by a human" in out["stage_summaries"]["delivery"]
+def _drift_once(calls):
+    return _stub("drift_reconciliation_agent", calls, lambda state: {
+        "pending_approval": {"reason": "drift", "findings": [DRIFT_FINDING]}})
+
+
+async def test_approval_resumes_the_same_run_and_packages(monkeypatch, calls):
+    monkeypatch.setattr(graph_mod, "validation_agent_node",
+                        _stub("validation_agent", calls, _validation_passing_after(0)))
+    monkeypatch.setattr(graph_mod, "drift_reconciliation_agent_node", _drift_once(calls))
+    run = Run("job-approved")
+    await run.start()
+
+    final = await run.resume({"decision": "approved", "reason": "known and accepted"})
+
+    assert final["_request"] is None
+    assert final["status"] == "COMPLETE" and "documentation_agent" in calls
+    assert final["approval_decision"]["decision"] == "approved"
+    assert "approved by a human" in final["stage_summaries"]["delivery"]
+    # Discovery and generation are not redone on resume.
+    assert calls.count("cloud_discovery") == 1 and calls.count("terraform_composer") == 1
+
+
+async def test_rejection_writes_the_audit_trail_only(monkeypatch, calls):
+    monkeypatch.setattr(graph_mod, "validation_agent_node",
+                        _stub("validation_agent", calls, _validation_passing_after(0)))
+    monkeypatch.setattr(graph_mod, "drift_reconciliation_agent_node", _drift_once(calls))
+    run = Run("job-rejected")
+    await run.start()
+
+    final = await run.resume({"decision": "rejected", "reason": "not ours"})
+
+    assert final["status"] == "REJECTED"
+    assert "documentation_agent" in calls and "cost_agent" not in calls
+    assert final["approval_decision"]["reason"] == "not ours"
+
+
+REVIEW_CLASSIFICATION = {"classifications": [
+    {"resource_id": "vpc-1", "resource_type": "aws_vpc", "category": "unmanaged", "reason": [],
+     "recommended_action": "import", "decision": "manage", "evidence": {}},
+    {"resource_id": "role-1", "resource_type": "aws_iam_role", "category": "unmanaged", "reason": ["IAM"],
+     "recommended_action": "manual_review", "decision": "review", "evidence": {"rule": "iam_requires_review"}},
+], "summary": {}, "decisions": {}}
+
+
+async def test_review_resources_pause_and_a_manage_decision_regenerates(monkeypatch, calls):
+    monkeypatch.setattr(graph_mod, "validation_agent_node",
+                        _stub("validation_agent", calls, _validation_passing_after(0)))
+    monkeypatch.setattr(graph_mod, "classification_agent_node",
+                        _stub("classification_agent", calls, {"classification_results": REVIEW_CLASSIFICATION}))
+    run = Run("job-review")
+    paused = await run.start()
+    assert [r["resource_id"] for r in paused["_request"]["review_resources"]] == ["role-1"]
+    assert paused["_request"]["review_resources"][0]["choices"] == ["manage", "reference", "exclude"]
+
+    final = await run.resume({"decision": "approved", "resource_decisions": {"role-1": "manage"}})
+
+    # Back through IaC Engineering and Verification with the new decision, then packaged.
+    assert calls.count("terraform_composer") == 2 and calls.count("validation_agent") == 2
+    assert calls.count("cloud_discovery") == 1
+    role = next(c for c in final["classification_results"]["classifications"] if c["resource_id"] == "role-1")
+    assert role["decision"] == "manage" and role["evidence"]["rule"] == "human_decision"
+    assert final["status"] == "COMPLETE" and final["_request"] is None
+    assert "regenerated after human Review decisions" in final["stage_summaries"]["iac_engineering"]
+
+
+async def test_exclude_decision_packages_without_regenerating(monkeypatch, calls):
+    monkeypatch.setattr(graph_mod, "validation_agent_node",
+                        _stub("validation_agent", calls, _validation_passing_after(0)))
+    monkeypatch.setattr(graph_mod, "classification_agent_node",
+                        _stub("classification_agent", calls, {"classification_results": REVIEW_CLASSIFICATION}))
+    run = Run("job-exclude")
+    await run.start()
+
+    final = await run.resume({"decision": "approved", "resource_decisions": {"role-1": "exclude"}})
+
+    assert calls.count("terraform_composer") == 1
+    assert final["status"] == "COMPLETE"
+    assert final["classification_results"]["decisions"]["exclude"] == 1
+
+
+async def test_approved_findings_are_not_asked_about_again(monkeypatch, calls):
+    # The same drift finding shows up again on the re-verification after a
+    # Review decision; the human already approved it, so the run doesn't stop.
+    monkeypatch.setattr(graph_mod, "validation_agent_node",
+                        _stub("validation_agent", calls, _validation_passing_after(0)))
+    monkeypatch.setattr(graph_mod, "classification_agent_node",
+                        _stub("classification_agent", calls, {"classification_results": REVIEW_CLASSIFICATION}))
+    monkeypatch.setattr(graph_mod, "drift_reconciliation_agent_node", _stub(
+        "drift_reconciliation_agent", calls, lambda state: {"pending_approval": {
+            "findings": ((state.get("pending_approval") or {}).get("findings") or []) + [DRIFT_FINDING]}}))
+    run = Run("job-once")
+    paused = await run.start()
+    assert paused["_request"]["findings"] == [DRIFT_FINDING]
+
+    final = await run.resume({"decision": "approved", "resource_decisions": {"role-1": "reference"}})
+
+    assert final["_request"] is None and final["status"] == "COMPLETE"
+    assert final["pending_approval"]["findings"] == [DRIFT_FINDING]  # kept once, for the audit trail
+    # Pass 1 stopped at the unapproved finding; pass 2 wasn't cut short by the approved one.
+    assert calls.count("drift_reconciliation_agent") == 2 and calls.count("policy_agent") == 1
+
+
+async def test_resume_without_credentials_is_incomplete_when_live_checks_ran(monkeypatch, calls):
+    monkeypatch.setattr(graph_mod, "validation_agent_node",
+                        _stub("validation_agent", calls, _validation_passing_after(0)))
+    monkeypatch.setattr(graph_mod, "classification_agent_node",
+                        _stub("classification_agent", calls, {"classification_results": REVIEW_CLASSIFICATION}))
+    monkeypatch.setattr(graph_mod, "drift_reconciliation_agent_node", _stub(
+        "drift_reconciliation_agent", calls, {"drift_results": {"skipped": False, "resources_checked": 1}}))
+    run = Run("job-nocreds")
+    await run.start()
+
+    final = await run.resume({"decision": "approved", "resource_decisions": {"role-1": "manage"}})
+    assert final["verification_verdict"] == "INCOMPLETE"
+    assert any("without AWS credentials" in r for r in final["verification_iterations"][-1]["incomplete_reasons"])
+
+
+async def test_resume_with_resupplied_credentials_redoes_live_checks(monkeypatch, calls):
+    monkeypatch.setattr(graph_mod, "validation_agent_node",
+                        _stub("validation_agent", calls, _validation_passing_after(0)))
+    monkeypatch.setattr(graph_mod, "classification_agent_node",
+                        _stub("classification_agent", calls, {"classification_results": REVIEW_CLASSIFICATION}))
+    monkeypatch.setattr(graph_mod, "drift_reconciliation_agent_node", _stub(
+        "drift_reconciliation_agent", calls, {"drift_results": {"skipped": False, "resources_checked": 1}}))
+    run = Run("job-creds")
+    await run.start()
+
+    final = await run.resume(
+        {"decision": "approved", "resource_decisions": {"role-1": "manage"}},
+        update={"aws_credentials": {"access_key": "AKIA", "secret_key": "s"}},
+    )
+    assert final["verification_verdict"] == "PASS"
 
 
 async def test_heartbeat_logs_while_a_step_is_slow(monkeypatch):
@@ -246,7 +392,9 @@ async def test_callers_that_omit_new_state_keys_still_work(monkeypatch, calls):
                 "verification_verdict", "completed_stages", "stage_summaries", "current_stage"):
         state.pop(key)
 
-    final = await graph_mod.build_graph().ainvoke(state)
+    run = Run("job-legacy")
+    await run.app.ainvoke(state, run.config)
+    final = await run.values()
 
     assert final["status"] == "COMPLETE"
     assert calls.count("repair_agent") == 1

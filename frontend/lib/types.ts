@@ -198,10 +198,96 @@ export interface PendingApproval {
   findings: PendingApprovalFinding[];
 }
 
+export type HumanChoice = 'manage' | 'reference' | 'exclude';
+
 export interface ApprovalDecision {
   decision: 'approved' | 'rejected';
   reason?: string | null;
   decided_at: string;
+  resource_decisions?: Record<string, HumanChoice>;
+}
+
+// What the Delivery & Approval Agent's risk gate is waiting on - backend/agents/graph.py::approval_request
+export interface ReviewResource {
+  resource_id: string;
+  resource_type: string;
+  category?: string | null;
+  reasons: string[];
+  evidence: Record<string, unknown>;
+  choices: HumanChoice[];
+}
+
+export interface ApprovalRequest {
+  findings: PendingApprovalFinding[];
+  review_resources: ReviewResource[];
+  verdict?: VerificationVerdict | null;
+}
+
+// backend/tools/scores.py - kept separate on purpose
+export interface MigrationSafety {
+  score: number | null;
+  status: 'SAFE' | 'CHANGES' | 'DESTRUCTIVE' | 'UNVERIFIED';
+  basis: 'plan' | 'drift' | 'none';
+  reason: string;
+  resources_managed: number;
+  no_op?: number;
+  changing_resources: string[];
+  destroy_or_replace: number;
+  imported?: number;
+  config_mismatches?: number | null;
+}
+
+export interface SecurityPosture {
+  score: number | null;
+  rating: 'GOOD' | 'FAIR' | 'POOR' | 'UNKNOWN';
+  complete: boolean;
+  scanners_run: string[];
+  scanners_missing: string[];
+  scanners_failed: Record<string, string>;
+  counts: { critical: number; high: number; medium: number; low: number };
+  total_findings: number;
+  reason: string;
+}
+
+// backend/agents/cost_agent.py - only estimated for the Hardening proposal
+export interface CostResults {
+  skipped?: boolean;
+  reason?: string;
+  tool_skipped?: boolean;
+  currency?: string;
+  baseline_monthly_cost?: number | null;
+  hardened_monthly_cost?: number | null;
+  monthly_delta?: number | null;
+}
+
+// backend/tools/hardening.py
+export interface HardeningChange {
+  kind: string;
+  resource: string;
+  file: string;
+  title: string;
+  explanation: string;
+  impact: 'safe' | 'behavior_changing';
+  risk: string;
+  findings: string[];
+}
+
+export interface HardeningRecommendation {
+  tool?: string;
+  rule_id?: string;
+  severity?: string;
+  resource?: string;
+  description?: string;
+  reason: string;
+}
+
+export interface Hardening {
+  files?: Record<string, string>;
+  changes?: HardeningChange[];
+  recommendations?: HardeningRecommendation[];
+  validated?: boolean | null;
+  rejected_reason?: string | null;
+  cost?: CostResults;
 }
 
 export interface PlanEquivalenceResult {
@@ -272,7 +358,12 @@ export interface JobResults {
   plan_equivalence_results?: PlanEquivalenceResult;
   security_results: SecurityReport;
   pending_approval?: PendingApproval | null;
+  approval_request?: ApprovalRequest | null;
   approval_decision?: ApprovalDecision | null;
+  migration_safety?: MigrationSafety | null;
+  security_posture?: SecurityPosture | null;
+  hardening?: Hardening;
+  cost_results?: CostResults;
   github_pr?: GithubPrInfo | null;
   github_wave_prs?: Record<string, GithubPrInfo>;
   zip_available: boolean;

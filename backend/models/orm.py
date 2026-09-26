@@ -1,6 +1,6 @@
 """SQLAlchemy ORM model for persisted scan job records (audit trail)."""
 
-from sqlalchemy import Boolean, Column, Integer, String
+from sqlalchemy import Boolean, Column, Integer, String, Text
 
 from services.database import Base
 
@@ -29,3 +29,13 @@ class JobRecord(Base):
     github_wave_prs_summary = Column(String, nullable=True)  # JSON-encoded {wave_number: {pr_url, pr_number, branch}}
     created_at = Column(String, nullable=False)
     completed_at = Column(String, nullable=True)
+
+
+class GraphCheckpoint(Base):
+    """A job's LangGraph thread while it is paused at the approval gate
+    (services/checkpoints.py). Credentials are removed before it is written."""
+    __tablename__ = "graph_checkpoints"
+
+    job_id = Column(String, primary_key=True)
+    data = Column(Text, nullable=False)
+    updated_at = Column(String, nullable=False)

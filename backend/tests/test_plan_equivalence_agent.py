@@ -82,8 +82,8 @@ async def test_blocking_plan_halts_pipeline_for_approval():
     assert result["pending_approval"]["reason"] == "plan_equivalence_requires_human_approval"
     finding = result["pending_approval"]["findings"][0]
     assert finding["resource"] == "aws_db_instance.mydb"
-    assert finding["tier"] == "behavior_changing"  # replace, not destroy
-    assert result["repair_risk_tier"] == "behavior_changing"
+    assert finding["tier"] == "destructive"  # replace = destroy + recreate
+    assert result["repair_risk_tier"] == "destructive"
 
 
 @pytest.mark.asyncio

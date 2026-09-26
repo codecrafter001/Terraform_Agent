@@ -23,6 +23,7 @@ import { fetchJobResults, fetchJobStatus } from "@/lib/api";
 import PendingApprovalPanel from "./PendingApprovalPanel";
 import {
   ApprovalDecision,
+  ApprovalRequest,
   JobProgress,
   PendingApproval,
   PlanEquivalenceResult,
@@ -135,6 +136,7 @@ export default function ScanProgress({ jobId }: ScanProgressProps) {
   const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
   const [planEquivalenceResults, setPlanEquivalenceResults] = useState<PlanEquivalenceResult | null>(null);
   const [approvalDecision, setApprovalDecision] = useState<ApprovalDecision | null>(null);
+  const [approvalRequest, setApprovalRequest] = useState<ApprovalRequest | null>(null);
   const logContainerRef = useRef<HTMLDivElement>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
   const stickToBottom = useRef(true);
@@ -151,6 +153,7 @@ export default function ScanProgress({ jobId }: ScanProgressProps) {
       setPendingApproval(results.pending_approval ?? null);
       setPlanEquivalenceResults(results.plan_equivalence_results ?? null);
       setApprovalDecision(results.approval_decision ?? null);
+      setApprovalRequest(results.approval_request ?? null);
       return true;
     } catch {
       return false;
@@ -301,11 +304,12 @@ export default function ScanProgress({ jobId }: ScanProgressProps) {
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-      {(awaiting || rejected || (complete && approvalDecision)) && pendingApproval && (
+      {(awaiting || rejected || (complete && approvalDecision)) && (pendingApproval || approvalRequest) && (
         <div className="lg:col-span-12">
           <PendingApprovalPanel
             jobId={jobId}
             pendingApproval={pendingApproval}
+            approvalRequest={approvalRequest}
             planEquivalenceResults={planEquivalenceResults}
             approvalDecision={approvalDecision}
             mode={jobStatus === "AWAITING_APPROVAL" ? "actionable" : "readonly"}
