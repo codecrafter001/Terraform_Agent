@@ -2,14 +2,17 @@
  * API client utilities for TerraAgent frontend
  */
 
-import { JobProgress, JobResults } from "./types";
+import { IntentAnalysisResult, JobProgress, JobResults, OperationType } from "./types";
 
 export interface ScanRequestPayload {
   aws_access_key: string;
   aws_secret_key: string;
   aws_session_token?: string;
   region: string;
-  operation: "generate" | "scan" | "explain" | "validate";
+  environment?: string;
+  user_request?: string;
+  analyzed_intent?: IntentAnalysisResult;
+  operation: OperationType;
   resource_filters: string[];
   terraform_binary?: "terraform" | "tofu";
   use_resource_explorer?: boolean;
@@ -177,6 +180,34 @@ export async function createPullRequest(jobId: string, payload: CreatePullReques
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: "Failed to create pull request" }));
     throw new Error(err.detail || "Pull request creation failed");
+  }
+
+  return await res.json();
+}
+
+export async function analyzeIntent(payload: {
+  user_request: string;
+  region?: string;
+  environment?: string;
+  resource_filters?: string[];
+}): Promise<IntentAnalysisResult> {
+  const res = await fetch(`${API_BASE}/scan/analyze-intent`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...authHeaders(),
+    },
+    body: JSON.stringify({
+      user_request: payload.user_request,
+      region: payload.region || "us-east-1",
+      environment: payload.environment || "production",
+      resource_filters: payload.resource_filters || ["EC2", "VPC", "S3", "RDS", "IAM", "SG"],
+    }),
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: "Intent analysis request failed" }));
+    throw new Error(err.detail || "Intent analysis failed");
   }
 
   return await res.json();

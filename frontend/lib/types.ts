@@ -1,12 +1,42 @@
-export type OperationType = 'generate' | 'scan' | 'explain' | 'validate';
+export type OperationType = 'generate' | 'scan' | 'modify' | 'explain' | 'fix' | 'validate';
 
 export type JobStatus = 'PENDING' | 'RUNNING' | 'COMPLETE' | 'FAILED' | 'AWAITING_APPROVAL' | 'REJECTED';
+
+export interface IntentTargetResource {
+  resource_type: string;
+  resource_name: string;
+  category: string;
+}
+
+export interface IntentRequestedChange {
+  resource: string;
+  attribute: string;
+  current_value: string;
+  target_value: string;
+  action: string;
+}
+
+export interface IntentAnalysisResult {
+  operation: OperationType | string;
+  operation_label: string;
+  target_resources: IntentTargetResource[];
+  requested_changes: IntentRequestedChange[];
+  confidence_score: number;
+  summary: string;
+  environment: string;
+  region: string;
+  risk_level: 'low' | 'medium' | 'high';
+  suggested_filters: string[];
+}
 
 export interface ScanRequest {
   aws_access_key: string;
   aws_secret_key: string;
   aws_session_token?: string;
   region: string;
+  environment?: string;
+  user_request?: string;
+  analyzed_intent?: IntentAnalysisResult;
   operation: OperationType;
   resource_filters: string[];
 }

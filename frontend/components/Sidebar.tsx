@@ -19,7 +19,7 @@ interface NavItem {
 
 const NAV_ITEMS: NavItem[] = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard, matches: ["/results", "/scan/"] },
-  { href: "/scan", label: "New Scan", icon: PlusCircle },
+  { href: "/scan", label: "New Request", icon: PlusCircle },
 ];
 
 function isActive(pathname: string, item: NavItem): boolean {

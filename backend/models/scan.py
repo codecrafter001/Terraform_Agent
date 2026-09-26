@@ -1,7 +1,7 @@
 """Pydantic Models for Scan requests, responses, and status definitions."""
 
 from enum import Enum
-from typing import List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, SecretStr
 
@@ -9,7 +9,9 @@ from pydantic import BaseModel, Field, SecretStr
 class OperationType(str, Enum):
     GENERATE = "generate"
     SCAN = "scan"
+    MODIFY = "modify"
     EXPLAIN = "explain"
+    FIX = "fix"
     VALIDATE = "validate"
 
 
@@ -26,11 +28,37 @@ class JobStatus(str, Enum):
     REJECTED = "REJECTED"
 
 
+class IntentAnalysisRequest(BaseModel):
+    user_request: str = Field(..., description="DevOps natural-language infrastructure request")
+    region: str = Field(default="us-east-1", description="Target AWS region")
+    environment: str = Field(default="production", description="Target environment (e.g. production, staging, dev)")
+    resource_filters: List[str] = Field(
+        default_factory=lambda: ["EC2", "VPC", "S3", "RDS", "IAM", "SG"],
+        description="Filter specific resource categories"
+    )
+
+
+class IntentAnalysisResponse(BaseModel):
+    operation: str
+    operation_label: str
+    target_resources: List[Dict[str, Any]] = []
+    requested_changes: List[Dict[str, Any]] = []
+    confidence_score: float = 0.95
+    summary: str
+    environment: str
+    region: str
+    risk_level: str = "low"
+    suggested_filters: List[str] = []
+
+
 class ScanRequest(BaseModel):
     aws_access_key: SecretStr = Field(..., description="AWS Access Key ID (never logged or exposed)")
     aws_secret_key: SecretStr = Field(..., description="AWS Secret Access Key (never logged or exposed)")
     aws_session_token: Optional[SecretStr] = Field(None, description="Optional AWS Session Token for STS assumed roles")
     region: str = Field(default="us-east-1", description="Target AWS region, or \"auto\" to let Resource Explorer pick")
+    environment: Optional[str] = Field(default="production", description="Target environment name")
+    user_request: Optional[str] = Field(None, description="Optional natural-language DevOps change or generation request")
+    analyzed_intent: Optional[Dict[str, Any]] = Field(None, description="Pre-analyzed structured intent confirmed by user")
     use_resource_explorer: bool = Field(
         default=True,
         description="Query AWS Resource Explorer (read-only) for an all-region inventory before discovery",
@@ -76,7 +104,9 @@ class ScanRequest(BaseModel):
                 "aws_access_key": "AKIAXXXXXXXXXXXXXXXX",
                 "aws_secret_key": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
                 "region": "us-east-1",
-                "operation": "generate",
+                "environment": "production",
+                "user_request": "Increase EC2 web server from t2.micro to t2.medium and scale Fargate from 2 to 4 tasks.",
+                "operation": "modify",
                 "resource_filters": ["EC2", "VPC", "S3", "RDS", "IAM", "SG"]
             }
         }

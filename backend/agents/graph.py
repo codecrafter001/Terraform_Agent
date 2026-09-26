@@ -68,8 +68,11 @@ class TerraAgentState(TypedDict):
     created_at: str  # set once at job creation - must survive every incremental
                       # progress publish in _timed() below, since GET /status
                       # falls back to "now" whenever it's missing
-    operation: Literal["generate", "scan", "explain", "validate"]
+    operation: Literal["generate", "scan", "explain", "validate", "modify", "fix"]
     region: str
+    environment: Optional[str]
+    user_request: Optional[str]
+    analyzed_intent: Optional[dict]
     resource_filters: List[str]
     aws_credentials: dict  # Secret values (Never printed/logged)
     aws_endpoint_url: Optional[str]  # LocalStack override for integration tests only
@@ -135,6 +138,9 @@ def build_initial_state(job_id: str, request: Dict[str, Any]) -> Dict[str, Any]:
         "created_at": request.get("created_at", datetime.utcnow().isoformat()),
         "operation": request.get("operation", "generate"),
         "region": request.get("region", "us-east-1"),
+        "environment": request.get("environment", "production"),
+        "user_request": request.get("user_request"),
+        "analyzed_intent": request.get("analyzed_intent"),
         "resource_filters": request.get("resource_filters", ["EC2", "VPC", "S3", "RDS", "IAM", "SG"]),
         "aws_credentials": {
             "access_key": request.get("aws_access_key"),

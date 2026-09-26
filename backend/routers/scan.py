@@ -8,13 +8,25 @@ from typing import Any, Dict, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sse_starlette.sse import EventSourceResponse
 
+import logging
 from models.job import JobDecisionResponse, JobProgress, JobResults, PullRequestResponse
-from models.scan import ApprovalActionRequest, CreatePullRequestRequest, JobStatus, ScanRequest, ScanResponse
+from models.scan import (
+    ApprovalActionRequest,
+    CreatePullRequestRequest,
+    IntentAnalysisRequest,
+    IntentAnalysisResponse,
+    JobStatus,
+    ScanRequest,
+    ScanResponse,
+)
 from services.auth import require_api_key
 from services.celery_app import run_scan_task
 from services.database import create_job_record, mark_job_complete, mark_job_failed, set_github_pr, set_wave_pr
 from services.rate_limiter import limiter
 from services.redis_client import redis_service
+from tools.intent_analyzer import analyze_user_intent, parse_deterministic_intent
+
+logger = logging.getLogger("terraagent.routers.scan")
 
 router = APIRouter(prefix="/scan", tags=["scan"], dependencies=[Depends(require_api_key)])
 
@@ -32,6 +44,29 @@ _FULL_AGENT_PIPELINE = (
     "adoption_planning_agent", "terraform_composer", "validation_agent", "drift_reconciliation_agent",
     "plan_equivalence_agent", "policy_agent", "repair_agent", "cost_agent", "documentation_agent"
 )
+
+
+@router.post("/analyze-intent", response_model=IntentAnalysisResponse)
+@limiter.limit("60/minute")
+async def analyze_intent_endpoint(request: Request, intent_req: IntentAnalysisRequest):
+    """Analyzes a DevOps natural-language request and extracts target resources, operation, and requested changes."""
+    try:
+        result = await analyze_user_intent(
+            user_request=intent_req.user_request,
+            region=intent_req.region,
+            environment=intent_req.environment,
+            resource_filters=intent_req.resource_filters,
+        )
+        return IntentAnalysisResponse(**result)
+    except Exception as e:
+        logger.warning(f"Intent analysis error ({e}), using fallback parser")
+        fallback = parse_deterministic_intent(
+            user_request=intent_req.user_request,
+            region=intent_req.region,
+            environment=intent_req.environment,
+            resource_filters=intent_req.resource_filters,
+        )
+        return IntentAnalysisResponse(**fallback)
 
 
 @router.post("", response_model=ScanResponse, status_code=status.HTTP_202_ACCEPTED)
@@ -52,6 +87,9 @@ async def start_scan(request: Request, scan_request: ScanRequest):
         "aws_secret_key": scan_request.aws_secret_key.get_secret_value(),
         "aws_session_token": scan_request.aws_session_token.get_secret_value() if scan_request.aws_session_token else None,
         "region": scan_request.region,
+        "environment": scan_request.environment or "production",
+        "user_request": scan_request.user_request,
+        "analyzed_intent": scan_request.analyzed_intent,
         "operation": scan_request.operation.value,
         "resource_filters": scan_request.resource_filters,
         "role_arn": scan_request.role_arn,
@@ -70,7 +108,10 @@ async def start_scan(request: Request, scan_request: ScanRequest):
         "progress_percentage": 5,
         "current_agent": "intent_router",
         "completed_agents": [],
-        "created_at": created_at
+        "created_at": created_at,
+        "environment": scan_request.environment or "production",
+        "user_request": scan_request.user_request,
+        "analyzed_intent": scan_request.analyzed_intent,
     }
     await redis_service.set_job_state(job_id, initial_progress)
     create_job_record(job_id, scan_request.operation.value, scan_request.region, created_at)
@@ -86,7 +127,6 @@ async def start_scan(request: Request, scan_request: ScanRequest):
 
     if not dispatched:
         asyncio.create_task(run_scan_inline(job_id, request_dict))
-
 
     return ScanResponse(
         job_id=job_id,
