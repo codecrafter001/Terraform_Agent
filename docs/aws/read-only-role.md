@@ -32,7 +32,7 @@ after you review it.
 | Step | Calls |
 |---|---|
 | Resource Explorer (optional) | `resource-explorer-2:ListIndexes`, `Search` |
-| Discovery | `ec2:Describe*` (VPCs + DNS attributes, subnets, route tables, security groups, instances), `s3:ListAllMyBuckets`, `GetBucketLocation`, `GetBucketTagging`, `GetBucketPublicAccessBlock`, `GetEncryptionConfiguration`, `rds:DescribeDBInstances`, `iam:ListRoles`, `ListAttachedRolePolicies` |
+| Discovery | `ec2:Describe*` (VPCs, subnets, route tables, security groups, instances, internet gateways, NAT gateways), `elasticloadbalancing:Describe*`, `s3:ListAllMyBuckets`, `GetBucketLocation`, `GetBucketTagging`, `GetBucketPublicAccessBlock`, `GetEncryptionConfiguration`, `rds:DescribeDBInstances`, `dynamodb:ListTables`, `DescribeTable`, `ListTagsOfResource`, `kms:ListKeys`, `DescribeKey`, `GetKeyRotationStatus`, `ListResourceTags`, `sqs:ListQueues`, `GetQueueAttributes`, `ListQueueTags`, `sns:ListTopics`, `GetTopicAttributes`, `ListTagsForResource`, `iam:ListRoles`, `ListAttachedRolePolicies` |
 | Plan equivalence / drift (opt-in) | the provider's refresh reads for the resources in the plan |
 
 Throttled or failed calls are retried with adaptive backoff. A call that still

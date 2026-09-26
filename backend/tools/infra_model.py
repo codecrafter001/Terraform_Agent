@@ -46,6 +46,14 @@ SOURCE_API: Dict[str, str] = {
     "aws_s3_bucket": "s3:ListBuckets",
     "aws_db_instance": "rds:DescribeDBInstances",
     "aws_iam_role": "iam:ListRoles",
+    "aws_internet_gateway": "ec2:DescribeInternetGateways",
+    "aws_nat_gateway": "ec2:DescribeNatGateways",
+    "aws_lb": "elasticloadbalancing:DescribeLoadBalancers",
+    "aws_alb": "elasticloadbalancing:DescribeLoadBalancers",
+    "aws_dynamodb_table": "dynamodb:ListTables",
+    "aws_kms_key": "kms:ListKeys",
+    "aws_sqs_queue": "sqs:ListQueues",
+    "aws_sns_topic": "sns:ListTopics",
 }
 
 _NON_ATTRIBUTE_KEYS = {"id", "name", "resource_type", "tags", "arn", "region"}

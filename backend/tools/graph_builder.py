@@ -113,6 +113,18 @@ class DependencyGraphBuilder:
                     evidence=f"explicit AWS API relationship: {r_type} '{src_id}' references subnet_id '{subnet_id}'"
                 )
 
+            # Subnets list (e.g. aws_lb load balancers)
+            subnets = r.get("subnets") if isinstance(r.get("subnets"), list) else []
+            for s_id in subnets:
+                if isinstance(s_id, str) and s_id:
+                    add_edge_if_target_exists(
+                        s_id,
+                        src_id,
+                        relation="hosted_in",
+                        confidence=1.0,
+                        evidence=f"explicit AWS API relationship: {r_type} '{src_id}' references subnet '{s_id}'"
+                    )
+
             # Security group dependencies - direct AWS ID references (Highest confidence: 1.0)
             sgs = r.get("security_groups") if isinstance(r.get("security_groups"), list) else []
             for sg_id in sgs:

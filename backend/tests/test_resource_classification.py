@@ -286,13 +286,13 @@ def test_classify_unsupported_resource_type():
             "tags": [],
         },
         {
-            "id": "sqs-1",
-            "resource_type": "aws_sqs_queue",
-            "name": "order-queue",
+            "id": "kinesis-1",
+            "resource_type": "aws_kinesis_stream",
+            "name": "order-stream",
             "tags": [],
         },
     ]
-    graph = {"nodes": [{"id": "lambda-1"}, {"id": "sqs-1"}], "links": []}
+    graph = {"nodes": [{"id": "lambda-1"}, {"id": "kinesis-1"}], "links": []}
 
     report = classify_resources(resources, graph)
 
@@ -302,6 +302,52 @@ def test_classify_unsupported_resource_type():
         # Known type we can't generate yet: Excluded from code, listed in the report.
         assert c.decision == "exclude" and c.recommended_action == "skip"
         assert any("no adoption support yet" in r for r in c.reason)
+
+
+def test_classify_default_internet_gateway():
+    # Unreferenced default IGW -> exclude
+    igw_unref = {"id": "igw-def-1", "resource_type": "aws_internet_gateway", "is_default": True}
+    report1 = classify_resources([igw_unref], {"nodes": [{"id": "igw-def-1"}], "links": []})
+    assert report1.classifications[0].decision == "exclude"
+
+    # Referenced default IGW -> reference (data source)
+    report2 = classify_resources([igw_unref], {
+        "nodes": [{"id": "igw-def-1"}, {"id": "vpc-1"}],
+        "links": [{"source": "vpc-1", "target": "igw-def-1"}]
+    })
+    assert report2.classifications[0].decision == "reference"
+
+
+def test_classify_kms_keys():
+    # AWS managed KMS key -> exclude
+    kms_aws = {"id": "key-aws", "resource_type": "aws_kms_key", "key_manager": "AWS"}
+    # Customer KMS key pending deletion -> exclude
+    kms_del = {"id": "key-del", "resource_type": "aws_kms_key", "key_manager": "CUSTOMER", "key_state": "PendingDeletion"}
+    # Active Customer KMS key -> manage (when connected)
+    kms_ok = {"id": "key-ok", "resource_type": "aws_kms_key", "key_manager": "CUSTOMER", "key_state": "Enabled"}
+
+    graph = {
+        "nodes": [{"id": "key-aws"}, {"id": "key-del"}, {"id": "key-ok"}, {"id": "s3-1"}],
+        "links": [{"source": "key-ok", "target": "s3-1"}]
+    }
+    report = classify_resources([kms_aws, kms_del, kms_ok], graph)
+    c_map = {c.resource_id: c for c in report.classifications}
+    assert c_map["key-aws"].decision == "exclude"
+    assert c_map["key-del"].decision == "exclude"
+    assert c_map["key-ok"].decision == "manage"
+
+
+def test_classify_dynamodb_with_indexes():
+    tbl_indexed = {"id": "tbl-gsi", "resource_type": "aws_dynamodb_table", "has_indexes": True}
+    tbl_plain = {"id": "tbl-plain", "resource_type": "aws_dynamodb_table", "has_indexes": False}
+    graph = {
+        "nodes": [{"id": "tbl-gsi"}, {"id": "tbl-plain"}, {"id": "app-1"}],
+        "links": [{"source": "tbl-gsi", "target": "app-1"}, {"source": "tbl-plain", "target": "app-1"}]
+    }
+    report = classify_resources([tbl_indexed, tbl_plain], graph)
+    c_map = {c.resource_id: c for c in report.classifications}
+    assert c_map["tbl-gsi"].decision == "review"
+    assert c_map["tbl-plain"].decision == "manage"
 
 
 def test_classify_missing_metadata():

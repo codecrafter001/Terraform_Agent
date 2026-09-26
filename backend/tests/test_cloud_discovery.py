@@ -150,22 +150,44 @@ def test_scanner_only_ever_calls_read_only_apis():
     a Describe*/Get*/List* call. Recorded from boto's own before-call event."""
     ec2 = boto3.client("ec2", region_name="us-east-1")
     vpc = ec2.create_vpc(CidrBlock="10.0.0.0/16")["Vpc"]["VpcId"]
-    ec2.create_subnet(VpcId=vpc, CidrBlock="10.0.1.0/24")
-    ec2.create_security_group(GroupName="web", Description="web", VpcId=vpc)
+    sub1 = ec2.create_subnet(VpcId=vpc, CidrBlock="10.0.1.0/24")["Subnet"]["SubnetId"]
+    sub2 = ec2.create_subnet(VpcId=vpc, CidrBlock="10.0.2.0/24")["Subnet"]["SubnetId"]
+    sg = ec2.create_security_group(GroupName="web", Description="web", VpcId=vpc)["GroupId"]
+    igw = ec2.create_internet_gateway()["InternetGateway"]["InternetGatewayId"]
+    ec2.attach_internet_gateway(InternetGatewayId=igw, VpcId=vpc)
+    eip = ec2.allocate_address(Domain="vpc")["AllocationId"]
+    ec2.create_nat_gateway(SubnetId=sub1, AllocationId=eip)
+
     boto3.client("s3", region_name="us-east-1").create_bucket(Bucket="read-only-check")
     boto3.client("iam", region_name="us-east-1").create_role(
         RoleName="r", AssumeRolePolicyDocument=json.dumps({"Version": "2012-10-17", "Statement": []}))
+    boto3.client("elbv2", region_name="us-east-1").create_load_balancer(
+        Name="test-alb", Subnets=[sub1, sub2], SecurityGroups=[sg])
+    boto3.client("dynamodb", region_name="us-east-1").create_table(
+        TableName="test-table",
+        KeySchema=[{"AttributeName": "id", "KeyType": "HASH"}],
+        AttributeDefinitions=[{"AttributeName": "id", "AttributeType": "S"}],
+        BillingMode="PAY_PER_REQUEST",
+    )
+    boto3.client("kms", region_name="us-east-1").create_key(Description="test-key")
+    boto3.client("sqs", region_name="us-east-1").create_queue(QueueName="test-queue")
+    boto3.client("sns", region_name="us-east-1").create_topic(Name="test-topic")
 
     scanner = AWSScanner(access_key=FAKE_ACCESS_KEY, secret_key=FAKE_SECRET_KEY, region="us-east-1")
     operations = []
     scanner.session.events.register("before-call", lambda model, **kw: operations.append(model.name))
 
-    resources = scanner.scan_all(filters=["VPC", "SG", "EC2", "S3", "RDS", "IAM"])
+    resources = scanner.scan_all(filters=["VPC", "SG", "EC2", "S3", "RDS", "IAM", "ELB", "DYNAMODB", "KMS", "SQS", "SNS"])
 
     assert resources and operations
     offending = sorted({op for op in operations if not op.startswith(READ_ONLY_PREFIXES)})
     assert offending == [], f"non read-only AWS calls: {offending}"
     assert scanner.report()["complete"] is True
+    # Verify all 15 resource types are represented
+    types_found = {r["resource_type"] for r in resources}
+    assert {"aws_vpc", "aws_subnet", "aws_internet_gateway", "aws_nat_gateway",
+            "aws_security_group", "aws_s3_bucket", "aws_iam_role", "aws_lb",
+            "aws_dynamodb_table", "aws_kms_key", "aws_sqs_queue", "aws_sns_topic"} <= types_found
 
 
 def test_one_failing_service_does_not_sink_the_others(monkeypatch):
@@ -182,4 +204,4 @@ def test_one_failing_service_does_not_sink_the_others(monkeypatch):
 
     assert results == [{"id": "subnet-1"}]
     report = scanner.report()
-    assert report["complete"] is False and report["counts"] == {"vpcs": 0, "subnets": 1, "route_tables": 0}
+    assert report["complete"] is False and report["counts"]["vpcs"] == 0 and report["counts"]["subnets"] == 1

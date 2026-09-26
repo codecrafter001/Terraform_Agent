@@ -387,7 +387,7 @@ project_name = "Cloud-Modernization"
         elif r_type == "aws_nat_gateway":
             if not res.get("subnet_id"):
                 missing("subnet_id", "NAT Gateway discovery record is missing 'subnet_id'.")
-            if not res.get("allocation_id") and res.get("connectivity_type", "public") == "public":
+            if not res.get("allocation_id") and (res.get("connectivity_type") or "public") == "public":
                 missing("allocation_id", "Public NAT Gateway discovery record is missing its Elastic IP 'allocation_id'.")
             if unresolved:
                 return "", [], unresolved, warnings
@@ -441,13 +441,27 @@ project_name = "Cloud-Modernization"
             return hcl, outputs, [], warnings
 
         elif r_type in ("aws_lb", "aws_alb"):
-            body = [f"  name               = {hcl_str(res.get('name') or clean_name)}",
-                    f"  internal           = {hcl_bool(res.get('scheme') == 'internal')}",
-                    f"  load_balancer_type = {hcl_str(res.get('load_balancer_type') or 'application')}"]
+            # name, internal and load_balancer_type all force a new load balancer.
+            for attr in ("name", "scheme", "load_balancer_type"):
+                if not res.get(attr):
+                    missing(attr, f"Load balancer discovery record is missing '{attr}' (changing it forces replacement).")
+            if unresolved:
+                return "", [], unresolved, warnings
+            body = [f"  name               = {hcl_str(res['name'])}",
+                    f"  internal           = {hcl_bool(res['scheme'] == 'internal')}",
+                    f"  load_balancer_type = {hcl_str(res['load_balancer_type'])}"]
             if res.get("subnets"):
                 body.append(f"  subnets = [{', '.join(ref(s) for s in res['subnets'])}]")
             if res.get("security_groups"):
                 body.append(f"  security_groups = [{', '.join(ref(s) for s in res['security_groups'])}]")
+            # Arguments whose provider default may differ from the live value
+            # (read with DescribeLoadBalancerAttributes; left out when unread).
+            for attr in ("enable_deletion_protection", "enable_http2", "drop_invalid_header_fields",
+                         "enable_cross_zone_load_balancing"):
+                if isinstance(res.get(attr), bool):
+                    body.append(f"  {attr} = {hcl_bool(res[attr])}")
+            if isinstance(res.get("idle_timeout"), int):
+                body.append(f"  idle_timeout = {int(res['idle_timeout'])}")
             hcl = resource(body).replace(f'resource "{r_type}"', 'resource "aws_lb"', 1)
             outputs.append(f'output "alb_{clean_name}_dns_name" {{\n  value       = aws_lb.{clean_name}.dns_name\n'
                            f'  description = {hcl_str("DNS name of Application Load Balancer for " + clean_name)}\n}}')
@@ -507,13 +521,39 @@ project_name = "Cloud-Modernization"
             return hcl, outputs, [], warnings
 
         elif r_type == "aws_dynamodb_table":
+            if res.get("has_indexes"):
+                missing("indexes", "DynamoDB table has secondary indexes (GSIs/LSIs) which require manual review.")
+                return "", [], unresolved, warnings
             if not res.get("hash_key") or not res.get("hash_key_type"):
                 missing("hash_key", "DynamoDB table discovery record is missing its hash key name/type.")
                 return "", [], unresolved, warnings
+            billing_mode = str(res.get("billing_mode") or "PROVISIONED")
             body = [f"  name         = {hcl_str(res.get('name') or r_id)}",
-                    f"  billing_mode = {hcl_str(res.get('billing_mode') or 'PROVISIONED')}",
-                    f"  hash_key     = {hcl_str(res['hash_key'])}",
-                    f"\n  attribute {{\n    name = {hcl_str(res['hash_key'])}\n    type = {hcl_str(res['hash_key_type'])}\n  }}"]
+                    f"  billing_mode = {hcl_str(billing_mode)}",
+                    f"  hash_key     = {hcl_str(res['hash_key'])}"]
+            if res.get("range_key"):
+                if not res.get("range_key_type"):
+                    missing("range_key", "DynamoDB table discovery record is missing its range key type.")
+                    return "", [], unresolved, warnings
+                body.append(f"  range_key    = {hcl_str(res['range_key'])}")
+            if billing_mode == "PROVISIONED":
+                if res.get("read_capacity") is not None:
+                    body.append(f"  read_capacity  = {int(res['read_capacity'])}")
+                if res.get("write_capacity") is not None:
+                    body.append(f"  write_capacity = {int(res['write_capacity'])}")
+            body.append(f"\n  attribute {{\n    name = {hcl_str(res['hash_key'])}\n    type = {hcl_str(res['hash_key_type'])}\n  }}")
+            if res.get("range_key") and res.get("range_key_type"):
+                body.append(f"\n  attribute {{\n    name = {hcl_str(res['range_key'])}\n    type = {hcl_str(res['range_key_type'])}\n  }}")
+            if res.get("stream_enabled") is True:
+                if not res.get("stream_view_type"):
+                    missing("stream_view_type", "DynamoDB stream is enabled but its view type wasn't discovered.")
+                    return "", [], unresolved, warnings
+                body.append("  stream_enabled   = true")
+                body.append(f"  stream_view_type = {hcl_str(res['stream_view_type'])}")
+            if isinstance(res.get("deletion_protection_enabled"), bool):
+                body.append(f"  deletion_protection_enabled = {hcl_bool(res['deletion_protection_enabled'])}")
+            if res.get("table_class"):
+                body.append(f"  table_class = {hcl_str(res['table_class'])}")
             hcl = resource(body)
             output(f"dynamodb_{clean_name}_arn", "arn", f"DynamoDB Table ARN for {clean_name}")
             return hcl, outputs, [], warnings
@@ -539,20 +579,66 @@ project_name = "Cloud-Modernization"
             return hcl, outputs, [], warnings
 
         elif r_type == "aws_kms_key":
+            if res.get("origin") not in (None, "AWS_KMS"):
+                missing("origin", f"KMS key origin {res.get('origin')} (imported key material or a custom key store) "
+                                  "isn't adopted as aws_kms_key.")
+                return "", [], unresolved, warnings
             body = [f"  description = {hcl_str(res['description'])}"] if res.get("description") else []
-            if isinstance(res.get("enable_key_rotation"), bool):
-                body.append(f"  enable_key_rotation = {hcl_bool(res['enable_key_rotation'])}")
+            if res.get("key_usage"):
+                body.append(f"  key_usage = {hcl_str(res['key_usage'])}")
+            if res.get("customer_master_key_spec"):
+                body.append(f"  customer_master_key_spec = {hcl_str(res['customer_master_key_spec'])}")
+            for attr in ("multi_region", "is_enabled", "enable_key_rotation"):
+                if isinstance(res.get(attr), bool):
+                    body.append(f"  {attr} = {hcl_bool(res[attr])}")
             hcl = resource(body)
             output(f"kms_{clean_name}_arn", "arn", f"KMS Key ARN for {clean_name}")
             return hcl, outputs, [], warnings
 
         elif r_type == "aws_sqs_queue":
-            hcl = resource([f"  name = {hcl_str(res.get('name') or r_id)}"])
+            body = [f"  name = {hcl_str(res.get('name') or r_id)}"]
+            if res.get("visibility_timeout_seconds") is not None:
+                body.append(f"  visibility_timeout_seconds = {int(res['visibility_timeout_seconds'])}")
+            if res.get("message_retention_seconds") is not None:
+                body.append(f"  message_retention_seconds = {int(res['message_retention_seconds'])}")
+            if res.get("delay_seconds") is not None:
+                body.append(f"  delay_seconds = {int(res['delay_seconds'])}")
+            if res.get("max_message_size") is not None:
+                body.append(f"  max_message_size = {int(res['max_message_size'])}")
+            if res.get("receive_wait_time_seconds") is not None:
+                body.append(f"  receive_wait_time_seconds = {int(res['receive_wait_time_seconds'])}")
+            if isinstance(res.get("fifo_queue"), bool):
+                body.append(f"  fifo_queue = {hcl_bool(res['fifo_queue'])}")
+            if res.get("fifo_queue") is True and isinstance(res.get("content_based_deduplication"), bool):
+                body.append(f"  content_based_deduplication = {hcl_bool(res['content_based_deduplication'])}")
+            if res.get("kms_master_key_id"):
+                body.append(f"  kms_master_key_id = {hcl_str(res['kms_master_key_id'])}")
+                if res.get("kms_data_key_reuse_period_seconds") is not None:
+                    body.append(f"  kms_data_key_reuse_period_seconds = {int(res['kms_data_key_reuse_period_seconds'])}")
+            elif isinstance(res.get("sqs_managed_sse_enabled"), bool):
+                body.append(f"  sqs_managed_sse_enabled = {hcl_bool(res['sqs_managed_sse_enabled'])}")
+            if res.get("redrive_policy"):
+                try:
+                    rd_obj = json.loads(res["redrive_policy"]) if isinstance(res["redrive_policy"], str) else res["redrive_policy"]
+                    policy = escape_template(json.dumps(rd_obj, indent=2, sort_keys=True))
+                    body.append(f"  redrive_policy = jsonencode({policy})")
+                except Exception:
+                    body.append(f"  redrive_policy = {hcl_str(res['redrive_policy'])}")
+            hcl = resource(body)
             output(f"sqs_{clean_name}_url", "url", f"SQS Queue URL for {clean_name}")
             return hcl, outputs, [], warnings
 
         elif r_type == "aws_sns_topic":
-            hcl = resource([f"  name = {hcl_str(res.get('name') or r_id)}"])
+            body = [f"  name = {hcl_str(res.get('name') or r_id)}"]
+            if res.get("display_name"):
+                body.append(f"  display_name = {hcl_str(res['display_name'])}")
+            if isinstance(res.get("fifo_topic"), bool):
+                body.append(f"  fifo_topic = {hcl_bool(res['fifo_topic'])}")
+            if res.get("fifo_topic") is True and isinstance(res.get("content_based_deduplication"), bool):
+                body.append(f"  content_based_deduplication = {hcl_bool(res['content_based_deduplication'])}")
+            if res.get("kms_master_key_id"):
+                body.append(f"  kms_master_key_id = {hcl_str(res['kms_master_key_id'])}")
+            hcl = resource(body)
             output(f"sns_{clean_name}_arn", "arn", f"SNS Topic ARN for {clean_name}")
             return hcl, outputs, [], warnings
 

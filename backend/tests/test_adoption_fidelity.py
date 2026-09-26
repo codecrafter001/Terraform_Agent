@@ -131,3 +131,64 @@ def test_wave_pr_carries_route_table_associations():
     stack = "\n".join(v for k, v in wave.items() if k != "imports.tf")
     assert 'resource "aws_route_table_association"' in stack
     assert len(import_targets(wave["imports.tf"])) == 2
+
+
+def test_dynamodb_fidelity_with_range_key_and_provisioned_capacity():
+    table = {
+        "id": "app-orders", "resource_type": "aws_dynamodb_table", "name": "app-orders",
+        "billing_mode": "PROVISIONED", "hash_key": "order_id", "hash_key_type": "S",
+        "range_key": "created_at", "range_key_type": "N",
+        "read_capacity": 10, "write_capacity": 5, "has_indexes": False,
+        "tags": [{"Key": "Environment", "Value": "prod"}]
+    }
+    files, manifest, hcl = _generate([table])
+    assert manifest.resources_generated == 1
+    assert 'billing_mode = "PROVISIONED"' in hcl
+    assert 'hash_key     = "order_id"' in hcl
+    assert 'range_key    = "created_at"' in hcl
+    assert 'read_capacity  = 10' in hcl
+    assert 'write_capacity = 5' in hcl
+    assert '"Environment" = "prod"' in hcl
+
+
+def test_dynamodb_with_indexes_goes_to_review():
+    table = {
+        "id": "app-orders-indexed", "resource_type": "aws_dynamodb_table", "name": "app-orders-indexed",
+        "billing_mode": "PAY_PER_REQUEST", "hash_key": "order_id", "hash_key_type": "S",
+        "has_indexes": True,
+    }
+    _, manifest, _ = _generate([table])
+    assert manifest.resources_generated == 0
+    assert manifest.resources_review_required == 1
+
+
+def test_sqs_fidelity_with_all_attributes():
+    queue = {
+        "id": "https://sqs.us-east-1.amazonaws.com/123456789012/events.fifo",
+        "resource_type": "aws_sqs_queue", "name": "events.fifo",
+        "visibility_timeout_seconds": 60, "message_retention_seconds": 86400,
+        "delay_seconds": 5, "fifo_queue": True, "content_based_deduplication": True,
+        "sqs_managed_sse_enabled": True, "redrive_policy": '{"maxReceiveCount": 3}',
+    }
+    files, manifest, hcl = _generate([queue])
+    assert manifest.resources_generated == 1
+    assert 'visibility_timeout_seconds = 60' in hcl
+    assert 'message_retention_seconds = 86400' in hcl
+    assert 'delay_seconds = 5' in hcl
+    assert 'fifo_queue = true' in hcl
+    assert 'content_based_deduplication = true' in hcl
+    assert 'sqs_managed_sse_enabled = true' in hcl
+    assert 'redrive_policy = jsonencode(' in hcl
+
+
+def test_sns_fidelity_with_display_name_and_fifo():
+    topic = {
+        "id": "arn:aws:sns:us-east-1:123456789012:alerts.fifo",
+        "resource_type": "aws_sns_topic", "name": "alerts.fifo",
+        "display_name": "Production Alerts", "fifo_topic": True,
+    }
+    files, manifest, hcl = _generate([topic])
+    assert manifest.resources_generated == 1
+    assert 'display_name = "Production Alerts"' in hcl
+    assert 'fifo_topic = true' in hcl
+

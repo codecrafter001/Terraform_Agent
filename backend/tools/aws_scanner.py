@@ -13,6 +13,7 @@ from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
 
 from tools.cloud_discovery_interface import CloudDiscoveryInterface
+from tools.aws_scanner_services import ExtraServiceScans
 
 logger = logging.getLogger("terraagent.aws_scanner")
 
@@ -32,8 +33,8 @@ def _new_retry_config() -> Config:
     )
 
 
-# Parallel service scans (VPC, SG, EC2, S3, RDS, IAM) - each with its own client.
-SCAN_WORKERS = 6
+# Parallel service scans - each with its own client.
+SCAN_WORKERS = 8
 
 
 # Kept for readability at call sites / introspection in tests. Never pass
@@ -41,7 +42,7 @@ SCAN_WORKERS = 6
 RETRY_CONFIG = _new_retry_config()
 
 
-class AWSScanner(CloudDiscoveryInterface):
+class AWSScanner(ExtraServiceScans, CloudDiscoveryInterface):
     def __init__(
         self,
         access_key: str,
@@ -367,18 +368,34 @@ class AWSScanner(CloudDiscoveryInterface):
         """Run the enabled service scans in parallel. Results keep a fixed
         order (same as a sequential scan); self.counts has one entry per scan
         and self.errors every call that failed after retries."""
-        f = [x.upper() for x in (filters or ["VPC", "EC2", "S3", "RDS", "SG"])]
+        f = [x.upper() for x in (filters or ["VPC", "EC2", "S3", "RDS", "SG", "ELB", "DYNAMODB", "KMS", "SQS", "SNS"])]
         plan: List[Tuple[str, Callable[[], List[Dict[str, Any]]]]] = []
         if "VPC" in f:
-            plan += [("vpcs", self.scan_vpcs), ("subnets", self.scan_subnets), ("route_tables", self.scan_route_tables)]
+            plan += [
+                ("vpcs", self.scan_vpcs),
+                ("subnets", self.scan_subnets),
+                ("route_tables", self.scan_route_tables),
+                ("internet_gateways", self.scan_internet_gateways),
+                ("nat_gateways", self.scan_nat_gateways),
+            ]
         if "SG" in f:
             plan.append(("security_groups", self.scan_security_groups))
         if "EC2" in f:
             plan.append(("ec2_instances", self.scan_ec2_instances))
+        if "ELB" in f:
+            plan.append(("load_balancers", self.scan_load_balancers))
         if "S3" in f:
             plan.append(("s3_buckets", self.scan_s3_buckets))
         if "RDS" in f:
             plan.append(("rds_instances", self.scan_rds_instances))
+        if "DYNAMODB" in f:
+            plan.append(("dynamodb_tables", self.scan_dynamodb_tables))
+        if "KMS" in f:
+            plan.append(("kms_keys", self.scan_kms_keys))
+        if "SQS" in f:
+            plan.append(("sqs_queues", self.scan_sqs_queues))
+        if "SNS" in f:
+            plan.append(("sns_topics", self.scan_sns_topics))
         if "IAM" in f:
             plan.append(("iam_roles", self.scan_iam_roles))
 

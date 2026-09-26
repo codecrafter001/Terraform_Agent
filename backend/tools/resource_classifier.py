@@ -19,13 +19,15 @@ from models.adoption import DECISION_TO_ACTION, ClassificationReport, ResourceCl
 # role is sent to Review rather than managed. Set to "true" to manage them.
 MANAGE_IAM = os.getenv("TERRAAGENT_MANAGE_IAM", "false").strip().lower() in ("1", "true", "yes")
 
-# Exactly the 8 resource types AWSScanner (tools/aws_scanner.py) discovers today.
+# Exactly the 15 resource types AWSScanner (tools/aws_scanner.py) discovers today.
 # Kept as an explicit whitelist rather than an implicit "not vpc/subnet/..." check
 # so this degrades safely (falls into "unsupported", never crashes) the day
-# discovery adds a 9th type before this classifier is updated to match.
+# discovery adds a new type before this classifier is updated to match.
 DISCOVERY_RESOURCE_TYPES = {
     "aws_vpc", "aws_subnet", "aws_route_table", "aws_security_group",
     "aws_instance", "aws_s3_bucket", "aws_db_instance", "aws_iam_role",
+    "aws_internet_gateway", "aws_nat_gateway", "aws_lb", "aws_alb",
+    "aws_dynamodb_table", "aws_kms_key", "aws_sqs_queue", "aws_sns_topic",
 }
 
 
@@ -103,6 +105,9 @@ def _is_shared_resource(resource: Dict[str, Any]) -> Tuple[bool, str, str]:
 
     if r_type == "aws_vpc" and resource.get("is_default") is True:
         return True, "data_source", "AWS default VPC - reference via data source rather than direct ownership"
+
+    if r_type == "aws_internet_gateway" and resource.get("is_default") is True:
+        return True, "data_source", "AWS default Internet Gateway attached to the default VPC - reference via data source"
 
     if r_type == "aws_iam_role" and _is_service_linked_role(resource):
         return True, "skip", "AWS service-linked IAM role, managed by the AWS service itself"
@@ -268,6 +273,23 @@ def classify_resources(resources: List[Dict[str, Any]], dependency_graph: Dict[s
                 else:
                     decision = "reference"
                     evidence = {"rule": "aws_default_referenced" if is_aws_default else "shared_marker"}
+
+        # 3b. KMS AWS-managed keys or keys pending deletion
+        if category is None and r_type == "aws_kms_key":
+            if res.get("key_manager") == "AWS":
+                category, decision = "managed", "exclude"
+                reasons.append("AWS-managed default KMS key - cannot be managed in custom Terraform")
+                evidence = {"rule": "aws_managed_key"}
+            elif res.get("key_state") == "PendingDeletion":
+                category, decision = "managed", "exclude"
+                reasons.append("KMS key is pending deletion - excluded from adoption")
+                evidence = {"rule": "kms_pending_deletion"}
+
+        # 3c. DynamoDB secondary indexes requiring manual review
+        if category is None and r_type == "aws_dynamodb_table" and res.get("has_indexes"):
+            category, decision = "unmanaged", "review"
+            reasons.append("DynamoDB table has secondary indexes (GSIs/LSIs) which require manual review")
+            evidence = {"rule": "dynamodb_indexes_review"}
 
         # 4. Orphaned: nothing references it and it references nothing - unclear ownership.
         if category is None and r_id in degree and degree[r_id] == 0:
