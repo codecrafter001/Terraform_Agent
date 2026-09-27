@@ -56,7 +56,11 @@ def _handle_api_error(resp: httpx.Response, action_desc: str) -> GitHubPullReque
     elif status == 403:
         return GitHubPullRequestError(f"{prefix} (403 Forbidden) - {raw_msg}. Check token permissions (needs 'repo' scope) or API rate limits.")
     elif status == 404:
-        return GitHubPullRequestError(f"{prefix} (404 Not Found) - {raw_msg}. Check the repository format (owner/repo).")
+        return GitHubPullRequestError(
+            f"{prefix} (404 Not Found) - {raw_msg}. Check that the repository (owner/repo) and the base "
+            f"branch exist, and that the token can access the repository - GitHub answers 404, not 403, "
+            f"for a private repository the token can't see."
+        )
     elif status in (405, 409):
         return GitHubPullRequestError(f"{prefix} ({status} Conflict) - {raw_msg}. PR may have merge conflicts, not be mergeable, or be blocked by branch protection rules.")
     elif status == 422:

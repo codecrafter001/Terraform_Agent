@@ -1,9 +1,10 @@
 """Pydantic Models for Scan requests, responses, and status definitions."""
 
+import re
 from enum import Enum
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field, SecretStr
+from pydantic import BaseModel, Field, SecretStr, field_validator
 
 
 class OperationType(str, Enum):
@@ -145,8 +146,22 @@ class CreatePullRequestRequest(BaseModel):
                      "time, after the scan has already completed - never persisted, never logged, "
                      "and never added to pipeline state; used once in-memory for this request only."
     )
-    repo: str = Field(..., description="Target repository in 'owner/repo' form")
+    repo: str = Field(..., description="Target repository: owner/repo or a github.com URL (normalised to owner/repo)")
     base_branch: str = Field(default="main", description="Branch to open the pull request against")
+
+    @field_validator("repo")
+    @classmethod
+    def _normalize_repo(cls, v: str) -> str:
+        from tools.github_repo import normalize_repo
+        return normalize_repo(v)
+
+    @field_validator("base_branch")
+    @classmethod
+    def _check_base_branch(cls, v: str) -> str:
+        v = (v or "").strip() or "main"
+        if not re.match(r"^[A-Za-z0-9._/-]{1,100}$", v) or ".." in v or v.startswith("/") or v.endswith("/"):
+            raise ValueError("base_branch is not a valid branch name")
+        return v
     wave: Optional[int] = Field(
         default=None,
         description="Scope this PR to a single adoption-plan wave (1-indexed, matching "

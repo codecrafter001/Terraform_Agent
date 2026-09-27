@@ -151,7 +151,7 @@ export default function SettingsPage() {
                 <input
                   value={draft.github_repo ?? ""}
                   onChange={(e) => setDraft({ ...draft, github_repo: e.target.value })}
-                  placeholder="owner/repo"
+                  placeholder="owner/repo or https://github.com/owner/repo"
                   className="field-input font-mono"
                 />
               </label>

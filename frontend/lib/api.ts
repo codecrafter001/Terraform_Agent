@@ -144,10 +144,7 @@ export async function saveWorkspaceDefaults(defaults: WorkspaceDefaults): Promis
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: "Failed to save settings" }));
-    const detail = Array.isArray(err.detail)
-      ? err.detail.map((d: { msg?: string }) => d.msg ?? "invalid value").join("; ")
-      : _errorText(err.detail, "Failed to save settings");
-    throw new Error(detail);
+    throw new Error(_errorText(err.detail, "Failed to save settings"));
   }
   return (await res.json()).defaults;
 }
@@ -204,6 +201,14 @@ export interface DecisionPayload {
 
 function _errorText(detail: unknown, fallback: string): string {
   if (typeof detail === "string") return detail;
+  // FastAPI request validation: [{loc, msg, ...}, ...]
+  if (Array.isArray(detail)) {
+    const msgs = detail
+      .map((d) => (d && typeof d === "object" && "msg" in d ? String((d as { msg: unknown }).msg) : ""))
+      .filter(Boolean)
+      .map((m) => m.replace(/^Value error, /, ""));
+    return msgs.length ? msgs.join("; ") : fallback;
+  }
   if (detail && typeof detail === "object" && "message" in detail) {
     const d = detail as { message: string; missing?: string[]; not_allowed?: string[] };
     const extra = [...(d.missing ?? []), ...(d.not_allowed ?? [])];
@@ -273,7 +278,7 @@ export async function createPullRequest(jobId: string, payload: CreatePullReques
 
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: "Failed to create pull request" }));
-    throw new Error(err.detail || "Pull request creation failed");
+    throw new Error(_errorText(err.detail, "Pull request creation failed"));
   }
 
   return await res.json();

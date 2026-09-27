@@ -134,7 +134,7 @@ def test_defaults_round_trip():
 @pytest.mark.parametrize("field, value", [
     ("region", "us-east-1; rm -rf /"),
     ("resource_filters", ["S3", "LAMBDA"]),
-    ("github_repo", "https://github.com/acme/infra"),
+    ("github_repo", "https://gitlab.com/acme/infra"),
     ("github_repo", "acme/infra/../x"),
     ("base_branch", "../main"),
     ("base_branch", "main branch"),

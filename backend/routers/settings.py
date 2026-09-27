@@ -19,13 +19,13 @@ from pydantic import BaseModel, Field, field_validator
 
 from services.auth import require_api_key
 from services.database import get_app_settings, set_app_settings
+from tools.github_repo import normalize_repo
 
 router = APIRouter(prefix="/settings", tags=["settings"], dependencies=[Depends(require_api_key)])
 
 # The resource_filters categories AWSScanner and the forms know about.
 KNOWN_FILTERS = ("EC2", "ECS", "VPC", "SG", "S3", "RDS", "IAM", "ELB", "DYNAMODB", "KMS", "SQS", "SNS")
 _REGION = re.compile(r"^(auto|[a-z]{2}(-gov)?-[a-z]+-\d)$")
-_REPO = re.compile(r"^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$")
 _BRANCH = re.compile(r"^[A-Za-z0-9._/-]{1,100}$")
 _TOOLS = ("terraform", "tofu", "checkov", "trivy", "conftest", "infracost")
 
@@ -56,9 +56,7 @@ class WorkspaceDefaults(BaseModel):
     @classmethod
     def _repo(cls, v: Optional[str]) -> Optional[str]:
         v = (v or "").strip() or None
-        if v and not _REPO.match(v):
-            raise ValueError("github_repo must look like owner/repo")
-        return v
+        return normalize_repo(v) if v else None
 
     @field_validator("base_branch")
     @classmethod
