@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useSyncExternalStore } from "react";
+import { useSyncExternalStore } from "react";
 
 export interface ResultsTab {
   id: string;
@@ -26,14 +26,15 @@ export default function ResultsTabs({ tabs }: { tabs: ResultsTab[] }) {
     () => window.location.hash.replace("#", ""),
     () => ""
   );
-  const [picked, setPicked] = useState<string | null>(null);
-  const active = picked ?? (tabs.some((t) => t.id === hash) ? hash : tabs[0]?.id);
+  // The hash alone decides the tab, so an in-page link like #deliverables
+  // switches tabs as well as a click on the tab bar does.
+  const active = tabs.some((t) => t.id === hash) ? hash : tabs[0]?.id;
 
   const select = (id: string) => {
-    setPicked(id);
     // replaceState (not location.hash) so switching tabs doesn't pile up
-    // history entries or scroll the page.
+    // history entries or scroll the page; it fires no hashchange, so notify.
     window.history.replaceState(null, "", `#${id}`);
+    window.dispatchEvent(new HashChangeEvent("hashchange"));
   };
 
   return (

@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { Eye, EyeOff, ExternalLink, GitPullRequestArrow, Loader2 } from "lucide-react";
 import { createPullRequest } from "@/lib/api";
 import { AdoptionPlan, GithubPrInfo, Hardening, JobStatus } from "@/lib/types";
@@ -37,6 +38,7 @@ export default function CreatePullRequestAction({
   githubHardeningPr,
   hardening,
 }: CreatePullRequestActionProps) {
+  const router = useRouter();
   // The PR is the primary deliverable - open the form straight away until one exists.
   const [expanded, setExpanded] = useState(!githubPr);
   const [repo, setRepo] = useState("");
@@ -81,6 +83,10 @@ export default function CreatePullRequestAction({
         ...prev,
         [scope]: { pr_url: pr.pr_url, pr_number: pr.pr_number, branch: pr.branch, wave: pr.wave },
       }));
+      // Straight to the live PR status/diff page. refresh() re-fetches its server
+      // data, which matters when the form was opened from that page itself.
+      router.push(`/results/${jobId}/pr`);
+      router.refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to create pull request");
     } finally {

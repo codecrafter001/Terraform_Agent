@@ -240,9 +240,9 @@ class ExtraServiceScans:
                     "origin": meta.get("Origin"),
                     # key_usage, customer_master_key_spec and multi_region force a new
                     # key when they differ - they must be the live values.
-                    "key_usage": meta.get("KeyUsage") or "ENCRYPT_DECRYPT",
+                    "key_usage": meta.get("KeyUsage"),
                     "customer_master_key_spec": key_spec,
-                    "multi_region": meta.get("MultiRegion", False),
+                    "multi_region": meta.get("MultiRegion"),
                     "is_enabled": {"Enabled": True, "Disabled": False}.get(key_state or ""),
                 }
                 if key_manager == "CUSTOMER" and key_state not in _KMS_UNREADABLE_STATES:

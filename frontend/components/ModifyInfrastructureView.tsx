@@ -18,7 +18,6 @@ import {
   ArrowRight,
   ExternalLink,
   DollarSign,
-  X,
 } from "lucide-react";
 
 interface ModifyInfrastructureViewProps {
@@ -37,7 +36,12 @@ export default function ModifyInfrastructureView({
   onApprovePR,
 }: ModifyInfrastructureViewProps) {
   const [selectedFile, setSelectedFile] = useState<"ec2.tf" | "ecs-fargate.tf">("ec2.tf");
-  const [showApprovalModal, setShowApprovalModal] = useState(false);
+  // The diff above is sample data, so its button opens the real adoption PR
+  // form (the "Pull request & bundle" tab) instead of a mock approval dialog.
+  const openRealPrForm = () => {
+    window.location.hash = "deliverables";
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
 
   return (
     <div className="space-y-6 max-w-6xl mx-auto animate-fade-in">
@@ -68,11 +72,11 @@ export default function ModifyInfrastructureView({
           </a>
           <button
             type="button"
-            onClick={() => (onApprovePR ? onApprovePR() : setShowApprovalModal(true))}
+            onClick={() => (onApprovePR ? onApprovePR() : openRealPrForm())}
             className="btn-primary text-xs px-4 py-2 flex items-center gap-2 font-bold shadow-sm"
           >
             <GitPullRequest className="w-4 h-4" />
-            Approve & Create PR
+            Open the adoption PR
           </button>
         </div>
       </div>
@@ -286,11 +290,11 @@ export default function ModifyInfrastructureView({
 
             <button
               type="button"
-              onClick={() => (onApprovePR ? onApprovePR() : setShowApprovalModal(true))}
+              onClick={() => (onApprovePR ? onApprovePR() : openRealPrForm())}
               className="btn-primary w-full py-2.5 text-xs flex items-center justify-center gap-2 font-bold shadow-sm mt-2"
             >
               <GitPullRequest className="w-4 h-4" />
-              Approve & Create PR
+              Open the adoption PR
             </button>
 
             <Link
@@ -312,68 +316,6 @@ export default function ModifyInfrastructureView({
         </div>
       </div>
 
-      {/* PR Modal Dialog */}
-      {showApprovalModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs animate-fade-in">
-          <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 max-w-md w-full p-6 space-y-4">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2 text-sm font-bold text-slate-900">
-                <GitPullRequest className="w-5 h-5 text-brand-600" />
-                <span>Open GitHub Pull Request</span>
-              </div>
-              <button
-                type="button"
-                onClick={() => setShowApprovalModal(false)}
-                className="text-slate-400 hover:text-slate-600"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <p className="text-xs text-slate-600">
-              This will create a new branch and open a Pull Request with your modified Terraform code.
-            </p>
-
-            <div className="space-y-2">
-              <label className="text-xs font-medium text-slate-700 block">Repository</label>
-              <input
-                type="text"
-                defaultValue="my-org/infrastructure-aws"
-                className="field-input font-mono text-xs w-full"
-              />
-            </div>
-
-            <div className="space-y-2">
-              <label className="text-xs font-medium text-slate-700 block">Branch</label>
-              <input
-                type="text"
-                defaultValue="terraagent/modify-ec2-fargate-scale"
-                className="field-input font-mono text-xs w-full"
-              />
-            </div>
-
-            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
-              <button
-                type="button"
-                onClick={() => setShowApprovalModal(false)}
-                className="btn-secondary text-xs"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  alert("Pull Request created! Branch: terraagent/modify-ec2-fargate-scale");
-                  setShowApprovalModal(false);
-                }}
-                className="btn-primary text-xs font-bold"
-              >
-                Confirm & Open PR
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

@@ -341,7 +341,7 @@ export default function ScanProgress({ jobId }: ScanProgressProps) {
           summary={runSummary}
           action={
             <button
-              onClick={() => router.push(`/results/${jobId}`)}
+              onClick={() => router.push(`/results/${jobId}#deliverables`)}
               className={`btn text-white shadow-sm shrink-0 ${verified ? "bg-emerald-600 hover:bg-emerald-700" : "bg-amber-600 hover:bg-amber-700"}`}
             >
               View results

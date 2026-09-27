@@ -291,3 +291,14 @@ def test_public_nat_without_connectivity_type_or_eip_goes_to_review():
     manifest, _ = _generate([{"id": "nat-2", "resource_type": "aws_nat_gateway", "subnet_id": "subnet-9",
                               "connectivity_type": None}])
     assert manifest.resources_generated == 0 and manifest.resources_review_required == 1
+
+
+@mock_aws
+def test_kms_force_new_fields_aws_did_not_return_stay_unknown_and_are_not_rendered():
+    """key_usage / multi_region force a new key: a guessed default could replace it.
+    moto omits them unless given at creation, which stands in for a partial response."""
+    key_id = boto3.client("kms", region_name=REGION).create_key()["KeyMetadata"]["KeyId"]
+    [key] = [k for k in _scanner().scan_kms_keys() if k["id"] == key_id]
+    assert key["key_usage"] is None and key["multi_region"] is None
+    _, hcl = _generate([key])
+    assert "key_usage" not in hcl and "multi_region" not in hcl
