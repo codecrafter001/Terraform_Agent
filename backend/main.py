@@ -19,6 +19,7 @@ from routers.download import router as download_router
 from routers.jobs import router as jobs_router
 from routers.metrics import setup_metrics
 from routers.organizations import router as organizations_router
+from routers.settings import router as settings_router
 from routers.scan import router as scan_router
 from services.auth import warn_if_unset as warn_if_api_key_unset
 from services.database import init_db
@@ -115,6 +116,7 @@ app.include_router(scan_router, prefix="/api")
 app.include_router(jobs_router, prefix="/api")
 app.include_router(download_router, prefix="/api")
 app.include_router(organizations_router, prefix="/api")
+app.include_router(settings_router, prefix="/api")
 
 # Prometheus metrics at GET /metrics (unprefixed - conventional scrape path)
 setup_metrics(app)

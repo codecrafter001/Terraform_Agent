@@ -7,7 +7,7 @@ transient, richer job state kept in Redis.
 
 import os
 from datetime import datetime, timedelta
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from sqlalchemy import create_engine, inspect, or_, text
 from sqlalchemy.orm import declarative_base, sessionmaker
@@ -60,7 +60,29 @@ def init_db() -> None:
             conn.execute(text(f'ALTER TABLE {JobRecord.__tablename__} ADD COLUMN "{column.name}" {col_type}'))
 
 
-def create_job_record(job_id: str, operation: str, region: str, created_at: str) -> None:
+_CHANGE_KEYS = ("resource", "attribute", "current_value", "target_value", "action")
+
+
+def _requested_changes(analyzed_intent: Optional[Dict[str, Any]]) -> Optional[str]:
+    """The parsed changes as a small JSON list of plain strings (at most 20)."""
+    import json
+    changes = (analyzed_intent or {}).get("requested_changes") or []
+    cleaned = [
+        {k: str(c[k])[:200] for k in _CHANGE_KEYS if c.get(k) is not None}
+        for c in changes[:20] if isinstance(c, dict)
+    ]
+    return json.dumps(cleaned) if cleaned else None
+
+
+def create_job_record(
+    job_id: str,
+    operation: str,
+    region: str,
+    created_at: str,
+    user_request: Optional[str] = None,
+    environment: Optional[str] = None,
+    analyzed_intent: Optional[Dict[str, Any]] = None,
+) -> None:
     from models.orm import JobRecord
     session = SessionLocal()
     try:
@@ -69,7 +91,10 @@ def create_job_record(job_id: str, operation: str, region: str, created_at: str)
             operation=operation,
             region=region,
             status="RUNNING",
-            created_at=created_at
+            created_at=created_at,
+            user_request=(user_request or "").strip()[:2000] or None,
+            environment=environment,
+            requested_changes_summary=_requested_changes(analyzed_intent),
         ))
         session.commit()
     finally:
@@ -115,6 +140,9 @@ def mark_job_complete(job_id: str, final_state: Dict[str, Any]) -> None:
         score = safety.get("score")
         record.migration_safety_score = int(score) if isinstance(score, (int, float)) else None
         record.migration_safety_status = safety.get("status") or None
+        from tools.run_summary import build_runs_summary
+        runs = build_runs_summary(final_state)
+        record.runs_summary = json.dumps(runs) if runs else None
 
         record.completed_at = datetime.utcnow().isoformat()
         session.commit()
@@ -225,11 +253,21 @@ def mark_stale_jobs_failed(max_age_seconds: int) -> int:
         session.close()
 
 
-def list_job_records(limit: int = 100, offset: int = 0, include_archived: bool = False) -> List[Any]:
+def list_job_records(
+    limit: int = 100,
+    offset: int = 0,
+    include_archived: bool = False,
+    operations: Optional[List[str]] = None,
+    with_runs: bool = False,
+) -> List[Any]:
     from models.orm import JobRecord
     session = SessionLocal()
     try:
         query = session.query(JobRecord)
+        if operations:
+            query = query.filter(JobRecord.operation.in_(operations))
+        if with_runs:
+            query = query.filter(JobRecord.runs_summary.isnot(None))
         if not include_archived:
             # archived is NULL on every row written before the column existed.
             query = query.filter(or_(JobRecord.archived.is_(None), JobRecord.archived.is_(False)))
@@ -255,6 +293,29 @@ def archive_job_record(job_id: str) -> bool:
         record.archived = True
         session.commit()
         return True
+    finally:
+        session.close()
+
+
+def get_app_settings() -> Dict[str, Any]:
+    import json
+    from models.orm import AppSetting
+    session = SessionLocal()
+    try:
+        return {row.key: json.loads(row.value) for row in session.query(AppSetting).all()}
+    finally:
+        session.close()
+
+
+def set_app_settings(values: Dict[str, Any]) -> None:
+    import json
+    from models.orm import AppSetting
+    session = SessionLocal()
+    try:
+        now = datetime.utcnow().isoformat()
+        for key, value in values.items():
+            session.merge(AppSetting(key=key, value=json.dumps(value), updated_at=now))
+        session.commit()
     finally:
         session.close()
 

@@ -1,6 +1,6 @@
 """SQLAlchemy and Pydantic models for Audit Logging."""
 
-from typing import Optional
+from typing import Dict, List, Optional
 
 from pydantic import BaseModel
 
@@ -25,3 +25,6 @@ class AuditLogRecord(BaseModel):
     migration_safety_score: Optional[int] = None
     migration_safety_status: Optional[str] = None
     archived: bool = False
+    user_request: Optional[str] = None
+    environment: Optional[str] = None
+    requested_changes: List[Dict[str, str]] = []

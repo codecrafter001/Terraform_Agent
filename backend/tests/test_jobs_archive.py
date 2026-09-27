@@ -97,9 +97,9 @@ def test_finished_jobs_can_be_archived_through_the_route(status):
     job_id = _new_job(status)
     assert asyncio.run(archive_job(job_id)) == {"job_id": job_id, "archived": True}
 
-    listed = {r.job_id for r in asyncio.run(list_jobs(limit=100, offset=0, include_archived=False))}
+    listed = {r.job_id for r in asyncio.run(list_jobs(limit=100, offset=0, include_archived=False, operation=None))}
     assert job_id not in listed
-    everything = asyncio.run(list_jobs(limit=100, offset=0, include_archived=True))
+    everything = asyncio.run(list_jobs(limit=100, offset=0, include_archived=True, operation=None))
     record = next(r for r in everything if r.job_id == job_id)
     assert record.archived is True
 

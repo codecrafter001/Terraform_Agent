@@ -1,6 +1,7 @@
 """Router for listing historic scan jobs and audit logs."""
 
-from typing import Any, Dict, List
+import json
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
@@ -33,7 +34,18 @@ def _to_audit_record(r: Any) -> AuditLogRecord:
         migration_safety_score=getattr(r, "migration_safety_score", None),
         migration_safety_status=getattr(r, "migration_safety_status", None),
         archived=bool(getattr(r, "archived", None)),
+        user_request=getattr(r, "user_request", None),
+        environment=getattr(r, "environment", None),
+        requested_changes=_json_list(getattr(r, "requested_changes_summary", None)),
     )
+
+
+def _json_list(raw: Optional[str]) -> List[Any]:
+    try:
+        value = json.loads(raw) if raw else []
+    except (TypeError, ValueError):
+        return []
+    return value if isinstance(value, list) else []
 
 
 @router.get("", response_model=List[AuditLogRecord])
@@ -41,11 +53,32 @@ async def list_jobs(
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
     include_archived: bool = Query(default=False),
+    operation: Optional[List[str]] = Query(default=None),
 ):
     """Lists past scan jobs, paginated (credentials completely scrubbed/omitted).
-    Archived jobs are left out unless include_archived is set."""
-    records = list_job_records(limit=limit, offset=offset, include_archived=include_archived)
+    Archived jobs are left out unless include_archived is set; `operation`
+    (repeatable) narrows to e.g. modify/fix for the Change Requests page."""
+    records = list_job_records(limit=limit, offset=offset, include_archived=include_archived, operations=operation)
     return [_to_audit_record(r) for r in records]
+
+
+@router.get("/runs")
+async def list_runs(limit: int = Query(default=30, ge=1, le=100)) -> List[Dict[str, Any]]:
+    """The terraform/tofu commands recent jobs ran (tools/run_summary.py) -
+    only allow-listed read-only subcommands, with pass/fail and timings; no
+    command output. Declared before /{job_id} so "runs" isn't read as a job id."""
+    return [
+        {
+            "job_id": r.job_id,
+            "operation": r.operation,
+            "region": r.region,
+            "status": r.status,
+            "created_at": r.created_at,
+            "completed_at": r.completed_at,
+            "runs": json.loads(r.runs_summary),
+        }
+        for r in list_job_records(limit=limit, with_runs=True)
+    ]
 
 
 @router.delete("/{job_id}")

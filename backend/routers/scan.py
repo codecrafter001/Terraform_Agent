@@ -122,7 +122,12 @@ async def start_scan(request: Request, scan_request: ScanRequest):
         "analyzed_intent": scan_request.analyzed_intent,
     }
     await redis_service.set_job_state(job_id, initial_progress)
-    create_job_record(job_id, scan_request.operation.value, scan_request.region, created_at)
+    create_job_record(
+        job_id, scan_request.operation.value, scan_request.region, created_at,
+        user_request=scan_request.user_request,
+        environment=scan_request.environment or "production",
+        analyzed_intent=scan_request.analyzed_intent,
+    )
 
     # Dispatch Celery async task or run inline
     dispatched = False

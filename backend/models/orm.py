@@ -36,8 +36,24 @@ class JobRecord(Base):
     # Soft delete: an archived job is hidden from GET /jobs, never removed -
     # the audit trail stays intact.
     archived = Column(Boolean, nullable=True)
+    # The natural-language request and its parsed changes (Change Requests page).
+    # User-typed text: rendered as text only, never interpreted.
+    user_request = Column(Text, nullable=True)
+    environment = Column(String, nullable=True)
+    requested_changes_summary = Column(Text, nullable=True)  # JSON list of {resource, attribute, current_value, target_value, action}
+    # tools/run_summary.py: the terraform commands the job ran (Terraform Runs page).
+    runs_summary = Column(Text, nullable=True)
     created_at = Column(String, nullable=False)
     completed_at = Column(String, nullable=True)
+
+
+class AppSetting(Base):
+    """Non-secret workspace defaults (routers/settings.py). Never credentials or tokens."""
+    __tablename__ = "app_settings"
+
+    key = Column(String, primary_key=True)
+    value = Column(Text, nullable=False)  # JSON
+    updated_at = Column(String, nullable=False)
 
 
 class GraphCheckpoint(Base):
