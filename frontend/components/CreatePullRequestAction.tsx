@@ -251,7 +251,7 @@ export default function CreatePullRequestAction({
                   type={showToken ? "text" : "password"}
                   value={githubToken}
                   onChange={(e) => setGithubToken(e.target.value)}
-                  placeholder="ghp_... (contents:write, pull_requests:write)"
+                  placeholder="github_pat_... or ghp_..."
                   autoComplete="off"
                   className="w-full text-xs px-3 py-2.5 pr-10 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-brand-300 font-mono"
                   required
@@ -265,9 +265,22 @@ export default function CreatePullRequestAction({
                   {showToken ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
                 </button>
               </div>
-              <p className="text-[11px] text-slate-400 mt-1">
-                Used once for this request only - never stored, logged, or saved anywhere.
-              </p>
+              <div className="text-[11px] text-slate-500 mt-2 space-y-1 bg-slate-50 p-2.5 rounded-xl border border-slate-150">
+                <p className="text-slate-700 font-semibold">
+                  Required Token Permissions (used once — never stored or logged):
+                </p>
+                <ul className="list-disc list-inside space-y-0.5 text-slate-600">
+                  <li>
+                    <span className="font-semibold text-slate-800">Fine-grained token (recommended):</span> Resource owner = repository owner, repository selected, permissions: <strong className="text-slate-900">Contents: Read and write</strong>, <strong className="text-slate-900">Pull requests: Read and write</strong> (and optional <strong className="text-slate-900">Actions: Read</strong>).
+                  </li>
+                  <li>
+                    <span className="font-semibold text-slate-800">Classic token:</span> requires <strong className="text-slate-900">repo</strong> scope from an account with write access.
+                  </li>
+                  <li>
+                    If an organization owns the repository and uses SAML SSO, remember to authorize the token.
+                  </li>
+                </ul>
+              </div>
             </div>
 
             {error && <div className="text-xs text-rose-700 font-medium">{error}</div>}

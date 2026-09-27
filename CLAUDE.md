@@ -152,7 +152,8 @@ infrastructure -> iac_engineering -> verification --PASS / INCOMPLETE / NEEDS_AP
    merged into `terraform/`), `cost_agent` (Infracost **only** for the hardening delta - the adoption has
    no cost delta), `documentation_agent`. Approval never runs apply or import.
    **Delivery is PR-first** (`services/github_client.py`, `POST /scan/{id}/pull-request`, token used once,
-   never stored): the **Adoption PR** (whole job or one wave) carries both scores, a per-resource table
+   never stored; pre-flight `GET /repos/{repo}` verifies push access and clear errors diagnose missing
+   fine-grained or classic permissions): the **Adoption PR** (whole job or one wave) carries both scores, a per-resource table
    (address, import ID, plan action), the classification decisions and the reported findings; the
    **Hardening PR** (`kind: "hardening"`) is stacked on the adoption PR's branch so its diff is only the
    fixes, and needs the adoption PR first. Code lives under `terraform/` so Atlantis / HCP Terraform /

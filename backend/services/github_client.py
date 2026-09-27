@@ -41,6 +41,40 @@ class GitHubPullRequestError(RuntimeError):
     every other externally-sourced error string in this codebase."""
 
 
+_PERMISSION_HUMAN_NAMES = {
+    "contents=write": "Contents: Read and write",
+    "contents=read": "Contents: Read-only",
+    "pull_requests=write": "Pull requests: Read and write",
+    "pull_requests=read": "Pull requests: Read-only",
+    "issues=write": "Issues: Read and write",
+    "issues=read": "Issues: Read-only",
+    "actions=read": "Actions: Read-only",
+    "actions=write": "Actions: Read and write",
+}
+
+
+def _format_permission(perm: str) -> str:
+    cleaned = perm.strip()
+    if cleaned in _PERMISSION_HUMAN_NAMES:
+        return _PERMISSION_HUMAN_NAMES[cleaned]
+    if "=" in cleaned:
+        k, v = cleaned.split("=", 1)
+        return f"{k.replace('_', ' ').capitalize()}: {v.replace('_', ' ').capitalize()}"
+    return cleaned
+
+
+def _format_rate_limit_reset(reset_header: Optional[str]) -> str:
+    if not reset_header:
+        return "shortly"
+    try:
+        from datetime import datetime, timezone
+        ts = int(reset_header)
+        dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+        return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+    except Exception:
+        return str(reset_header)
+
+
 def _handle_api_error(resp: httpx.Response, action_desc: str) -> GitHubPullRequestError:
     """Produces descriptive, user-friendly error messages based on GitHub status codes."""
     status = resp.status_code
@@ -54,7 +88,38 @@ def _handle_api_error(resp: httpx.Response, action_desc: str) -> GitHubPullReque
     if status == 401:
         return GitHubPullRequestError(f"{prefix} (401 Unauthorized) - {raw_msg}. Please verify your GitHub Personal Access Token (PAT).")
     elif status == 403:
-        return GitHubPullRequestError(f"{prefix} (403 Forbidden) - {raw_msg}. Check token permissions (needs 'repo' scope) or API rate limits.")
+        headers = resp.headers if hasattr(resp, "headers") and resp.headers is not None else {}
+        remaining = headers.get("X-RateLimit-Remaining") or headers.get("x-ratelimit-remaining")
+        reset_hdr = headers.get("X-RateLimit-Reset") or headers.get("x-ratelimit-reset")
+        accepted_perms = headers.get("X-Accepted-GitHub-Permissions") or headers.get("x-accepted-github-permissions")
+        oauth_scopes = headers.get("X-OAuth-Scopes") if "X-OAuth-Scopes" in headers or "x-oauth-scopes" in headers else None
+
+        if remaining == "0" or "rate limit" in str(raw_msg).lower():
+            reset_time = _format_rate_limit_reset(reset_hdr)
+            return GitHubPullRequestError(
+                f"{prefix} (403 Forbidden) - {raw_msg}. GitHub API rate limit exceeded. Resets at {reset_time}."
+            )
+        elif accepted_perms:
+            perms_list = [_format_permission(p) for p in accepted_perms.split(",") if p.strip()]
+            human_perms = ", ".join(perms_list) if perms_list else accepted_perms
+            return GitHubPullRequestError(
+                f"{prefix} (403 Forbidden) - {raw_msg}. Missing fine-grained token permission ({human_perms}). "
+                "For fine-grained personal access tokens: ensure 'Resource owner' matches the repository owner, "
+                f"the repository is selected in Repository access, and permissions include {human_perms}."
+            )
+        elif oauth_scopes is not None:
+            scopes_str = oauth_scopes if oauth_scopes.strip() else "none"
+            return GitHubPullRequestError(
+                f"{prefix} (403 Forbidden) - {raw_msg}. Classic token has scopes '{scopes_str}', but the 'repo' scope "
+                "and repository write access are required."
+            )
+        else:
+            return GitHubPullRequestError(
+                f"{prefix} (403 Forbidden) - {raw_msg}. Token does not have write access. "
+                "For fine-grained tokens: ensure 'Resource owner' matches the repository owner, the repository is selected, "
+                "and permissions include 'Contents: Read and write' and 'Pull requests: Read and write'. "
+                "For classic tokens: ensure 'repo' scope is granted and your account has write access."
+            )
     elif status == 404:
         return GitHubPullRequestError(
             f"{prefix} (404 Not Found) - {raw_msg}. Check that the repository (owner/repo) and the base "
@@ -350,6 +415,34 @@ async def _create_branch(client: httpx.AsyncClient, repo: str, branch_name: str,
         )
 
 
+async def _preflight_repo_check(client: httpx.AsyncClient, repo: str) -> None:
+    """Pre-flight check before any write: verifies repository exists and token has push access."""
+    repo_resp = await client.get(f"/repos/{repo}")
+    if repo_resp.status_code == 404:
+        raise GitHubPullRequestError(
+            f"Failed verifying repository '{repo}': 404 (404 Not Found) - "
+            "repository not found or not visible to this token. Verify the owner/repo name and token repository access."
+        )
+    if repo_resp.status_code != 200:
+        raise _handle_api_error(repo_resp, f"verifying access to repository '{repo}'")
+
+    try:
+        repo_data = repo_resp.json()
+    except Exception:
+        repo_data = {}
+
+    permissions = repo_data.get("permissions")
+    if isinstance(permissions, dict) and permissions.get("push") is False:
+        owner = repo.split("/")[0] if "/" in repo else "the repository owner"
+        repo_name = repo.split("/")[-1] if "/" in repo else repo
+        raise GitHubPullRequestError(
+            f"Token does not have push (write) access to '{repo}'. "
+            f"For fine-grained tokens: ensure 'Resource owner' is '{owner}', '{repo_name}' is selected in Repository access, "
+            "and 'Contents: Read and write' + 'Pull requests: Read and write' permissions are granted. "
+            "For classic tokens: ensure the token has the 'repo' scope and your account has write access to the repository."
+        )
+
+
 async def _publish(
     client: httpx.AsyncClient,
     repo: str,
@@ -368,6 +461,8 @@ async def _publish(
     leaves nothing behind. Only a failure opening the PR can leave a branch,
     and it is deleted before the error propagates, so a retry of the same
     job/wave always starts clean. Returns (pr_data, commit_sha)."""
+    await _preflight_repo_check(client, repo)
+
     ref_resp = await client.get(f"/repos/{repo}/git/ref/heads/{from_branch}")
     if ref_resp.status_code != 200:
         raise _handle_api_error(ref_resp, f"reading branch '{from_branch}' on '{repo}'")

@@ -24,10 +24,11 @@ FAKE_TOKEN = "ghp_supersecrettoken1234567890"
 
 
 class _FakeResponse:
-    def __init__(self, status_code, json_data=None, text=""):
+    def __init__(self, status_code, json_data=None, text="", headers=None):
         self.status_code = status_code
         self._json = json_data or {}
         self.text = text or str(json_data or {})
+        self.headers = headers or {}
 
     def json(self):
         return self._json
@@ -35,14 +36,15 @@ class _FakeResponse:
 
 class FakeGitHub:
     """Minimal GitHub REST fake. `fail` maps (METHOD, path-substring) to a
-    status code; the first matching entry wins. `stray_branch` makes the
+    status code or _FakeResponse; the first matching entry wins. `stray_branch` makes the
     first branch create return 422 (a branch left by an earlier attempt)."""
 
-    def __init__(self, fail: Optional[Dict[Tuple[str, str], int]] = None, stray_branch: bool = False,
-                 pr_number: int = 7):
+    def __init__(self, fail: Optional[Dict[Tuple[str, str], Any]] = None, stray_branch: bool = False,
+                 pr_number: int = 7, repo_permissions: Optional[Dict[str, bool]] = None):
         self.fail = fail or {}
         self.stray_branch = stray_branch
         self.pr_number = pr_number
+        self.repo_permissions = repo_permissions
         self.calls: List[Tuple[str, str, Dict[str, Any]]] = []
         self.blobs: List[str] = []
 
@@ -54,9 +56,15 @@ class FakeGitHub:
 
     async def _handle(self, method: str, path: str, **kwargs) -> _FakeResponse:
         self.calls.append((method, path, kwargs))
-        for (m, fragment), status in self.fail.items():
+        for (m, fragment), fail_val in self.fail.items():
             if m == method and fragment in path:
-                return _FakeResponse(status, text=f"{status} failure on {path}")
+                if isinstance(fail_val, _FakeResponse):
+                    return fail_val
+                return _FakeResponse(fail_val, text=f"{fail_val} failure on {path}")
+        if method == "GET" and path.startswith("/repos/") and "/git/" not in path and not path.endswith("/pulls"):
+            if self.repo_permissions is not None:
+                return _FakeResponse(200, {"permissions": self.repo_permissions})
+            return _FakeResponse(200, {"permissions": {"push": True, "pull": True}})
         if method == "GET" and "/git/ref/heads/" in path:
             return _FakeResponse(200, {"object": {"sha": "base-sha-123"}})
         if method == "GET" and "/git/commits/" in path:
@@ -296,9 +304,87 @@ async def test_hardening_pr_stacks_on_the_adoption_branch():
                                            {"branch": "terraagent/adopt-job-1", "pr_number": 7})
 
     assert result["kind"] == "hardening" and result["branch"] == "terraagent/harden-job-1"
-    assert fake.calls[0][1] == "/repos/o/r/git/ref/heads/terraagent/adopt-job-1"  # built on the adoption branch
+    assert fake.calls[0][1] == "/repos/o/r"  # pre-flight check
+    assert fake.calls[1][1] == "/repos/o/r/git/ref/heads/terraagent/adopt-job-1"  # built on the adoption branch
     assert fake.tree() == {"terraform/data.tf": "x"}
     pr = next(c for c in fake.calls if c[1].endswith("/pulls"))[2]["json"]
     assert pr["base"] == "terraagent/adopt-job-1" and pr["head"] == "terraagent/harden-job-1"
     assert "Merge and apply the adoption PR first" in pr["body"] and "CKV_AWS_53" in pr["body"]
     assert FAKE_TOKEN not in str(fake.calls)
+
+
+@pytest.mark.asyncio
+async def test_fine_grained_token_403_names_contents_read_and_write_permission():
+    resp_403 = _FakeResponse(
+        403,
+        json_data={"message": "Resource not accessible by personal access token"},
+        headers={"X-Accepted-GitHub-Permissions": "contents=write"},
+    )
+    fake = FakeGitHub(fail={("POST", "/git/blobs"): resp_403})
+    with pytest.raises(GitHubPullRequestError) as exc:
+        await _run(fake)
+    err = str(exc.value)
+    assert "Contents: Read and write" in err
+    assert "Resource owner" in err
+    assert "Repository access" in err
+    assert FAKE_TOKEN not in err
+
+
+@pytest.mark.asyncio
+async def test_classic_token_403_reports_scopes_and_repo_requirement():
+    resp_403 = _FakeResponse(
+        403,
+        json_data={"message": "Resource not accessible by personal access token"},
+        headers={"X-OAuth-Scopes": "public_repo"},
+    )
+    fake = FakeGitHub(fail={("POST", "/git/blobs"): resp_403})
+    with pytest.raises(GitHubPullRequestError) as exc:
+        await _run(fake)
+    err = str(exc.value)
+    assert "public_repo" in err
+    assert "'repo' scope" in err
+    assert FAKE_TOKEN not in err
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_403_reports_rate_limit_and_reset_time():
+    resp_403 = _FakeResponse(
+        403,
+        json_data={"message": "API rate limit exceeded"},
+        headers={"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "1700000000"},
+    )
+    fake = FakeGitHub(fail={("POST", "/git/blobs"): resp_403})
+    with pytest.raises(GitHubPullRequestError) as exc:
+        await _run(fake)
+    err = str(exc.value)
+    assert "rate limit" in err.lower()
+    assert "Resets at" in err
+    assert "Missing fine-grained" not in err
+    assert FAKE_TOKEN not in err
+
+
+@pytest.mark.asyncio
+async def test_preflight_push_false_blocks_blob_upload():
+    fake = FakeGitHub(repo_permissions={"push": False, "pull": True})
+    with pytest.raises(GitHubPullRequestError) as exc:
+        await _run(fake)
+    err = str(exc.value)
+    assert "push (write) access" in err
+    assert "Contents: Read and write" in err
+    assert "'repo' scope" in err
+    assert fake.blobs == []
+    assert not any(c[1].endswith("/git/blobs") for c in fake.calls)
+    assert FAKE_TOKEN not in err
+
+
+@pytest.mark.asyncio
+async def test_preflight_repo_404_reports_not_found_or_not_visible():
+    fake = FakeGitHub(fail={("GET", "/repos/my-org/my-repo"): 404})
+    with pytest.raises(GitHubPullRequestError) as exc:
+        await _run(fake)
+    err = str(exc.value)
+    assert "not found or not visible" in err
+    assert fake.blobs == []
+    assert not any(c[1].endswith("/git/blobs") for c in fake.calls)
+    assert FAKE_TOKEN not in err
+
