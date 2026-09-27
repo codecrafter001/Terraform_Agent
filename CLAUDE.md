@@ -182,6 +182,13 @@ Job list (Postgres audit records, `routers/jobs.py`): `GET /jobs` also returns
 after Redis state expires; null without evidence) and hides archived jobs unless
 `?include_archived=true`. `DELETE /jobs/{id}` **archives** (soft delete: `archived = true`, the record,
 bundle and PR links are kept); a RUNNING/PENDING/AWAITING_APPROVAL job can't be archived (409).
+The audit record also keeps the request text + parsed changes (`?operation=modify&operation=fix` feeds
+the Change Requests page) and `runs_summary` (`tools/run_summary.py`: terraform command names,
+pass/fail, plan counts, timings - never command output), listed by `GET /jobs/runs` for Terraform Runs.
+`GET /settings` reports the effective configuration from the pipeline's own constants (secrets only as
+set/not set); `PUT /settings/defaults` saves validated non-secret defaults (region, filters, engine,
+GitHub repo, base branch) in `app_settings`, which pre-fill the scan and PR forms. The Modify
+Changes & Diff tab is still sample data (bannered) until change-request PRs exist.
 
 Live logs: `redis_service.publish_log` stores a per-job, sequence-numbered history
 (`job:{id}:loghist`) alongside pub/sub; `GET /scan/{id}/logs` replays it on connect. Slow steps emit a

@@ -1,10 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Eye, EyeOff, ExternalLink, GitPullRequestArrow, Loader2 } from "lucide-react";
-import { createPullRequest } from "@/lib/api";
+import { createPullRequest, fetchSettings } from "@/lib/api";
 import { AdoptionPlan, GithubPrInfo, Hardening, JobStatus } from "@/lib/types";
 
 interface CreatePullRequestActionProps {
@@ -52,6 +52,21 @@ export default function CreatePullRequestAction({
   const [showToken, setShowToken] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Pre-fill the repo and base branch from the workspace defaults (Settings)
+  // unless the user already typed something. The token is never pre-filled.
+  useEffect(() => {
+    let cancelled = false;
+    fetchSettings()
+      .then(({ defaults }) => {
+        if (cancelled) return;
+        if (defaults.github_repo) setRepo((r) => r || defaults.github_repo || "");
+        setBaseBranch((b) => (b === "main" ? defaults.base_branch || "main" : b));
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const [createdPrs, setCreatedPrs] = useState<Record<string, GithubPrInfo>>({
     ...(githubPr ? { [WHOLE_JOB_SCOPE]: githubPr } : {}),
     ...(githubWavePrs ?? {}),

@@ -515,3 +515,71 @@ export interface ResourceInventory {
   suggested_region?: string | null;
   resources?: InventoryResource[];
 }
+
+// backend/tools/run_summary.py - kept on the audit record; no command output.
+export interface RunCommand {
+  name: string;
+  command: string;
+  passed: boolean;
+}
+
+export interface RunStage {
+  stage: "validation" | "plan" | "generate_config";
+  skipped: boolean;
+  reason?: string | null;
+  seconds?: number | null;
+  commands: RunCommand[];
+  counts?: { create: number | null; update: number | null; replace: number | null; destroy: number | null; imported: number | null };
+  mismatches?: number;
+}
+
+export interface RunIteration {
+  iteration: number;
+  verdict: VerificationVerdict;
+  validation_passed?: boolean;
+  passed?: boolean;
+  at?: string;
+}
+
+export interface RunsSummary {
+  engine: string;
+  verdict?: VerificationVerdict | null;
+  repair_attempts: number;
+  iterations: RunIteration[];
+  stages: RunStage[];
+}
+
+export interface JobRunsEntry {
+  job_id: string;
+  operation: string;
+  region: string;
+  status: string;
+  created_at: string;
+  completed_at?: string | null;
+  runs: RunsSummary;
+}
+
+// backend/routers/settings.py
+export interface WorkspaceDefaults {
+  region: string;
+  resource_filters: string[];
+  terraform_binary: "terraform" | "tofu";
+  github_repo?: string | null;
+  base_branch: string;
+}
+
+export interface WorkspaceSettings {
+  defaults: WorkspaceDefaults;
+  configuration: {
+    safety: {
+      allowed_terraform_subcommands: string[];
+      blocked_terraform_commands: string[];
+      aws_api_access: string;
+      api_key_required: boolean;
+    };
+    pipeline: Record<string, number | boolean>;
+    llm: { provider: string; model: string };
+    integrations: { infracost_api_key_set: boolean };
+    tools: Record<string, boolean>;
+  };
+}

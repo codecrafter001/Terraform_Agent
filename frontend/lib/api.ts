@@ -2,7 +2,18 @@
  * API client utilities for TerraAgent frontend
  */
 
-import { HumanChoice, IntentAnalysisResult, JobProgress, JobResults, MigrationSafety, OperationType } from "./types";
+import {
+  HumanChoice,
+  IntentAnalysisResult,
+  IntentRequestedChange,
+  JobProgress,
+  JobResults,
+  JobRunsEntry,
+  MigrationSafety,
+  OperationType,
+  WorkspaceDefaults,
+  WorkspaceSettings,
+} from "./types";
 
 export interface ScanRequestPayload {
   aws_access_key: string;
@@ -58,6 +69,10 @@ export interface AuditJobRecord {
   migration_safety_score?: number | null;
   migration_safety_status?: MigrationSafety["status"] | null;
   archived?: boolean;
+  // Natural-language request and its parsed changes (Change Requests page)
+  user_request?: string | null;
+  environment?: string | null;
+  requested_changes?: IntentRequestedChange[];
 }
 
 // Server Components/SSR run inside the frontend container, where NEXT_PUBLIC_API_URL
@@ -96,14 +111,45 @@ export async function checkHealth(): Promise<boolean> {
   }
 }
 
-export async function fetchJobs(limit = 20): Promise<AuditJobRecord[]> {
+export async function fetchJobs(limit = 20, operations: string[] = []): Promise<AuditJobRecord[]> {
   try {
-    const res = await fetch(`${API_BASE}/jobs?limit=${limit}`, { cache: "no-store", headers: authHeaders() });
+    const params = new URLSearchParams({ limit: String(limit) });
+    operations.forEach((op) => params.append("operation", op));
+    const res = await fetch(`${API_BASE}/jobs?${params}`, { cache: "no-store", headers: authHeaders() });
     if (!res.ok) return [];
     return await res.json();
   } catch {
     return [];
   }
+}
+
+// backend/tools/run_summary.py - the terraform commands recent jobs ran.
+export async function fetchRuns(limit = 30): Promise<JobRunsEntry[]> {
+  const res = await fetch(`${API_BASE}/jobs/runs?limit=${limit}`, { cache: "no-store", headers: authHeaders() });
+  if (!res.ok) throw new Error("Failed to load Terraform runs");
+  return await res.json();
+}
+
+export async function fetchSettings(): Promise<WorkspaceSettings> {
+  const res = await fetch(`${API_BASE}/settings`, { cache: "no-store", headers: authHeaders() });
+  if (!res.ok) throw new Error("Failed to load settings");
+  return await res.json();
+}
+
+export async function saveWorkspaceDefaults(defaults: WorkspaceDefaults): Promise<WorkspaceDefaults> {
+  const res = await fetch(`${API_BASE}/settings/defaults`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify(defaults),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: "Failed to save settings" }));
+    const detail = Array.isArray(err.detail)
+      ? err.detail.map((d: { msg?: string }) => d.msg ?? "invalid value").join("; ")
+      : _errorText(err.detail, "Failed to save settings");
+    throw new Error(detail);
+  }
+  return (await res.json()).defaults;
 }
 
 // Soft delete: the job leaves the default list; its audit record is kept.

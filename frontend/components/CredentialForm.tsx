@@ -1,8 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { initiateScan, ScanRequestPayload } from "@/lib/api";
+import { fetchSettings, initiateScan, ScanRequestPayload } from "@/lib/api";
 import { IntentAnalysisResult, OperationType } from "@/lib/types";
 import IntentAnalysisModal from "./IntentAnalysisModal";
 import UserRequestSection from "./UserRequestSection";
@@ -142,6 +142,23 @@ export default function CredentialForm() {
     "SQS",
     "SNS",
   ]);
+
+  // Start from the workspace defaults (Settings), if any were saved. A failed
+  // load just keeps the built-in defaults above.
+  useEffect(() => {
+    let cancelled = false;
+    fetchSettings()
+      .then(({ defaults }) => {
+        if (cancelled) return;
+        setRegion(defaults.region);
+        setTerraformBinary(defaults.terraform_binary);
+        if (defaults.resource_filters.length > 0) setSelectedResources(defaults.resource_filters);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Natural-Language User Request
   const [userRequest, setUserRequest] = useState(
