@@ -6,11 +6,14 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import type { LucideIcon } from "lucide-react";
 import {
+  FileDiff,
   LayoutDashboard,
   Menu,
   PlusCircle,
   GitPullRequest,
+  Settings,
   ShieldCheck,
+  Terminal,
   X,
 } from "lucide-react";
 import { checkHealth } from "@/lib/api";
@@ -25,7 +28,10 @@ interface NavItem {
 const NAV_ITEMS: NavItem[] = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard, matches: ["/results", "/scan/"] },
   { href: "/scan", label: "New Request", icon: PlusCircle },
+  { href: "/requests", label: "Change Requests", icon: FileDiff },
+  { href: "/runs", label: "Terraform Runs", icon: Terminal },
   { href: "/pull-requests", label: "Pull Requests", icon: GitPullRequest, matches: ["/pull-requests"] },
+  { href: "/settings", label: "Settings", icon: Settings },
 ];
 
 function isActive(pathname: string, item: NavItem): boolean {

@@ -1,6 +1,7 @@
 import { fetchJobResults } from "@/lib/api";
 import { demoJobResults } from "@/lib/demo";
 import ChangeRequestNotice from "@/components/ChangeRequestNotice";
+import ModifyInfrastructureView from "@/components/ModifyInfrastructureView";
 import CreatePullRequestAction from "@/components/CreatePullRequestAction";
 import DependencyGraph from "@/components/DependencyGraph";
 import DecisionsPanel from "@/components/DecisionsPanel";
@@ -20,6 +21,7 @@ import {
   CheckCheck,
   Download,
   FileCode2,
+  FileDiff,
   GitPullRequest,
   GitPullRequestArrow,
   Globe,
@@ -44,7 +46,7 @@ interface ResultsPageProps {
 export const dynamic = "force-dynamic";
 
 function categoryCount(plan: AdoptionPlan, explicit: number | undefined, category: string): number {
-  return explicit ?? plan.categories.find((c) => c.category === category)?.resource_count ?? 0;
+  return explicit ?? plan.categories?.find((c) => c.category === category)?.resource_count ?? 0;
 }
 
 function riskBadgeClass(level: string): string {
@@ -211,7 +213,25 @@ export default async function JobResultsPage({ params }: ResultsPageProps) {
   const edgeCount = results.dependency_graph?.edge_count ?? 0;
   const nodeCount = results.dependency_graph?.node_count ?? results.dependency_graph?.nodes?.length ?? 0;
 
+  const isChangeRequest = results.operation === "modify" || results.operation === "fix";
+
   const tabs = [
+    ...(isChangeRequest
+      ? [
+          {
+            id: "modify",
+            label: "Modify Changes & Diff",
+            icon: <FileDiff className="w-3.5 h-3.5" />,
+            content: (
+              <ModifyInfrastructureView
+                jobId={id}
+                region={results.region}
+                {...(results.user_request ? { userRequestText: results.user_request } : {})}
+              />
+            ),
+          },
+        ]
+      : []),
     {
       id: "overview",
       label: "Overview",
@@ -225,8 +245,14 @@ export default async function JobResultsPage({ params }: ResultsPageProps) {
           />
           <ScoresPanel safety={safety} posture={posture} />
           <DecisionsPanel model={results.infra_model} />
-          {results.adoption_plan ? (
+          {/* Once a job's Redis state expires, /results falls back to the DB audit
+              record, whose adoption_plan only keeps risk_score - no categories. */}
+          {results.adoption_plan?.categories ? (
             <AdoptionPlanCard results={results} plan={results.adoption_plan} />
+          ) : results.adoption_plan && Object.keys(results.adoption_plan).length > 0 ? (
+            <div className="card p-10 text-center text-xs text-slate-500">
+              The detailed adoption plan for this job has expired; only its summary was kept.
+            </div>
           ) : (
             <div className="card p-10 text-center text-xs text-slate-500">
               No adoption plan was produced for this job ({results.operation} mode).

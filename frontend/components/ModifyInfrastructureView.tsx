@@ -1,0 +1,379 @@
+"use client";
+
+import { useState } from "react";
+import Link from "next/link";
+import SampleDataBanner from "@/components/SampleDataBanner";
+import {
+  Check,
+  CheckCircle2,
+  Cpu,
+  Download,
+  FileCode,
+  GitPullRequest,
+  Globe,
+  Layers,
+  Server,
+  ShieldCheck,
+  Sparkles,
+  ArrowRight,
+  ExternalLink,
+  DollarSign,
+  X,
+} from "lucide-react";
+
+interface ModifyInfrastructureViewProps {
+  jobId?: string;
+  userRequestText?: string;
+  region?: string;
+  environment?: string;
+  onApprovePR?: () => void;
+}
+
+export default function ModifyInfrastructureView({
+  jobId = "req-20241218-001",
+  userRequestText = "Increase the EC2 web server from t2.micro to t2.medium and scale the Fargate backend service from 2 to 4 tasks.",
+  region = "ap-south-1",
+  environment = "Production",
+  onApprovePR,
+}: ModifyInfrastructureViewProps) {
+  const [selectedFile, setSelectedFile] = useState<"ec2.tf" | "ecs-fargate.tf">("ec2.tf");
+  const [showApprovalModal, setShowApprovalModal] = useState(false);
+
+  return (
+    <div className="space-y-6 max-w-6xl mx-auto animate-fade-in">
+      <SampleDataBanner feature="The code diff, plan and cost for your requested change" />
+      {/* 1. Header & Primary Actions */}
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between pb-4 border-b border-slate-200">
+        <div>
+          <div className="flex items-center gap-2.5">
+            <h1 className="text-2xl font-bold text-slate-900 tracking-tight">Modify Infrastructure</h1>
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+              Ready for Review
+            </span>
+          </div>
+          <p className="text-xs text-slate-500 mt-1">
+            Job ID: <span className="font-mono text-slate-700 font-semibold">{jobId}</span> · Scope:{" "}
+            <span className="font-semibold text-slate-700">{environment}</span> ({region})
+          </p>
+        </div>
+
+        <div className="flex items-center gap-2.5">
+          <a
+            href={`/api/scan/${jobId}/download`}
+            className="btn-secondary text-xs px-3.5 py-2 flex items-center gap-1.5"
+          >
+            <Download className="w-3.5 h-3.5" />
+            Download Bundle
+          </a>
+          <button
+            type="button"
+            onClick={() => (onApprovePR ? onApprovePR() : setShowApprovalModal(true))}
+            className="btn-primary text-xs px-4 py-2 flex items-center gap-2 font-bold shadow-sm"
+          >
+            <GitPullRequest className="w-4 h-4" />
+            Approve & Create PR
+          </button>
+        </div>
+      </div>
+
+      {/* 2. 4-Agent Pipeline Progress Bar (Simple & Clean) */}
+      <div className="p-3 rounded-2xl bg-slate-50 border border-slate-200/80 flex items-center justify-between text-xs">
+        <div className="flex items-center gap-2">
+          <span className="w-5 h-5 rounded-full bg-emerald-600 text-white flex items-center justify-center text-3xs font-bold">
+            ✓
+          </span>
+          <span className="font-bold text-slate-900">1. Infrastructure</span>
+          <span className="text-2xs text-slate-500">(Discovered)</span>
+        </div>
+        <div className="w-8 h-px bg-slate-300" />
+
+        <div className="flex items-center gap-2">
+          <span className="w-5 h-5 rounded-full bg-brand-600 text-white flex items-center justify-center text-3xs font-bold">
+            2
+          </span>
+          <span className="font-bold text-slate-900">2. IaC Engineering</span>
+          <span className="text-2xs text-brand-700 font-semibold">(2 files updated)</span>
+        </div>
+        <div className="w-8 h-px bg-slate-300" />
+
+        <div className="flex items-center gap-2">
+          <span className="w-5 h-5 rounded-full bg-slate-200 text-slate-600 flex items-center justify-center text-3xs font-bold">
+            3
+          </span>
+          <span className="font-bold text-slate-700">3. Verification & Risk</span>
+          <span className="text-2xs text-emerald-700 font-semibold">(Passed)</span>
+        </div>
+        <div className="w-8 h-px bg-slate-300" />
+
+        <div className="flex items-center gap-2">
+          <span className="w-5 h-5 rounded-full bg-slate-200 text-slate-600 flex items-center justify-center text-3xs font-bold">
+            4
+          </span>
+          <span className="font-bold text-slate-700">4. Delivery & Approval</span>
+          <span className="text-2xs text-slate-500">(Pending)</span>
+        </div>
+      </div>
+
+      {/* 3. User Request & Intent Banner */}
+      <div className="card p-4.5 bg-gradient-to-r from-brand-50/40 via-white to-slate-50 border border-brand-100/80 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div className="space-y-1">
+          <div className="text-2xs font-bold uppercase tracking-wider text-brand-700 flex items-center gap-1.5">
+            <Sparkles className="w-3.5 h-3.5" />
+            DevOps Natural-Language Request
+          </div>
+          <p className="text-sm font-semibold text-slate-900 leading-snug">&quot;{userRequestText}&quot;</p>
+        </div>
+
+        <div className="flex items-center gap-2 shrink-0 flex-wrap">
+          <span className="px-2.5 py-1 rounded-lg text-2xs font-bold bg-blue-100 text-blue-800 border border-blue-200">
+            Operation: MODIFY
+          </span>
+          <span className="px-2.5 py-1 rounded-lg text-2xs font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">
+            In-Place Updates Only
+          </span>
+          <span className="px-2.5 py-1 rounded-lg text-2xs font-bold bg-slate-100 text-slate-700 border border-slate-200">
+            +$27.25 / mo
+          </span>
+        </div>
+      </div>
+
+      {/* 4. Core 2-Column Workspace: Code Diff + Summary */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+        {/* Left Side: Code Diff Viewer (8 cols) */}
+        <div className="lg:col-span-8 space-y-4">
+          <div className="card overflow-hidden">
+            {/* Diff Header */}
+            <div className="card-header justify-between py-3 px-4 bg-slate-50/80 border-b border-slate-200">
+              <div className="flex items-center gap-2">
+                <FileCode className="w-4 h-4 text-brand-600" />
+                <span className="text-xs font-bold text-slate-900">Terraform Code Changes</span>
+              </div>
+
+              {/* File Selector Tabs */}
+              <div className="flex items-center gap-1.5 bg-white p-1 rounded-xl border border-slate-200 text-xs font-mono">
+                <button
+                  type="button"
+                  onClick={() => setSelectedFile("ec2.tf")}
+                  className={`px-3 py-1 rounded-lg transition-all flex items-center gap-1.5 ${
+                    selectedFile === "ec2.tf"
+                      ? "bg-slate-900 text-white font-bold shadow-xs"
+                      : "text-slate-600 hover:text-slate-900 hover:bg-slate-100"
+                  }`}
+                >
+                  ec2.tf <span className="text-3xs px-1 rounded-sm bg-amber-400/30 text-amber-300">M</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setSelectedFile("ecs-fargate.tf")}
+                  className={`px-3 py-1 rounded-lg transition-all flex items-center gap-1.5 ${
+                    selectedFile === "ecs-fargate.tf"
+                      ? "bg-slate-900 text-white font-bold shadow-xs"
+                      : "text-slate-600 hover:text-slate-900 hover:bg-slate-100"
+                  }`}
+                >
+                  ecs-fargate.tf <span className="text-3xs px-1 rounded-sm bg-amber-400/30 text-amber-300">M</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Code Diff Display */}
+            <div className="p-4 bg-slate-950 font-mono text-xs leading-relaxed text-slate-300 overflow-x-auto">
+              {selectedFile === "ec2.tf" ? (
+                <div className="space-y-1">
+                  <div className="text-slate-600">{"// File: terraform/ec2.tf"}</div>
+                  <div className="text-slate-500">resource &quot;aws_instance&quot; &quot;web_server&quot; &#123;</div>
+                  <div className="text-slate-500">&nbsp;&nbsp;ami&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;= var.ami_id</div>
+                  <div className="bg-rose-950/80 text-rose-300 px-2 py-1 rounded-md flex items-center">
+                    <span className="text-rose-500 font-bold select-none mr-3">-</span>
+                    <span>instance_type = &quot;t2.micro&quot;</span>
+                  </div>
+                  <div className="bg-emerald-950/80 text-emerald-300 px-2 py-1 rounded-md flex items-center">
+                    <span className="text-emerald-400 font-bold select-none mr-3">+</span>
+                    <span className="font-bold">instance_type = &quot;t2.medium&quot;</span>
+                  </div>
+                  <div className="text-slate-500">&nbsp;&nbsp;subnet_id&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;= var.public_subnet_id</div>
+                  <div className="text-slate-500">&nbsp;&nbsp;vpc_security_group_ids = [aws_security_group.web.id]</div>
+                  <div className="text-slate-500">&nbsp;&nbsp;tags = &#123; Name = &quot;web-server&quot;, Environment = &quot;production&quot; &#125;</div>
+                  <div className="text-slate-500">&#125;</div>
+                </div>
+              ) : (
+                <div className="space-y-1">
+                  <div className="text-slate-600">{"// File: terraform/ecs-fargate.tf"}</div>
+                  <div className="text-slate-500">resource &quot;aws_ecs_service&quot; &quot;backend&quot; &#123;</div>
+                  <div className="text-slate-500">&nbsp;&nbsp;name&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;= &quot;backend-service&quot;</div>
+                  <div className="text-slate-500">&nbsp;&nbsp;cluster&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;= aws_ecs_cluster.main.id</div>
+                  <div className="bg-rose-950/80 text-rose-300 px-2 py-1 rounded-md flex items-center">
+                    <span className="text-rose-500 font-bold select-none mr-3">-</span>
+                    <span>desired_count&nbsp;&nbsp;&nbsp;= 2</span>
+                  </div>
+                  <div className="bg-emerald-950/80 text-emerald-300 px-2 py-1 rounded-md flex items-center">
+                    <span className="text-emerald-400 font-bold select-none mr-3">+</span>
+                    <span className="font-bold">desired_count&nbsp;&nbsp;&nbsp;= 4</span>
+                  </div>
+                  <div className="text-slate-500">&nbsp;&nbsp;launch_type&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;= &quot;FARGATE&quot;</div>
+                  <div className="text-slate-500">&nbsp;&nbsp;task_definition = aws_ecs_task_definition.app.arn</div>
+                  <div className="text-slate-500">&#125;</div>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Affected Resources Minimal Cards */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div className="p-3.5 rounded-xl border border-slate-200 bg-white space-y-1.5 shadow-2xs">
+              <div className="flex items-center justify-between text-xs font-bold text-slate-900">
+                <span className="flex items-center gap-1.5">
+                  <Server className="w-3.5 h-3.5 text-blue-600" />
+                  EC2: web-server
+                </span>
+                <span className="text-3xs font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-md">
+                  In-place
+                </span>
+              </div>
+              <div className="text-2xs font-mono text-slate-600">
+                instance_type: <span className="line-through text-slate-400">t2.micro</span> →{" "}
+                <span className="text-emerald-700 font-bold">t2.medium</span>
+              </div>
+            </div>
+
+            <div className="p-3.5 rounded-xl border border-slate-200 bg-white space-y-1.5 shadow-2xs">
+              <div className="flex items-center justify-between text-xs font-bold text-slate-900">
+                <span className="flex items-center gap-1.5">
+                  <Cpu className="w-3.5 h-3.5 text-indigo-600" />
+                  Fargate: backend
+                </span>
+                <span className="text-3xs font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-md">
+                  In-place
+                </span>
+              </div>
+              <div className="text-2xs font-mono text-slate-600">
+                desired_count: <span className="line-through text-slate-400">2</span> →{" "}
+                <span className="text-emerald-700 font-bold">4 tasks</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Right Side: Verification, Cost & Action (4 cols) */}
+        <div className="lg:col-span-4 space-y-4">
+          {/* Summary Card */}
+          <div className="card p-4.5 space-y-3.5">
+            <div className="text-xs font-bold text-slate-900 border-b border-slate-100 pb-2 flex items-center justify-between">
+              <span>Change Summary</span>
+              <span className="text-2xs text-slate-500 font-normal">2 modified</span>
+            </div>
+
+            <dl className="text-xs space-y-2">
+              <div className="flex justify-between">
+                <dt className="text-slate-500">Resources to update:</dt>
+                <dd className="font-bold text-slate-900">2 (in-place)</dd>
+              </div>
+              <div className="flex justify-between">
+                <dt className="text-slate-500">Resources to destroy:</dt>
+                <dd className="font-bold text-emerald-700">0 (safe)</dd>
+              </div>
+              <div className="flex justify-between">
+                <dt className="text-slate-500">Security Scanners:</dt>
+                <dd className="font-bold text-emerald-700">✓ Passed (0 issues)</dd>
+              </div>
+              <div className="flex justify-between pt-2 border-t border-slate-100">
+                <dt className="text-slate-500">Cost delta:</dt>
+                <dd className="font-bold text-slate-900">+$27.25 / month</dd>
+              </div>
+            </dl>
+
+            <button
+              type="button"
+              onClick={() => (onApprovePR ? onApprovePR() : setShowApprovalModal(true))}
+              className="btn-primary w-full py-2.5 text-xs flex items-center justify-center gap-2 font-bold shadow-sm mt-2"
+            >
+              <GitPullRequest className="w-4 h-4" />
+              Approve & Create PR
+            </button>
+
+            <Link
+              href="/scan"
+              className="btn-secondary w-full py-2 text-2xs text-center justify-center text-slate-600"
+            >
+              Edit Request
+            </Link>
+          </div>
+
+          {/* Safety Card */}
+          <div className="p-3.5 rounded-2xl bg-emerald-50/70 border border-emerald-200 text-2xs text-emerald-900 flex items-start gap-2.5">
+            <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+            <p className="leading-relaxed">
+              <strong className="font-semibold">Zero-Mutation Guarantee:</strong> Live AWS resources were never touched.
+              Terraform plan verified 0 replacement and 0 destructive operations.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      {/* PR Modal Dialog */}
+      {showApprovalModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs animate-fade-in">
+          <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 max-w-md w-full p-6 space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2 text-sm font-bold text-slate-900">
+                <GitPullRequest className="w-5 h-5 text-brand-600" />
+                <span>Open GitHub Pull Request</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowApprovalModal(false)}
+                className="text-slate-400 hover:text-slate-600"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-600">
+              This will create a new branch and open a Pull Request with your modified Terraform code.
+            </p>
+
+            <div className="space-y-2">
+              <label className="text-xs font-medium text-slate-700 block">Repository</label>
+              <input
+                type="text"
+                defaultValue="my-org/infrastructure-aws"
+                className="field-input font-mono text-xs w-full"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-xs font-medium text-slate-700 block">Branch</label>
+              <input
+                type="text"
+                defaultValue="terraagent/modify-ec2-fargate-scale"
+                className="field-input font-mono text-xs w-full"
+              />
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setShowApprovalModal(false)}
+                className="btn-secondary text-xs"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  alert("Pull Request created! Branch: terraagent/modify-ec2-fargate-scale");
+                  setShowApprovalModal(false);
+                }}
+                className="btn-primary text-xs font-bold"
+              >
+                Confirm & Open PR
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
