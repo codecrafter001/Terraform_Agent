@@ -90,10 +90,10 @@ jobs:
             
             | Step | Status |
             | :--- | :--- |
-            | 🖌 **Format (`fmt`)** | \`${{ steps.fmt.outcome }}\` |
-            | ⚙️ **Init (`init`)** | \`${{ steps.init.outcome }}\` |
-            | 🔍 **Validation (`validate`)** | \`${{ steps.validate.outcome }}\` |
-            | 📋 **Plan (`plan`)** | \`${{ steps.plan.outcome }}\` |
+            | 🖌 **Format (fmt)** | \`${{ steps.fmt.outcome }}\` |
+            | ⚙️ **Init (init)** | \`${{ steps.init.outcome }}\` |
+            | 🔍 **Validation (validate)** | \`${{ steps.validate.outcome }}\` |
+            | 📋 **Plan (plan)** | \`${{ steps.plan.outcome }}\` |
 
             <details>
             <summary>📖 View Detailed Plan Output</summary>
