@@ -16,6 +16,16 @@ provider "aws" {
   region = var.aws_region
 }
 
+locals {
+  # Repos with immutable OIDC subjects send "repo:owner@ownerId/name@repoId:..." instead of
+  # "repo:owner/name:...". The IDs also stop a renamed/recreated repo from inheriting the role.
+  github_sub_prefix = (
+    var.github_owner_id != "" && var.github_repo_id != ""
+    ? "repo:${var.github_org}@${var.github_owner_id}/${var.github_repo}@${var.github_repo_id}"
+    : "repo:${var.github_org}/${var.github_repo}"
+  )
+}
+
 # -----------------------------------------------------------------------------
 # 1. Terraform Remote State Storage (S3 + DynamoDB)
 # -----------------------------------------------------------------------------
@@ -130,8 +140,8 @@ data "aws_iam_policy_document" "github_actions_trust" {
       test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
       values = [
-        "repo:${var.github_org}/${var.github_repo}:ref:refs/heads/*",
-        "repo:${var.github_org}/${var.github_repo}:pull_request"
+        "${local.github_sub_prefix}:ref:refs/heads/*",
+        "${local.github_sub_prefix}:pull_request"
       ]
     }
   }

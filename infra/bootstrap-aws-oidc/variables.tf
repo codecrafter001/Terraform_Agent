@@ -16,6 +16,18 @@ variable "github_repo" {
   default     = "Terraform_Agent"
 }
 
+variable "github_owner_id" {
+  type        = string
+  description = "Numeric GitHub owner ID, for repos using immutable OIDC subjects (gh api repos/OWNER/REPO/actions/oidc/customization/sub). Empty = classic subject."
+  default     = "145287568"
+}
+
+variable "github_repo_id" {
+  type        = string
+  description = "Numeric GitHub repository ID, for repos using immutable OIDC subjects. Empty = classic subject."
+  default     = "1373587293"
+}
+
 variable "iam_role_name" {
   type        = string
   description = "Name for the IAM role assumed by GitHub Actions."
