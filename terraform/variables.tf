@@ -6,18 +6,18 @@ variable "aws_region" {
 
 variable "environment" {
   type        = string
-  description = "Target deployment environment"
+  description = "Deployment environment"
   default     = "production"
 }
 
-variable "domain_name" {
+variable "instance_type" {
   type        = string
-  description = "Root domain name for ACM certificate (e.g., example.com)"
-  default     = "example.com"
+  description = "EC2 instance size"
+  default     = "t3.micro"
 }
 
-variable "app_name" {
+variable "instance_name" {
   type        = string
-  description = "Name of the application or service"
-  default     = "terraagent-service"
+  description = "Name tag for the EC2 instance"
+  default     = "terraagent-ubuntu-ec2"
 }
