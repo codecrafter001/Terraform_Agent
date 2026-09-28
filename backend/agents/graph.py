@@ -358,8 +358,9 @@ def _attempts(state: Dict[str, Any]) -> int:
     return int(state.get("repair_attempts") or 0)
 
 
-def _plural(n: int, word: str) -> str:
-    return f"{n} {word}{'' if n == 1 else 's'}"
+def _plural(n: int, word: str, many: str = "") -> str:
+    """"1 resource" / "3 resources"; pass `many` for irregular plurals."""
+    return f"{n} {word if n == 1 else (many or word + 's')}"
 
 
 # ---------------------------------------------------------------------------
@@ -386,7 +387,7 @@ async def infrastructure_agent(state: Dict[str, Any]) -> Dict[str, Any]:
             f": {decided.get('manage', 0)} manage, {decided.get('reference', 0)} reference, "
             f"{decided.get('exclude', 0)} exclude, {decided.get('review', 0)} review"
         )
-    summary += f" · {_plural(edges, 'dependency')} · region {acc.get('region')}"
+    summary += f" · {_plural(edges, 'dependency', 'dependencies')} · region {acc.get('region')}"
     discovery = acc.get("discovery") or {}
     if discovery and not discovery.get("complete", True):
         summary += f" · INCOMPLETE: {_plural(len(discovery.get('errors') or []), 'AWS call')} failed"
@@ -394,7 +395,7 @@ async def infrastructure_agent(state: Dict[str, Any]) -> Dict[str, Any]:
     if inv.get("available"):
         summary += (
             f" · account-wide: {inv.get('total')}{'+' if inv.get('truncated') else ''} resources"
-            f" in {len(inv.get('by_region') or {})} regions"
+            f" in {_plural(len(inv.get('by_region') or {}), 'region')}"
         )
     await _log(job_id, "infrastructure", f"Done. {summary}.")
     return _finish_stage("infrastructure", acc, delta, summary, 25)

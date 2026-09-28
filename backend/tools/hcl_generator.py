@@ -42,6 +42,29 @@ def association_address(route_table_clean_name: str, index: int) -> str:
     return f"aws_route_table_association.{route_table_clean_name}_assoc_{index}"
 
 
+# data source type -> (its lookup argument, the discovery record field holding the value).
+# Discovery ids are the natural lookup value except KMS (key_id is validated as an ARN), SQS (id is the queue URL)
+# and SNS (id is the topic ARN), which data sources look up by name.
+DATA_SOURCE_LOOKUP: Dict[str, Tuple[str, str]] = {
+    "aws_vpc": ("id", "id"),
+    "aws_subnet": ("id", "id"),
+    "aws_security_group": ("id", "id"),
+    "aws_nat_gateway": ("id", "id"),
+    "aws_internet_gateway": ("internet_gateway_id", "id"),
+    "aws_route_table": ("route_table_id", "id"),
+    "aws_instance": ("instance_id", "id"),
+    "aws_s3_bucket": ("bucket", "id"),
+    "aws_db_instance": ("db_instance_identifier", "id"),
+    "aws_iam_role": ("name", "id"),
+    "aws_kms_key": ("key_id", "arn"),  # the provider validates key_id as an ARN
+    "aws_lb": ("arn", "id"),
+    "aws_alb": ("arn", "id"),
+    "aws_dynamodb_table": ("name", "id"),
+    "aws_sqs_queue": ("name", "name"),
+    "aws_sns_topic": ("name", "name"),
+}
+
+
 class HCLGenerator:
     """Deterministic, dependency-aware modular HCL synthesizer."""
 
@@ -299,7 +322,12 @@ project_name = "Cloud-Modernization"
 """
 
     def _compose_data_source(self, r_type: str, res: Dict[str, Any], clean_name: str) -> str:
-        return f'data "{r_type}" "{clean_name}" {{\n  id = {hcl_str(res.get("id", ""))}\n}}'
+        """A lookup of a resource owned elsewhere. Each data source has its own
+        lookup argument - only some accept `id` (aws_internet_gateway, for one,
+        rejects it at validate) - so the argument comes from DATA_SOURCE_LOOKUP."""
+        argument, field = DATA_SOURCE_LOOKUP.get(r_type, ("id", "id"))
+        value = res.get(field) or res.get("id", "")
+        return f'data "{r_type}" "{clean_name}" {{\n  {argument} = {hcl_str(value)}\n}}'
 
     def _compose_managed_resource(
         self,

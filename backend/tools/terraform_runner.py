@@ -72,6 +72,50 @@ async def _plugin_cache_lock(env: Optional[Dict[str, str]]) -> AsyncIterator[Non
         os.close(fd)
 
 
+def _cli_config_path(cache_dir: str) -> str:
+    """A Terraform/OpenTofu CLI config that lets `init` reuse the shared
+    provider cache. Since Terraform 1.4 the cache is skipped unless the
+    working directory already has a lock file entry for the provider, and our
+    sandboxes never do - so every `init` downloaded the whole AWS provider
+    again (several minutes per validation pass). The sandbox lock file is
+    thrown away and never shipped, so the setting's caveat (a lock file with
+    only this platform's checksum) doesn't apply. Written once per cache dir,
+    next to it; contains no secrets."""
+    path = os.path.join(os.path.dirname(cache_dir.rstrip("/")) or cache_dir, "terraagent.tfrc")
+    content = (
+        f"plugin_cache_dir = {json.dumps(cache_dir)}\n"
+        "plugin_cache_may_break_dependency_lock_file = true\n"
+    )
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            if f.read() == content:
+                return path
+    except OSError:
+        pass
+    tmp = f"{path}.{os.getpid()}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(content)
+    os.replace(tmp, path)  # atomic: concurrent workers never see a partial file
+    return path
+
+
+def _with_cache_config(env: Optional[Dict[str, str]]) -> Optional[Dict[str, str]]:
+    """The subprocess env plus TF_CLI_CONFIG_FILE (cache reuse) and
+    CHECKPOINT_DISABLE (skips HashiCorp's version-check call). Leaves env
+    untouched when no plugin cache is configured or a CLI config is already
+    set. None still means "inherit os.environ", now with these two added."""
+    base = env if env is not None else os.environ
+    cache = base.get("TF_PLUGIN_CACHE_DIR")
+    if not cache or base.get("TF_CLI_CONFIG_FILE"):
+        return env
+    try:
+        config = _cli_config_path(cache)
+    except OSError as e:
+        logger.warning(f"Could not write the Terraform CLI config, provider cache not reused: {e}")
+        return env
+    return {**base, "TF_CLI_CONFIG_FILE": config, "CHECKPOINT_DISABLE": "1"}
+
+
 class TerraformRunner:
     @staticmethod
     async def run_command(
@@ -94,6 +138,7 @@ class TerraformRunner:
         # lets callers' existing exception handling report it - validate_hcl
         # turns it into a "system" check, which the graph never sends to repair.
         timeout = timeout_seconds if timeout_seconds is not None else TERRAFORM_COMMAND_TIMEOUT_SECONDS
+        env = _with_cache_config(env)
         lock = _plugin_cache_lock(env) if subcommand == "init" else contextlib.nullcontext()
         async with lock:
             process = await asyncio.create_subprocess_exec(

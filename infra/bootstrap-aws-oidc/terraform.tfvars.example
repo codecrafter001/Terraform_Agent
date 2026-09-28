@@ -1,0 +1,6 @@
+aws_region          = "us-east-1"
+github_org          = "rashikagangraj"
+github_repo         = "TerraAgent"
+iam_role_name       = "GitHubActions-TerraformDeployer"
+s3_bucket_prefix    = "terraagent-tf-state"
+dynamodb_table_name = "terraagent-tf-locks"
