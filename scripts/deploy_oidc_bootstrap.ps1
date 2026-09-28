@@ -1,8 +1,8 @@
 # TerraAgent AWS OIDC & GitHub Actions Pipeline Setup for Windows PowerShell
 
 param (
-    [string]$GithubOrg = "rashikagangraj",
-    [string]$GithubRepo = "TerraAgent",
+    [string]$GithubOrg = "codecrafter001",
+    [string]$GithubRepo = "Terraform_Agent",
     [string]$AwsRegion = "us-east-1"
 )
 

@@ -114,7 +114,7 @@ def update_backend_tf(state_bucket: str, locks_table: str, region: str):
 
 def print_summary(role_arn: str, state_bucket: str, locks_table: str, github_org: str, github_repo: str):
     print("\n" + "=" * 80)
-    print("🚀 TERRAAGENT AWS STS OIDC & GITHUB ACTIONS SETUP COMPLETE")
+    print("[INFO] TERRAAGENT AWS STS OIDC & GITHUB ACTIONS SETUP COMPLETE")
     print("=" * 80)
     print(f"IAM Role ARN:       {role_arn}")
     print(f"S3 State Bucket:    {state_bucket}")
@@ -139,8 +139,8 @@ def main():
     print(" TerraAgent AWS OIDC & GitHub Actions CI/CD Automated Provisioner")
     print("=" * 80)
 
-    github_org = os.getenv("GITHUB_ORG", "rashikagangraj")
-    github_repo = os.getenv("GITHUB_REPO", "TerraAgent")
+    github_org = os.getenv("GITHUB_ORG", "codecrafter001")
+    github_repo = os.getenv("GITHUB_REPO", "Terraform_Agent")
     aws_region = os.getenv("AWS_REGION", "us-east-1")
 
     if not check_aws_auth():

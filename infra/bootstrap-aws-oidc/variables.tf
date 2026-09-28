@@ -7,13 +7,13 @@ variable "aws_region" {
 variable "github_org" {
   type        = string
   description = "GitHub Organization or Username owning the repository."
-  default     = "rashikagangraj"
+  default     = "codecrafter001"
 }
 
 variable "github_repo" {
   type        = string
-  description = "GitHub Repository name without org/owner (e.g., TerraAgent)."
-  default     = "TerraAgent"
+  description = "GitHub Repository name without org/owner (e.g., Terraform_Agent)."
+  default     = "Terraform_Agent"
 }
 
 variable "iam_role_name" {
