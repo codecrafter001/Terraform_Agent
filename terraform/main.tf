@@ -1,3 +1,4 @@
+# Managed by TerraAgent GitOps Pipeline
 # Query latest official Ubuntu 22.04 LTS AMI from Canonical
 data "aws_ami" "ubuntu" {
   most_recent = true
