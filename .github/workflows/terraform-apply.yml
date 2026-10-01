@@ -7,6 +7,7 @@ on:
     paths:
       - "terraform/**"
       - "*.tf"
+  workflow_dispatch:
 
 permissions:
   id-token: write      # Required for requesting the JWT via AWS STS OIDC
@@ -14,9 +15,10 @@ permissions:
 
 env:
   AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
-  ROLE_TO_ASSUME: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+  ROLE_TO_ASSUME: ${{ secrets.AWS_DEPLOY_ROLE_ARN || 'arn:aws:iam::314900493735:role/GitHubActions-TerraformDeployer' }}
   TF_WORKING_DIR: "terraform"
   TERRAFORM_VERSION: "1.9.5"
+
 
 jobs:
   apply:
