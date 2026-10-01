@@ -57,8 +57,10 @@ terraform.rc
 # Output data & temporary files
 tmp/
 /tmp/terraagent
+deployed-terraform-test/
 *.zip
 *.log
+
 
 # IDE & OS
 .idea/

@@ -70,11 +70,11 @@ export default function PendingApprovalPanel({
   const [secretKey, setSecretKey] = useState("");
   const [sessionToken, setSessionToken] = useState("");
 
-  const actionable = mode === "actionable" && !approvalDecision;
+  const actionable = mode === "actionable";
   const findings = (actionable ? approvalRequest?.findings : null) ?? pendingApproval?.findings ?? [];
   const review = actionable ? approvalRequest?.review_resources ?? [] : [];
   const decided = approvalDecision?.resource_decisions ?? {};
-  const isRejected = approvalDecision?.decision === "rejected";
+  const isRejected = !actionable && approvalDecision?.decision === "rejected";
 
   if (findings.length === 0 && review.length === 0 && !approvalDecision) return null;
 
@@ -149,13 +149,15 @@ export default function PendingApprovalPanel({
           )}
           <div>
             <h3 className="text-sm font-bold">
-              {approvalDecision
+              {actionable
+                ? "Human Decision Required: Approve Findings & Deliver"
+                : approvalDecision
                 ? `Human ${approvalDecision.decision === "approved" ? "Approved" : "Rejected"} This Configuration`
                 : "Human Decision Required: Select or Exclude Resources"}
             </h3>
             <p className="text-xs mt-0.5 opacity-90">
-              {summary || "The risk gate recorded a decision."}
-              {approvalDecision &&
+              {summary || (actionable ? "Review the detected drift findings before proceeding." : "The risk gate recorded a decision.")}
+              {!actionable && approvalDecision &&
                 ` Decision recorded ${new Date(approvalDecision.decided_at).toLocaleString()}${
                   approvalDecision.reason ? `: "${approvalDecision.reason}"` : "."
                 }`}

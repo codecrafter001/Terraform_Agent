@@ -43,22 +43,26 @@ function isActive(pathname: string, item: NavItem): boolean {
 
 function Brand() {
   return (
-    <Link href="/" className="flex items-center gap-2.5 px-2 py-1 rounded-xl hover:opacity-90 transition-opacity">
+    <Link href="/" className="flex items-center gap-3 px-2 py-1.5 rounded-xl hover:opacity-90 transition-opacity">
       <Image
         src="/aikart-logo.jpeg"
-        alt="AIKart"
-        width={96}
-        height={28}
-        className="h-7 w-auto object-contain"
+        alt="aiKart"
+        width={36}
+        height={36}
+        style={{ width: "auto", height: "auto" }}
+        className="h-7 w-auto object-contain rounded-md shrink-0"
         priority
       />
-      <span className="w-px h-5 bg-slate-200" />
-      <span className="text-sm font-bold text-ink whitespace-nowrap">
+
+      <span className="w-px h-6 bg-slate-200" />
+      <span className="text-base font-bold text-slate-900 tracking-tight whitespace-nowrap">
         Terra<span className="text-brand-600">Agent</span>
       </span>
     </Link>
   );
 }
+
+
 
 function HealthIndicator() {
   const [healthy, setHealthy] = useState<boolean | null>(null);

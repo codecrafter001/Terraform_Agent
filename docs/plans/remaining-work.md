@@ -1,4 +1,4 @@
-# TerraAgent: implementation plan for the remaining work
+aok# TerraAgent: implementation plan for the remaining work
 
 Status as of 2026-09-26. Branch `feat/four-agent-restructure`, nothing pushed.
 Committed: Weeks 2–6 (last commit `103cdc7`). Everything below is either uncommitted or not started.

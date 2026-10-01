@@ -2,7 +2,7 @@
 
 import asyncio
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -678,7 +678,7 @@ async def merge_pull_request(request: Request, job_id: str, body: MergePullReque
         logger.warning(f"[{job_id}] Failed to fetch workflow runs after merge: {CredentialScrubber.scrub_text(str(e))}")
 
     pr.update(status="merged", merged=True, merge_commit_sha=merge_result.get("sha"),
-              merged_at=datetime.utcnow().isoformat())
+              merged_at=datetime.now(timezone.utc).isoformat())
     state[_PR_STATE_KEYS[body.kind]] = pr
     await redis_service.set_job_state(job_id, state)
     await redis_service.publish_log(

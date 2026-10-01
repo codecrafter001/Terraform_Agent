@@ -139,10 +139,16 @@ data "aws_iam_policy_document" "github_actions_trust" {
     condition {
       test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
-      values = [
-        "${local.github_sub_prefix}:ref:refs/heads/*",
-        "${local.github_sub_prefix}:pull_request"
-      ]
+      values = distinct(concat(
+        [
+          "repo:${var.github_org}/${var.github_repo}:ref:refs/heads/*",
+          "repo:${var.github_org}/${var.github_repo}:pull_request",
+        ],
+        var.github_owner_id != "" && var.github_repo_id != "" ? [
+          "repo:${var.github_org}@${var.github_owner_id}/${var.github_repo}@${var.github_repo_id}:ref:refs/heads/*",
+          "repo:${var.github_org}@${var.github_owner_id}/${var.github_repo}@${var.github_repo_id}:pull_request",
+        ] : []
+      ))
     }
   }
 }

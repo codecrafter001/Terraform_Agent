@@ -206,7 +206,9 @@ export default function ScanProgress({ jobId }: ScanProgressProps) {
   // EventSource reconnects on its own after an error - don't close it then.
   useEffect(() => {
     const seen = new Set<number>();
-    const es = new EventSource(`/api/scan/${jobId}/logs`);
+    const apiBase = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000/api";
+    const logUrl = `${apiBase.replace(/\/$/, "")}/scan/${jobId}/logs`;
+    const es = new EventSource(logUrl);
     eventSourceRef.current = es;
 
     es.onopen = () => setStreamState("open");

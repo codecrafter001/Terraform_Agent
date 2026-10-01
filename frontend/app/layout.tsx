@@ -3,10 +3,12 @@ import type { Metadata } from 'next';
 import { Sidebar } from '../components/Sidebar';
 
 export const metadata: Metadata = {
-  title: 'TerraAgent — Safe AWS ClickOps to Terraform Multi-Agent System',
+  title: 'TerraAgent — Automated AWS Cloud GitOps Platform',
   description:
     'Stateful multi-agent system powered by LangGraph, FastAPI, and local LLMs to reverse-engineer AWS infrastructure into validated Terraform code with zero mutation.',
 };
+
+
 
 export default function RootLayout({
   children,
