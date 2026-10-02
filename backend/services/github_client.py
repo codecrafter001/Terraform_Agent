@@ -474,8 +474,12 @@ async def _publish(
 
     tree: List[Dict[str, str]] = []
     for path, content in files.items():
+        if isinstance(content, str):
+            b64_content = base64.b64encode(content.encode("utf-8")).decode("ascii")
+        else:
+            b64_content = base64.b64encode(content).decode("ascii")
         blob_resp = await client.post(f"/repos/{repo}/git/blobs", json={
-            "content": base64.b64encode(content.encode("utf-8")).decode("ascii"),
+            "content": b64_content,
             "encoding": "base64",
         })
         if blob_resp.status_code not in (200, 201):

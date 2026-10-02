@@ -1,17 +1,13 @@
 """Validation Agent: Executes IaC engine fmt, init, and validate safely in isolated temp directories."""
 
 import logging
-import re
 from typing import Any, Dict
 
 from services.redis_client import redis_service
+from tools.hcl_invariants import MUTATING_COMMAND_PATTERN as _DISALLOWED_COMMAND_PATTERN
 from tools.iac_engine import get_iac_engine
 
 logger = logging.getLogger(__name__)
-
-_DISALLOWED_COMMAND_PATTERN = re.compile(
-    r'command\s*=\s*"[^"]*\b(terraform|tofu)\s+(apply|destroy|import)\b', re.IGNORECASE
-)
 
 
 def _assert_no_mutating_commands(tf_files: Dict[str, str]) -> None:

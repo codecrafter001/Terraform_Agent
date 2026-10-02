@@ -89,11 +89,20 @@ async def start_scan(request: Request, scan_request: ScanRequest):
     job_id = f"job-{uuid.uuid4().hex[:12]}"
     created_at = datetime.utcnow().isoformat()
 
-    # Request payload prepared for worker (SecretStr extracted safely in memory)
-    request_dict = {
+    # Extract credentials into a short-lived, encrypted, single-use reference
+    from services.credential_store import store_credential_ref
+
+    creds = {
         "aws_access_key": scan_request.aws_access_key.get_secret_value(),
         "aws_secret_key": scan_request.aws_secret_key.get_secret_value(),
         "aws_session_token": scan_request.aws_session_token.get_secret_value() if scan_request.aws_session_token else None,
+        "zip_password": scan_request.zip_password.get_secret_value() if scan_request.zip_password else None,
+    }
+    cred_ref = store_credential_ref(creds, ttl_seconds=600)
+
+    # Request payload prepared for worker (No raw secret keys stored in broker args)
+    request_dict = {
+        "credential_ref": cred_ref,
         "region": scan_request.region,
         "environment": scan_request.environment or "production",
         "user_request": scan_request.user_request,
@@ -103,7 +112,6 @@ async def start_scan(request: Request, scan_request: ScanRequest):
         "role_arn": scan_request.role_arn,
         "external_id": scan_request.external_id,
         "webhook_url": scan_request.webhook_url,
-        "zip_password": scan_request.zip_password.get_secret_value() if scan_request.zip_password else None,
         "terraform_binary": scan_request.terraform_binary,
         "run_plan_equivalence": scan_request.run_plan_equivalence,
         "use_resource_explorer": scan_request.use_resource_explorer,
@@ -136,11 +144,13 @@ async def start_scan(request: Request, scan_request: ScanRequest):
         try:
             run_scan_task.apply_async(args=[job_id, request_dict], retry=False)
             dispatched = True
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Celery dispatch unavailable ({e}), running inline")
             dispatched = False
 
     if not dispatched:
         asyncio.create_task(run_scan_inline(job_id, request_dict))
+
 
     return ScanResponse(
         job_id=job_id,
@@ -153,8 +163,16 @@ async def start_scan(request: Request, scan_request: ScanRequest):
 
 
 async def run_scan_inline(job_id: str, request_dict: dict):
+    from services.credential_store import retrieve_credential_ref
     from services.pipeline import run_pipeline
+
+    cred_ref = request_dict.get("credential_ref")
+    if cred_ref:
+        creds = retrieve_credential_ref(cred_ref, delete=True)
+        if creds:
+            request_dict.update(creds)
     await run_pipeline(job_id, request_dict)
+
 
 
 @router.get("/{job_id}/status", response_model=JobProgress)
@@ -334,18 +352,34 @@ def _validate_resource_decisions(state: Dict[str, Any], decisions: Dict[str, str
 
 async def _dispatch_resume(job_id: str, decision: Dict[str, Any], aws_credentials: Optional[Dict[str, Any]]) -> None:
     from services.celery_app import resume_scan_task
+    from services.credential_store import store_credential_ref
+
+    cred_payload = None
+    if aws_credentials:
+        if "credential_ref" not in aws_credentials:
+            cred_ref = store_credential_ref(aws_credentials, ttl_seconds=600)
+            cred_payload = {"credential_ref": cred_ref}
+        else:
+            cred_payload = aws_credentials
+
     if redis_service._redis_available:
         try:
-            resume_scan_task.apply_async(args=[job_id, decision, aws_credentials], retry=False)
+            resume_scan_task.apply_async(args=[job_id, decision, cred_payload], retry=False)
             return
         except Exception:
             pass
-    asyncio.create_task(_resume_inline(job_id, decision, aws_credentials))
+    asyncio.create_task(_resume_inline(job_id, decision, cred_payload or aws_credentials))
 
 
 async def _resume_inline(job_id: str, decision: Dict[str, Any], aws_credentials: Optional[Dict[str, Any]]) -> None:
+    from services.credential_store import retrieve_credential_ref
     from services.pipeline import resume_pipeline
+
+    if aws_credentials and "credential_ref" in aws_credentials:
+        creds = retrieve_credential_ref(aws_credentials["credential_ref"], delete=True)
+        aws_credentials = creds
     await resume_pipeline(job_id, decision, aws_credentials)
+
 
 
 async def _decide(job_id: str, state: Dict[str, Any], decision: Dict[str, Any],

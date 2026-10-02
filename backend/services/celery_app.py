@@ -61,7 +61,25 @@ celery_app.conf.update(
             "task": "sweep_stale_jobs",
             "schedule": crontab(minute="*/10"),  # every 10 minutes
         },
+        "sweep-deployments": {
+            "task": "deploy.sweep",
+            "schedule": crontab(minute="*/10"),
+        },
+        "sandbox-e2e-suite": {
+            "task": "deploy.sandbox_suite",
+            "schedule": crontab(hour=2, minute=0),  # daily at 02:00 UTC
+        },
     },
+
+    # Deployment mode (deploy/tasks.py) has its own queues:
+    # deploy_plan for analysis/build/plan, and dedicated deploy_apply for apply.
+    imports=("deploy.tasks",),
+    task_routes={
+        "deploy.apply": {"queue": "deploy_apply"},
+        "deploy.build_and_verify": {"queue": "deploy_build"},
+        "deploy.*": {"queue": "deploy_plan"},
+    },
+
 )
 
 
@@ -108,7 +126,14 @@ def sweep_stale_jobs():
 @celery_app.task(name="run_scan_task")
 def run_scan_task(job_id: str, scan_request_dict: dict):
     """Celery background worker task that runs the LangGraph pipeline."""
+    from services.credential_store import retrieve_credential_ref
     from services.pipeline import run_pipeline
+
+    cred_ref = scan_request_dict.get("credential_ref")
+    if cred_ref:
+        creds = retrieve_credential_ref(cred_ref, delete=True)
+        if creds:
+            scan_request_dict.update(creds)
 
     logger.info(f"Starting Celery scan task for Job ID: {job_id}")
     return asyncio.run(run_pipeline(job_id, scan_request_dict))
@@ -117,7 +142,13 @@ def run_scan_task(job_id: str, scan_request_dict: dict):
 @celery_app.task(name="resume_scan_task")
 def resume_scan_task(job_id: str, decision: dict, aws_credentials: Optional[dict] = None):
     """Resume a run paused at the approval gate with a human's decision."""
+    from services.credential_store import retrieve_credential_ref
     from services.pipeline import resume_pipeline
+
+    if aws_credentials and "credential_ref" in aws_credentials:
+        creds = retrieve_credential_ref(aws_credentials["credential_ref"], delete=True)
+        aws_credentials = creds
 
     logger.info(f"Resuming job {job_id} after a human decision")
     return asyncio.run(resume_pipeline(job_id, decision, aws_credentials))
+

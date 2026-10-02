@@ -17,14 +17,18 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIPX_BIN_DIR=/usr/local/bin \
     TF_PLUGIN_CACHE_DIR=/home/agent/.terraform.d/plugin-cache
 
-# Install system dependencies
+# Install system dependencies & Node.js 20.x LTS (Phase 6 D8 for Node Lambda builds)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     git \
     unzip \
     ca-certificates \
+    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/* \
-    && mkdir -p "${TF_PLUGIN_CACHE_DIR}"
+    && mkdir -p "${TF_PLUGIN_CACHE_DIR}" \
+    && node --version && npm --version
+
 
 # Install Terraform CLI
 RUN curl -sSL "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip" -o terraform.zip \

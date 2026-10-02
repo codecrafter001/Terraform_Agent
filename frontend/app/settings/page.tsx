@@ -266,9 +266,21 @@ export default function SettingsPage() {
               ))}
               <Flag
                 ok={config.integrations.infracost_api_key_set}
-                label={config.integrations.infracost_api_key_set ? "Infracost API key set" : "Infracost API key not set"}
+                label={config.integrations.infracost_api_key_set ? "Infracost API key configured" : "Infracost API key missing"}
               />
             </div>
+            {!config.integrations.infracost_api_key_set && (
+              <div className="p-3.5 rounded-xl bg-amber-50/70 border border-amber-200/80 text-xs text-amber-900 space-y-1">
+                <div className="font-semibold flex items-center gap-1.5 text-amber-950">
+                  <Wrench className="w-3.5 h-3.5 text-amber-700" />
+                  Infracost Setup Hint
+                </div>
+                <p className="text-2xs text-amber-800 leading-relaxed">
+                  Cost estimation is currently skipped during plan verification because <code className="bg-amber-100/80 px-1 py-0.5 rounded font-mono text-amber-900 font-semibold">INFRACOST_API_KEY</code> is not set.
+                  To enable live monthly cloud cost estimates on your deployments, register a free key at <a href="https://infracost.io" target="_blank" rel="noreferrer" className="underline font-semibold hover:text-amber-950">infracost.io</a> and set <code className="bg-amber-100/80 px-1 py-0.5 rounded font-mono text-amber-900 font-semibold">INFRACOST_API_KEY=&lt;key&gt;</code> in your backend environment (<code className="bg-amber-100/80 px-1 py-0.5 rounded font-mono">backend/.env</code>).
+                </p>
+              </div>
+            )}
             <p className="text-2xs text-slate-500 flex items-center gap-1.5">
               <GitBranch className="w-3.5 h-3.5" />
               GitHub tokens are entered per pull request and never stored.

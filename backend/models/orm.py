@@ -64,3 +64,104 @@ class GraphCheckpoint(Base):
     job_id = Column(String, primary_key=True)
     data = Column(Text, nullable=False)
     updated_at = Column(String, nullable=False)
+
+
+class Deployment(Base):
+    """Deployment mode (deploy/, docs/design/code-to-aws-deployment.md).
+    status changes only through deploy/store.py::transition, which also writes
+    a DeploymentEvent. *_json columns hold JSON; none ever holds credentials
+    or tokens."""
+    __tablename__ = "deployments"
+
+    id = Column(String, primary_key=True, index=True)
+    status = Column(String, nullable=False)
+    source_kind = Column(String, nullable=False)  # zip | github
+    source_name = Column(String, nullable=False)  # upload filename, or owner/repo@ref
+    source_sha256 = Column(String, nullable=True)
+    source_artifact_id = Column(String, nullable=True)
+    region = Column(String, nullable=False)
+    environment = Column(String, nullable=False)
+    requested_by = Column(String, nullable=True)
+    intake_json = Column(Text, nullable=True)  # files kept/dropped, secret-scan hits (path/line/kind only)
+    profile_json = Column(Text, nullable=True)  # deploy/analyzer.py::ProjectProfile
+    decision_json = Column(Text, nullable=True)  # deploy/decision_engine.py::Decision
+    target_type = Column(String, nullable=True)
+    settings_json = Column(Text, nullable=True)
+    build_json = Column(Text, nullable=True)
+    rendered_json = Column(Text, nullable=True)  # rendered .tf files + terraform.tfvars.json
+    verification_json = Column(Text, nullable=True)
+    verdict = Column(String, nullable=True)  # PASS | INCOMPLETE | FAIL
+    # Phase 3 additions (Target, Plan, Policy, Approval)
+    target_id = Column(String, nullable=True)
+    plan_json = Column(Text, nullable=True)  # Redacted plan JSON
+    plan_summary_json = Column(Text, nullable=True)  # {counts: {...}, changes: [...], is_destructive: bool}
+    plan_bundle_sha256 = Column(String, nullable=True)
+    plan_artifact_id = Column(String, nullable=True)
+    plan_policy_json = Column(Text, nullable=True)  # OPA / plan policy evaluation
+    plan_kind = Column(String, default="plan", nullable=True)  # "plan" | "destroy" (Phase 5.2)
+    is_destructive = Column(Boolean, default=False)
+    approved_by = Column(String, nullable=True)
+    approved_at = Column(String, nullable=True)
+    approval_reason = Column(Text, nullable=True)
+    rejection_reason = Column(Text, nullable=True)
+    # Phase 4 additions (Apply, Outputs, GitOps PR)
+    applied_at = Column(String, nullable=True)
+    outputs_json = Column(Text, nullable=True)  # JSON outputs from terraform show -json
+    pr_json = Column(Text, nullable=True)  # GitOps PR details (Phase 4B)
+    # Phase 6 additions (Tenancy and ownership)
+    owner = Column(String, nullable=True, index=True)
+    tenant_id = Column(String, nullable=True, index=True)
+    error = Column(Text, nullable=True)
+    created_at = Column(String, nullable=False)
+    updated_at = Column(String, nullable=False)
+    completed_at = Column(String, nullable=True)
+
+
+class AwsDeployTarget(Base):
+    """AWS Account deployment target registered by the customer (Phase 3).
+    Holds role ARNs, region, state bucket and the per-target ExternalId."""
+    __tablename__ = "aws_deploy_targets"
+
+    id = Column(String, primary_key=True, index=True)
+    name = Column(String, nullable=False)
+    account_id = Column(String, nullable=False)
+    region = Column(String, nullable=False)
+    plan_role_arn = Column(String, nullable=False)
+    apply_role_arn = Column(String, nullable=False)
+    permissions_boundary_arn = Column(String, nullable=True)
+    state_bucket = Column(String, nullable=False)
+    external_id = Column(String, nullable=False)
+    owner = Column(String, nullable=True, index=True)
+    tenant_id = Column(String, nullable=True, index=True)
+    verified_at = Column(String, nullable=True)
+    created_at = Column(String, nullable=False)
+    updated_at = Column(String, nullable=False)
+
+
+class DeploymentEvent(Base):
+    """Append-only audit trail of a deployment's status changes."""
+    __tablename__ = "deployment_events"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    deployment_id = Column(String, nullable=False, index=True)
+    from_status = Column(String, nullable=True)
+    to_status = Column(String, nullable=False)
+    actor = Column(String, nullable=False)
+    reason = Column(Text, nullable=True)
+    created_at = Column(String, nullable=False)
+
+
+class DeploymentArtifact(Base):
+    """An artifact in deploy/artifacts.py's store. Sensitive artifacts (user
+    code, build output, plan bundle) are never served for download."""
+    __tablename__ = "deployment_artifacts"
+
+    id = Column(String, primary_key=True)  # the store's artifact id
+    deployment_id = Column(String, nullable=False, index=True)
+    kind = Column(String, nullable=False)  # source | bundle | plan_binary | plan_bundle
+    sha256 = Column(String, nullable=False)
+    size = Column(Integer, nullable=False)
+    sensitive = Column(Boolean, nullable=False, default=True)
+    created_at = Column(String, nullable=False)
+    expires_at = Column(String, nullable=True)
+

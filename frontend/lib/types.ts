@@ -583,3 +583,326 @@ export interface WorkspaceSettings {
     tools: Record<string, boolean>;
   };
 }
+
+// ---------------------------------------------------------------------------
+// Deployment mode (backend/deploy/, routers/deployments.py)
+// ---------------------------------------------------------------------------
+
+// backend/deploy/store.py::DeployStatus
+export type DeploymentStatus =
+  | 'SOURCE_RECEIVED'
+  | 'ANALYZING'
+  | 'ANALYZED'
+  | 'BUILDING'
+  | 'VERIFYING'
+  | 'VERIFIED'
+  | 'PLANNING'
+  | 'AWAITING_APPROVAL'
+  | 'APPROVED'
+  | 'PR_OPEN'
+  | 'MERGED'
+  | 'APPLYING'
+  | 'DEPLOYED'
+  | 'DESTROY_PLANNING'
+  | 'DESTROYING'
+  | 'DESTROYED'
+  | 'FAILED_PARTIAL'
+  | 'NEEDS_RECONCILIATION'
+  | 'REJECTED'
+  | 'EXPIRED'
+  | 'FAILED';
+
+export type DeploymentTarget = 'static_site' | 'lambda_http' | 'ecs_service';
+
+export interface AwsDeployTarget {
+  id: string;
+  name: string;
+  account_id: string;
+  region: string;
+  plan_role_arn: string;
+  apply_role_arn: string;
+  permissions_boundary_arn?: string | null;
+  state_bucket: string;
+  external_id: string;
+  verified_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AwsDeployTargetCreate {
+  name: string;
+  account_id: string;
+  region: string;
+  plan_role_arn: string;
+  apply_role_arn: string;
+  permissions_boundary_arn?: string | null;
+  state_bucket: string;
+}
+
+export interface AwsDeployTargetVerifyResult {
+  target_id: string;
+  verified: boolean;
+  plan_role_ok: boolean;
+  apply_role_ok: boolean;
+  bucket_ok: boolean;
+  caller_identity?: { account?: string; arn?: string; user_id?: string } | null;
+  message: string;
+}
+
+export interface DeployEvidence {
+  file: string;
+  rule: string;
+}
+
+// backend/deploy/analyzer.py::ProjectProfile
+export interface ProjectProfile {
+  runtime: 'python' | 'node' | 'static' | 'container' | 'unknown';
+  runtime_version: string | null;
+  framework: string | null;
+  lambda_handler: string | null;
+  server_entrypoint: boolean;
+  listens_on_port: number | null;
+  build_required: boolean;
+  static_output_dir: string | null;
+  dependency_manifest: string | null;
+  dependencies: string[];
+  has_lockfile: boolean;
+  native_dependencies: string[];
+  source_bytes: number;
+  has_dockerfile: boolean;
+  evidence: Record<string, DeployEvidence[]>;
+  warnings: string[];
+}
+
+// backend/deploy/decision_engine.py::Decision
+export interface DecisionReason {
+  code: string;
+  target: string | null;
+  message: string;
+}
+
+export interface DeploymentDecision {
+  rules_version: number;
+  eligible: DeploymentTarget[];
+  recommended: DeploymentTarget | null;
+  reasons: DecisionReason[];
+  blocked: boolean;
+}
+
+export interface SecretHit {
+  path: string;
+  line: number;
+  kind: string;
+}
+
+export interface DeploymentIntake {
+  file_count: number;
+  total_bytes: number;
+  dropped_count: number;
+  dropped: { path: string; reason: string }[];
+  stripped_prefix: string | null;
+  secret_hits?: SecretHit[];
+}
+
+export interface DeploymentBuild {
+  kind: 'static_site' | 'lambda_zip';
+  runtime: string | null;
+  handler: string | null;
+  file_count: number;
+  package_bytes: number;
+  package_sha256_b64: string | null;
+  warnings: string[];
+  log: string[];
+}
+
+export interface DeploymentCost {
+  tool_skipped: boolean;
+  total_monthly_cost?: number;
+  currency?: string;
+  resources?: { name: string; resource_type: string; monthly_cost: number }[];
+}
+
+// backend/deploy/verify.py
+export interface DeploymentVerification {
+  verdict: 'PASS' | 'INCOMPLETE' | 'FAIL';
+  incomplete_reasons: string[];
+  validation: { passed: boolean; checks: ValidationCheck[] };
+  security: SecurityReport & { findings_truncated?: boolean; scanners_failed?: Record<string, string> };
+  security_posture: SecurityPosture;
+  cost: DeploymentCost;
+}
+
+export interface StaticSiteSettings {
+  price_class: 'PriceClass_100' | 'PriceClass_200' | 'PriceClass_All';
+  spa_mode: boolean;
+}
+
+export interface LambdaSettings {
+  memory_mb: number;
+  timeout_s: number;
+  public_url: boolean;
+}
+
+export interface EcsSettings {
+  container_port?: number;
+  cpu?: number;
+  memory_mb?: number;
+  desired_count?: number;
+  image_tag?: string;
+  certificate_arn?: string | null;
+}
+
+export type PrepareDeploymentPayload =
+  | { target: 'static_site'; settings: StaticSiteSettings }
+  | { target: 'lambda_http'; settings: LambdaSettings }
+  | { target: 'ecs_service'; settings: EcsSettings };
+
+export interface PlanResourceChange {
+  address: string;
+  action: 'create' | 'update' | 'replace' | 'destroy' | 'delete' | string;
+  type?: string;
+}
+
+export interface PlanSummary {
+  counts: {
+    create: number;
+    update: number;
+    replace: number;
+    destroy: number;
+    no_op?: number;
+  };
+  changes: PlanResourceChange[];
+  is_destructive: boolean;
+}
+
+export interface PlanPolicyResult {
+  passed: boolean;
+  violations: string[];
+  warnings: string[];
+  is_destructive: boolean;
+  destructive_changes: PlanResourceChange[];
+  summary?: {
+    resource_count: number;
+    target_type: string;
+    target_allowed: boolean;
+  };
+}
+
+export interface ApprovalPayload {
+  plan_bundle_sha256: string;
+  confirm: boolean;
+  acknowledge_destructive?: boolean;
+  reason?: string;
+}
+
+export interface RejectionPayload {
+  reason?: string;
+}
+
+export interface DeploymentPullRequestInfo {
+  number: number;
+  html_url: string;
+  branch: string;
+  repo: string;
+  commit_sha: string;
+  base_branch: string;
+  title: string;
+  created_at?: string;
+}
+
+export interface CreatePullRequestPayload {
+  github_token: string;
+  repo: string;
+  base_branch?: string;
+  target_dir?: string;
+  add_workflows?: boolean;
+}
+
+export interface MergePullRequestPayload {
+  github_token: string;
+  merge_method?: 'squash' | 'merge' | 'rebase';
+  commit_title?: string;
+  commit_message?: string;
+}
+
+export interface DeploymentSummary {
+  id: string;
+  status: DeploymentStatus;
+  source_kind: 'zip' | 'github';
+  source_name: string;
+  region: string;
+  environment: string;
+  target_type: DeploymentTarget | null;
+  target_id?: string | null;
+  plan_bundle_sha256?: string | null;
+  plan_kind?: 'plan' | 'destroy' | string | null;
+  is_destructive?: boolean;
+  approved_by?: string | null;
+  approved_at?: string | null;
+  applied_at?: string | null;
+  verdict: DeploymentVerification['verdict'] | null;
+  error: string | null;
+  pr?: DeploymentPullRequestInfo | null;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
+}
+
+export interface DeploymentEvent {
+  from_status: DeploymentStatus | null;
+  to_status: DeploymentStatus;
+  actor: string;
+  reason: string | null;
+  created_at: string;
+}
+
+export interface RollbackPayload {
+  target_artifact_id?: string;
+  target_release_id?: string;
+  reason?: string;
+}
+
+export interface BuildHistoryItem {
+  artifact_id: string;
+  deployment_id: string;
+  kind: string;
+  sha256: string;
+  size: number;
+  created_at: string;
+  release_id?: string | null;
+}
+
+export interface DeploymentDetail extends DeploymentSummary {
+  source_sha256: string | null;
+  requested_by?: string | null;
+  intake: DeploymentIntake | null;
+  profile: ProjectProfile | null;
+  decision: DeploymentDecision | null;
+  settings: Partial<StaticSiteSettings & LambdaSettings & EcsSettings> | null;
+  build: DeploymentBuild | null;
+  verification: DeploymentVerification | null;
+  plan?: Record<string, unknown> | null;
+  plan_summary?: PlanSummary | null;
+  plan_policy?: PlanPolicyResult | null;
+  outputs?: Record<string, unknown> | null;
+  approval_reason?: string | null;
+  rejection_reason?: string | null;
+  rendered_files: string[];
+  events: DeploymentEvent[];
+  can_prepare: boolean;
+  can_plan: boolean;
+  can_approve: boolean;
+  can_deploy: boolean;
+  can_open_pr?: boolean;
+  can_merge_pr?: boolean;
+  can_rollback?: boolean;
+  can_destroy?: boolean;
+}
+
+export interface DeploymentAccepted {
+  deployment_id: string;
+  status: DeploymentStatus;
+  message: string;
+}
+
+

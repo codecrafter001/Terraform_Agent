@@ -6,9 +6,9 @@
 ---
 
 ## Hard Safety Rules & Constraints
-1. **NEVER** run `terraform apply` or `terraform destroy` under any circumstance.
+1. **NEVER** run `terraform apply` or `terraform destroy`, **except** in deployment mode through `backend/deploy/apply_runner.py::apply_approved`, which only applies a saved plan whose bundle hash matches a recorded human approval, only on the `deploy_apply` queue, only with `TERRAAGENT_DEPLOY_ENABLED=true`. Migration mode and `TerraformRunner.check_argv` never apply. `terraform import` is never run automatically in either mode.
 2. **NEVER** execute `terraform import` automatically — only generate import commands as reviewable text for human operators.
-3. **NEVER** create, modify, or delete AWS resources. All AWS operations must use read-only APIs (`Describe*`, `Get*`, `List*`).
+3. **NEVER** create, modify, or delete AWS resources in migration mode, which uses read-only APIs (`Describe*`, `Get*`, `List*`) only. Deployment mode may change AWS only through `apply_approved`, using the `TerraAgentDeployApply` role with a permissions boundary and a per-deployment session policy, and only on resources it created (`terraagent-<deployment_id>-*`, tagged `terraagent:deployment-id`).
 4. **NEVER** store AWS access keys, secret keys, or session tokens in any database, log file, console output, or error message.
 5. **NEVER** pass raw AWS credentials to LLMs (Ollama / Anthropic / OpenAI).
 6. **NEVER** run container processes as `root`. Always use the non-privileged `agent` user.
@@ -305,6 +305,29 @@ terraagent/
 ### 5. Evidence & Reporting
 - Every drift finding captures: `resource_id`, `resource_type`, `terraform_address`, `attribute`, `live_value`, `generated_value`, `impact`, `tier`, `reason`, `evidence`.
 - Generates `reports/drift_results.json` and `drift_report.md` included in the artifact bundle.
+
+---
+
+## Deployment Mode (Code → AWS)
+
+Design and status: `docs/design/code-to-aws-deployment.md`. A separate mode in `backend/deploy/`
+(API `routers/deployments.py`, UI `/deploy`, `/deployments`): upload a ZIP or a GitHub repo →
+`source_intake` (safe extraction: no traversal/symlinks/encrypted entries, size caps; `.git`,
+`node_modules`, `.env*` never packaged) → `secret_scan` (a hit fails the deployment; reports
+path/line/kind, never the value) → `analyzer` + `decision_engine` (deterministic rules, no LLM;
+targets `static_site`, `lambda_http`) → `builder` (wheels-only pip, `npm ci --ignore-scripts`,
+every command through `check_build_argv`, no credentials in the env) → `renderer` (vetted
+templates in `deploy/templates/` copied verbatim; every value only via `terraform.tfvars.json`) →
+`verify` (`validate_hcl` + Checkov/Trivy/Conftest + Infracost; fails closed to INCOMPLETE) →
+`plan` (runs via read-only plan role, outputs redacted plan JSON & SHA-256 fingerprint) →
+`approval` (named approver identity recorded, requires explicit confirmation) →
+`apply_approved` (`backend/deploy/apply_runner.py`: the only apply path, strictly on `deploy_apply`
+queue with `TERRAAGENT_DEPLOY_ENABLED=true`, verifying plan bundle SHA-256 matches approval).
+- Status changes only through `deploy/store.py::transition` (writes a `deployment_events` row).
+- Celery tasks (`deploy.plan` on `deploy_plan`, `deploy.apply` on `deploy_apply`) take a deployment id only — never credentials,
+  tokens or source content. A GitHub token is used inside the request handler and dropped.
+- `TerraformRunner.check_argv` is never widened (a test pins it). Apply runs strictly through `check_apply_argv`.
+- `agents/`, `tools/` and `routers/scan.py` must never import `deploy` (`tests/test_deploy_guardrails.py`).
 
 ---
 

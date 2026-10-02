@@ -1,37 +1,57 @@
 """Shared STS AssumeRole helper - used by cloud_discovery_node (per-scan
-multi-account access) and the AWS Organizations account listing endpoint
-(which needs a management-account role to call organizations:ListAccounts).
+multi-account access), the AWS Organizations account listing endpoint,
+and deployment mode (Phase 3 STS sessions).
 """
 
-from typing import Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
 
 
 def assume_role(
-    role_arn: str, access_key: str, secret_key: str, session_token: Optional[str],
-    region: str, session_name: str, endpoint_url: Optional[str] = None,
+    role_arn: str,
+    access_key: Optional[str] = None,
+    secret_key: Optional[str] = None,
+    session_token: Optional[str] = None,
+    region: str = "us-east-1",
+    session_name: str = "terraagent-session",
+    endpoint_url: Optional[str] = None,
     external_id: Optional[str] = None,
+    source_identity: Optional[str] = None,
+    tags: Optional[List[Dict[str, str]]] = None,
+    policy: Optional[str] = None,
+    duration_seconds: int = 3600,
 ) -> Tuple[str, str, str]:
-    """Exchanges the caller's credentials for a short-lived (1 hour) set
-    scoped to role_arn. Returns (access_key, secret_key, session_token) as
-    plain local values - callers must not persist these beyond the
-    operation they were requested for."""
-    sts_session = boto3.Session(
-        aws_access_key_id=access_key,
-        aws_secret_access_key=secret_key,
-        aws_session_token=session_token,
-        region_name=region
-    )
+    """Exchanges credentials for a short-lived set scoped to role_arn.
+    Returns (access_key, secret_key, session_token) as plain local values.
+    Callers must not persist these beyond the operation they were requested for.
+    """
+    if access_key and secret_key:
+        sts_session = boto3.Session(
+            aws_access_key_id=access_key,
+            aws_secret_access_key=secret_key,
+            aws_session_token=session_token,
+            region_name=region,
+        )
+    else:
+        sts_session = boto3.Session(region_name=region)
+
     sts = sts_session.client("sts", endpoint_url=endpoint_url)
-    # ExternalId: the per-tenant value the role's trust policy requires
-    # (docs/aws/read-only-role.md) - stops another TerraAgent tenant who
-    # learns this role ARN from assuming it (confused deputy).
-    kwargs = {"ExternalId": external_id} if external_id else {}
+
+    kwargs: Dict[str, Any] = {}
+    if external_id:
+        kwargs["ExternalId"] = external_id
+    if source_identity:
+        kwargs["SourceIdentity"] = source_identity[:64]
+    if tags:
+        kwargs["Tags"] = [{"Key": str(t.get("Key", t.get("key", ""))), "Value": str(t.get("Value", t.get("value", "")))} for t in tags]
+    if policy:
+        kwargs["Policy"] = policy
+
     response = sts.assume_role(
         RoleArn=role_arn,
         RoleSessionName=session_name[:64],
-        DurationSeconds=3600,
+        DurationSeconds=max(900, min(duration_seconds, 43200)),
         **kwargs,
     )
     creds = response["Credentials"]

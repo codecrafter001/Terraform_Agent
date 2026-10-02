@@ -15,6 +15,8 @@ from fastapi.responses import JSONResponse
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
+from routers.aws_targets import router as aws_targets_router
+from routers.deployments import router as deployments_router
 from routers.download import router as download_router
 from routers.jobs import router as jobs_router
 from routers.metrics import setup_metrics
@@ -117,6 +119,8 @@ app.include_router(jobs_router, prefix="/api")
 app.include_router(download_router, prefix="/api")
 app.include_router(organizations_router, prefix="/api")
 app.include_router(settings_router, prefix="/api")
+app.include_router(deployments_router, prefix="/api")
+app.include_router(aws_targets_router, prefix="/api")
 
 # Prometheus metrics at GET /metrics (unprefixed - conventional scrape path)
 setup_metrics(app)

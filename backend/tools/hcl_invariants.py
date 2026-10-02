@@ -10,6 +10,14 @@ count against it; only what the repair *introduced* does.
 import re
 from typing import Dict, List, Set
 
+# A provisioner/command string that would run terraform/tofu apply, destroy or
+# import. Content-level tripwire (CLAUDE.md): complements, never replaces,
+# terraform_runner.check_argv. Used on generated HCL (validation_agent) and on
+# uploaded projects (tools/code_bundle.py).
+MUTATING_COMMAND_PATTERN = re.compile(
+    r'command\s*=\s*"[^"]*\b(terraform|tofu)\s+(apply|destroy|import)\b', re.IGNORECASE
+)
+
 _ADDRESS = re.compile(r'^\s*(resource|data)\s+"([^"]+)"\s+"([^"]+)"', re.MULTILINE)
 _MODULE = re.compile(r'^\s*module\s+"([^"]+)"', re.MULTILINE)
 

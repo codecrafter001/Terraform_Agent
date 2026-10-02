@@ -11,9 +11,11 @@ import {
   Menu,
   PlusCircle,
   GitPullRequest,
+  Rocket,
   Settings,
   ShieldCheck,
   Terminal,
+  UploadCloud,
   X,
 } from "lucide-react";
 import { checkHealth } from "@/lib/api";
@@ -27,7 +29,9 @@ interface NavItem {
 
 const NAV_ITEMS: NavItem[] = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard, matches: ["/results", "/scan/"] },
-  { href: "/scan", label: "New Request", icon: PlusCircle },
+  { href: "/deploy", label: "Upload & Deploy ZIP", icon: UploadCloud },
+  { href: "/deployments", label: "Deployments", icon: Rocket, matches: ["/deployments/"] },
+  { href: "/scan", label: "AWS Scan", icon: PlusCircle },
   { href: "/requests", label: "Change Requests", icon: FileDiff },
   { href: "/runs", label: "Terraform Runs", icon: Terminal },
   { href: "/pull-requests", label: "Pull Requests", icon: GitPullRequest, matches: ["/pull-requests"] },
@@ -38,7 +42,7 @@ function isActive(pathname: string, item: NavItem): boolean {
   if (item.href === "/") {
     return pathname === "/" || (item.matches ?? []).some((m) => pathname.startsWith(m));
   }
-  return pathname === item.href;
+  return pathname === item.href || (item.matches ?? []).some((m) => pathname.startsWith(m));
 }
 
 function Brand() {

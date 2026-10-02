@@ -1,5 +1,3 @@
-version: "3.8"
-
 networks:
   terraagent-net:
     driver: bridge
@@ -94,7 +92,7 @@ services:
       dockerfile: Dockerfile
     container_name: terraagent-celery
     restart: unless-stopped
-    command: celery -A services.celery_app worker --beat --loglevel=info
+    command: celery -A services.celery_app worker --beat -Q celery,deploy_plan --loglevel=info
     volumes:
       - ./backend:/app
       - ./security:/app/security:ro
@@ -118,7 +116,67 @@ services:
       terraagent-postgres:
         condition: service_healthy
 
+  terraagent-builder:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: terraagent-builder
+    restart: unless-stopped
+    command: celery -A services.celery_app worker -Q deploy_build --concurrency 2 --loglevel=info
+    read_only: true
+    tmpfs:
+      - /tmp:rw,size=2048m
+    volumes:
+      - ./backend:/app:ro
+      - ./security:/app/security:ro
+    environment:
+      - REDIS_URL=redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}@terraagent-redis:6379/0
+      - CELERY_BROKER_URL=redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}@terraagent-redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}@terraagent-redis:6379/0
+      - DATABASE_URL=postgresql://terraagent:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@terraagent-postgres:5432/terraagent
+    networks:
+      - terraagent-net
+    depends_on:
+      terraagent-redis:
+        condition: service_started
+      terraagent-postgres:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2048M
+
+  terraagent-deployer:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: terraagent-deployer
+    restart: unless-stopped
+    command: celery -A services.celery_app worker -Q deploy_apply --concurrency 1 --loglevel=info
+    volumes:
+      - ./backend:/app
+      - ./security:/app/security:ro
+      - terraagent_output:/tmp/terraagent
+      - terraform_plugin_cache:/home/agent/.terraform.d/plugin-cache
+    env_file:
+      - .env
+    environment:
+      - TERRAAGENT_DEPLOY_ENABLED=true
+      - REDIS_URL=redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}@terraagent-redis:6379/0
+      - CELERY_BROKER_URL=redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}@terraagent-redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}@terraagent-redis:6379/0
+      - DATABASE_URL=postgresql://terraagent:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@terraagent-postgres:5432/terraagent
+    networks:
+      - terraagent-net
+    depends_on:
+      terraagent-redis:
+        condition: service_started
+      terraagent-postgres:
+        condition: service_healthy
+
   terraagent-postgres:
+
     image: postgres:15
     container_name: terraagent-postgres
     restart: unless-stopped

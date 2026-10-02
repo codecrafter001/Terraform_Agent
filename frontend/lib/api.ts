@@ -370,3 +370,242 @@ export async function analyzeIntent(payload: {
 
   return await res.json();
 }
+
+// ---------------------------------------------------------------------------
+// Deployment mode (backend/routers/deployments.py)
+// ---------------------------------------------------------------------------
+
+async function _json<T>(res: Response, fallback: string): Promise<T> {
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: fallback }));
+    throw new Error(_errorText(err.detail, fallback));
+  }
+  return (await res.json()) as T;
+}
+
+export async function uploadDeploymentSource(
+  file: File,
+  region: string,
+  environment: string,
+): Promise<import("./types").DeploymentAccepted> {
+  const form = new FormData();
+  form.append("file", file);
+  form.append("region", region);
+  form.append("environment", environment);
+  // No Content-Type header: the browser sets the multipart boundary.
+  const res = await fetch(`${API_BASE}/deployments/upload`, { method: "POST", headers: authHeaders(), body: form });
+  return _json(res, "Upload failed");
+}
+
+export async function createGithubDeployment(payload: {
+  repo: string;
+  ref?: string;
+  github_token?: string;
+  region: string;
+  environment: string;
+}): Promise<import("./types").DeploymentAccepted> {
+  const res = await fetch(`${API_BASE}/deployments/github`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify(payload),
+  });
+  return _json(res, "Could not start the deployment from GitHub");
+}
+
+export async function fetchDeployments(limit = 50): Promise<import("./types").DeploymentSummary[]> {
+  try {
+    const res = await fetch(`${API_BASE}/deployments?limit=${limit}`, { cache: "no-store", headers: authHeaders() });
+    if (!res.ok) return [];
+    return await res.json();
+  } catch {
+    return [];
+  }
+}
+
+export async function fetchDeployment(id: string): Promise<import("./types").DeploymentDetail> {
+  const res = await fetch(`${API_BASE}/deployments/${encodeURIComponent(id)}`, { cache: "no-store", headers: authHeaders() });
+  return _json(res, "Failed to load the deployment");
+}
+
+export async function prepareDeployment(
+  id: string,
+  payload: import("./types").PrepareDeploymentPayload,
+): Promise<import("./types").DeploymentAccepted> {
+  const res = await fetch(`${API_BASE}/deployments/${encodeURIComponent(id)}/prepare`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify(payload),
+  });
+  return _json(res, "Could not start the build");
+}
+
+export async function fetchDeploymentTerraform(id: string): Promise<Record<string, string>> {
+  const res = await fetch(`${API_BASE}/deployments/${encodeURIComponent(id)}/terraform`, {
+    cache: "no-store",
+    headers: authHeaders(),
+  });
+  return (await _json<{ files: Record<string, string> }>(res, "Failed to load the Terraform files")).files;
+}
+
+export async function fetchDeploymentLogs(id: string): Promise<JobLogLine[]> {
+  try {
+    const res = await fetch(`${API_BASE}/deployments/${encodeURIComponent(id)}/logs/history`, {
+      cache: "no-store",
+      headers: authHeaders(),
+    });
+    if (!res.ok) return [];
+    return (await res.json()).logs || [];
+  } catch {
+    return [];
+  }
+}
+
+export async function planDeployment(id: string, targetId: string): Promise<import("./types").DeploymentAccepted> {
+  const res = await fetch(`${API_BASE}/deployments/${encodeURIComponent(id)}/plan`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ target_id: targetId }),
+  });
+  return _json(res, "Failed to start Terraform planning");
+}
+
+export async function approveDeployment(
+  id: string,
+  payload: import("./types").ApprovalPayload,
+): Promise<import("./types").DeploymentAccepted> {
+  const res = await fetch(`${API_BASE}/deployments/${encodeURIComponent(id)}/approve`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify(payload),
+  });
+  return _json(res, "Failed to approve the deployment plan");
+}
+
+export async function rejectDeployment(
+  id: string,
+  payload: import("./types").RejectionPayload,
+): Promise<import("./types").DeploymentAccepted> {
+  const res = await fetch(`${API_BASE}/deployments/${encodeURIComponent(id)}/reject`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify(payload),
+  });
+  return _json(res, "Failed to reject the deployment");
+}
+
+export async function deployDeployment(
+  id: string,
+  confirm: boolean,
+): Promise<import("./types").DeploymentAccepted> {
+  const res = await fetch(`${API_BASE}/deployments/${encodeURIComponent(id)}/deploy`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ confirm }),
+  });
+  return _json(res, "Failed to start deployment apply");
+}
+
+export async function createDeploymentPullRequest(
+  id: string,
+  payload: import("./types").CreatePullRequestPayload,
+): Promise<Record<string, unknown>> {
+  const res = await fetch(`${API_BASE}/deployments/${encodeURIComponent(id)}/pull-request`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify(payload),
+  });
+  return _json(res, "Failed to open Pull Request");
+}
+
+export async function fetchDeploymentPullRequest(id: string): Promise<Record<string, unknown>> {
+  const res = await fetch(`${API_BASE}/deployments/${encodeURIComponent(id)}/pull-request`, {
+    cache: "no-store",
+    headers: authHeaders(),
+  });
+  return _json(res, "Failed to load Pull Request details");
+}
+
+export async function mergeDeploymentPullRequest(
+  id: string,
+  payload: import("./types").MergePullRequestPayload,
+): Promise<Record<string, unknown>> {
+  const res = await fetch(`${API_BASE}/deployments/${encodeURIComponent(id)}/pull-request/merge`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify(payload),
+  });
+  return _json(res, "Failed to merge Pull Request");
+}
+
+export async function rollbackDeployment(
+  id: string,
+  payload: import("./types").RollbackPayload = {},
+): Promise<import("./types").DeploymentAccepted> {
+  const res = await fetch(`${API_BASE}/deployments/${encodeURIComponent(id)}/rollback`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify(payload),
+  });
+  return _json(res, "Failed to initiate rollback");
+}
+
+export async function planDestroyDeployment(
+  id: string,
+): Promise<import("./types").DeploymentAccepted> {
+  const res = await fetch(`${API_BASE}/deployments/${encodeURIComponent(id)}/destroy/plan`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  return _json(res, "Failed to initiate teardown plan");
+}
+
+export async function fetchDeploymentArtifacts(id: string): Promise<import("./types").BuildHistoryItem[]> {
+  try {
+    const res = await fetch(`${API_BASE}/deployments/${encodeURIComponent(id)}/artifacts`, {
+      cache: "no-store",
+      headers: authHeaders(),
+    });
+    if (!res.ok) return [];
+    return await res.json();
+  } catch {
+    return [];
+  }
+}
+
+export async function fetchAwsDeployTargets(): Promise<import("./types").AwsDeployTarget[]> {
+  try {
+    const res = await fetch(`${API_BASE}/aws-targets`, { cache: "no-store", headers: authHeaders() });
+    if (!res.ok) return [];
+    return await res.json();
+  } catch {
+    return [];
+  }
+}
+
+export async function createAwsDeployTarget(
+  payload: import("./types").AwsDeployTargetCreate,
+): Promise<import("./types").AwsDeployTarget> {
+  const res = await fetch(`${API_BASE}/aws-targets`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify(payload),
+  });
+  return _json(res, "Failed to register deploy target");
+}
+
+export async function deleteAwsDeployTarget(id: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/aws-targets/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error("Failed to delete deploy target");
+}
+
+export async function verifyAwsDeployTarget(id: string): Promise<import("./types").AwsDeployTargetVerifyResult> {
+  const res = await fetch(`${API_BASE}/aws-targets/${encodeURIComponent(id)}/verify`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  return _json(res, "Failed to verify deploy target permissions");
+}
+

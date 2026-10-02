@@ -479,3 +479,149 @@ class TerraformRunner:
             release_sandbox(sandbox_dir)
 
         return result
+
+    @classmethod
+    async def plan_saved(
+        cls,
+        workdir: str,
+        target: Dict[str, Any],
+        deployment_id: str,
+        aws_credentials: Optional[Dict[str, str]] = None,
+        region: str = "us-east-1",
+        binary: str = "terraform",
+    ) -> Dict[str, Any]:
+        """Run `init` with target backend-config and `plan -out=tfplan` against live AWS
+        for deployment mode (Phase 3). Returns the plan binary, redacted plan JSON,
+        resource change tallies, and destructive flags.
+
+        All subcommands pass through check_argv without exception.
+        Credentials are scoped to this subprocess execution only and never logged.
+        """
+        result: Dict[str, Any] = {
+            "passed": False,
+            "counts": {
+                "create": 0,
+                "update": 0,
+                "replace": 0,
+                "destroy": 0,
+                "no_op": 0,
+            },
+            "changes": [],
+            "is_destructive": False,
+            "plan_json": {},
+            "raw_plan_json": {},
+            "plan_binary": b"",
+            "checks": [],
+        }
+
+        env = cls._scoped_aws_env(aws_credentials, region)
+        target_id = target.get("id", "default")
+        bucket = target.get("state_bucket", "")
+        backend_key = f"terraagent/{target_id}/{deployment_id}.tfstate"
+
+        try:
+            if bucket:
+                backend_tf = os.path.join(workdir, "_backend.tf")
+                if not os.path.exists(backend_tf):
+                    with open(backend_tf, "w", encoding="utf-8") as f:
+                        f.write('terraform {\n  backend "s3" {}\n}\n')
+
+            # 1. terraform init with remote S3 backend configuration
+            init_cmd = [
+                binary,
+                "init",
+                f"-backend-config=bucket={bucket}",
+                f"-backend-config=key={backend_key}",
+                f"-backend-config=region={region}",
+                "-input=false",
+            ]
+            code, out, err = await cls.run_command(init_cmd, cwd=workdir, env=env)
+            init_passed = code == 0
+            result["checks"].append({
+                "check_name": "init",
+                "passed": init_passed,
+                "output": CredentialScrubber.scrub_text(out + ("\n" + err if err else "")),
+            })
+            if not init_passed:
+                return result
+
+            # 2. terraform plan -out=tfplan -lock=false (read-only plan role)
+            plan_cmd = [binary, "plan", "-out=tfplan", "-input=false", "-lock=false"]
+            code, out, err = await cls.run_command(plan_cmd, cwd=workdir, env=env)
+            plan_passed = code == 0
+            result["checks"].append({
+                "check_name": "plan",
+                "passed": plan_passed,
+                "output": CredentialScrubber.scrub_text(out + ("\n" + err if err else "")),
+            })
+            if not plan_passed:
+                return result
+
+            # 3. terraform show -json tfplan
+            show_cmd = [binary, "show", "-json", "tfplan"]
+            code, out, err = await cls.run_command(show_cmd, cwd=workdir, env=env)
+            if code != 0:
+                result["checks"].append({
+                    "check_name": "show",
+                    "passed": False,
+                    "output": CredentialScrubber.scrub_text(err or out),
+                })
+                return result
+
+            # 4. Read plan binary
+            plan_path = os.path.join(workdir, "tfplan")
+            if os.path.exists(plan_path):
+                with open(plan_path, "rb") as f:
+                    result["plan_binary"] = f.read()
+
+            raw_plan_data = json.loads(out)
+            result["raw_plan_json"] = raw_plan_data
+            result["plan_json"] = json.loads(CredentialScrubber.scrub_text(out))
+
+            # 5. Parse resource_changes
+            resource_changes = raw_plan_data.get("resource_changes", []) or []
+            counts = result["counts"]
+            destructive_changes = []
+
+            for change in resource_changes:
+                actions = change.get("change", {}).get("actions", [])
+                address = change.get("address", "unknown")
+                res_type = change.get("type", "unknown")
+
+                if actions in (["no-op"], ["read"]):
+                    counts["no_op"] += 1
+                    continue
+                if change.get("mode") == "data":
+                    continue
+
+                if actions == ["create"]:
+                    counts["create"] += 1
+                    result["changes"].append({"address": address, "action": "create", "type": res_type})
+                elif actions == ["update"]:
+                    counts["update"] += 1
+                    result["changes"].append({"address": address, "action": "update", "type": res_type})
+                elif "delete" in actions and "create" in actions:
+                    counts["replace"] += 1
+                    destructive_changes.append({"address": address, "action": "replace", "type": res_type})
+                    result["changes"].append({"address": address, "action": "replace", "type": res_type})
+                elif actions == ["delete"]:
+                    counts["destroy"] += 1
+                    destructive_changes.append({"address": address, "action": "destroy", "type": res_type})
+                    result["changes"].append({"address": address, "action": "destroy", "type": res_type})
+
+            result["is_destructive"] = bool(counts["replace"] > 0 or counts["destroy"] > 0)
+            result["passed"] = True
+            result["checks"].append({
+                "check_name": "show",
+                "passed": True,
+                "output": f"{len(resource_changes)} resource_changes analyzed.",
+            })
+        except Exception as e:
+            result["checks"].append({
+                "check_name": "system",
+                "passed": False,
+                "output": CredentialScrubber.scrub_text(str(e)),
+            })
+
+        return result
+

@@ -1,0 +1,1009 @@
+"use client";
+
+import { useCallback, useEffect, useState } from "react";
+import type { LucideIcon } from "lucide-react";
+import {
+  AlertTriangle,
+  CheckCircle2,
+  Circle,
+  ExternalLink,
+  FileCode2,
+  GitMerge,
+  GitPullRequest,
+  Hammer,
+  Loader2,
+  Lock,
+  Rocket,
+  RotateCcw,
+  Search,
+  ShieldCheck,
+  Terminal,
+  Trash2,
+  XCircle,
+} from "lucide-react";
+import {
+  createDeploymentPullRequest,
+  deployDeployment,
+  fetchDeployment,
+  fetchDeploymentArtifacts,
+  fetchDeploymentLogs,
+  fetchDeploymentTerraform,
+  JobLogLine,
+  mergeDeploymentPullRequest,
+  planDestroyDeployment,
+  prepareDeployment,
+  rollbackDeployment,
+} from "@/lib/api";
+import { IN_PROGRESS_STATUSES, TARGET_LABELS } from "@/lib/deployments";
+import { ApprovalCard, PlanCard } from "./DeploymentPlanApproval";
+import type {
+  BuildHistoryItem,
+  DeploymentDetail,
+  DeploymentStatus,
+  DeploymentTarget,
+  EcsSettings,
+  LambdaSettings,
+  PrepareDeploymentPayload,
+  StaticSiteSettings,
+} from "@/lib/types";
+import { SectionHeading, StatusBadge } from "./ui";
+
+const POLL_MS = 800;
+// backend/deploy/decision_engine.py: the reason codes that make a target eligible.
+const POSITIVE_REASONS = new Set([
+  "lambda.handler_detected",
+  "static.output_present",
+  "container.dockerfile_detected",
+  "server.container_detected",
+]);
+
+const STAGES: {
+  id: string;
+  step: string;
+  label: string;
+  subtitle: string;
+  icon: LucideIcon;
+  doneAfter: DeploymentStatus[];
+  active: DeploymentStatus[];
+}[] = [
+  {
+    id: "build",
+    step: "1",
+    label: "Build & Package",
+    subtitle: "Analyze & generate Terraform",
+    icon: Hammer,
+    active: ["SOURCE_RECEIVED", "ANALYZING", "BUILDING", "VERIFYING"],
+    doneAfter: ["VERIFIED", "PLANNING", "AWAITING_APPROVAL", "APPROVED", "PR_OPEN", "MERGED", "APPLYING", "DEPLOYED"],
+  },
+  {
+    id: "plan",
+    step: "2",
+    label: "Plan & Approve",
+    subtitle: "Terraform plan & cost estimate",
+    icon: Terminal,
+    active: ["PLANNING", "AWAITING_APPROVAL"],
+    doneAfter: ["APPROVED", "PR_OPEN", "MERGED", "APPLYING", "DEPLOYED"],
+  },
+  {
+    id: "deploy",
+    step: "3",
+    label: "Deploy to AWS",
+    subtitle: "Apply resources & live endpoint",
+    icon: Rocket,
+    active: ["APPLYING"],
+    doneAfter: ["DEPLOYED", "MERGED"],
+  },
+];
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function StageTracker({ status }: { status: DeploymentStatus }) {
+  return (
+    <div className="card p-3 sm:p-4 grid grid-cols-1 sm:grid-cols-3 gap-3 shadow-xs">
+      {STAGES.map((s) => {
+        const done = s.doneAfter.includes(status);
+        const active = s.active.includes(status);
+        const Icon = done ? CheckCircle2 : active ? Loader2 : s.icon;
+        return (
+          <div
+            key={s.id}
+            className={`flex items-center gap-3 p-3 rounded-xl border transition-all ${
+              done
+                ? "border-emerald-200 bg-emerald-50/60 text-emerald-950"
+                : active
+                ? "border-brand-500 bg-brand-50/70 text-brand-950 ring-2 ring-brand-400/20 shadow-xs"
+                : "border-slate-100 bg-slate-50/50 text-slate-400"
+            }`}
+          >
+            <div
+              className={`w-9 h-9 rounded-lg flex items-center justify-center shrink-0 ${
+                done
+                  ? "bg-emerald-600 text-white"
+                  : active
+                  ? "bg-brand-600 text-white shadow-xs"
+                  : "bg-slate-200 text-slate-400"
+              }`}
+            >
+              <Icon className={`w-5 h-5 ${active ? "animate-spin" : ""}`} />
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-1.5 font-bold text-xs">
+                <span>{s.step}.</span>
+                <span className="truncate">{s.label}</span>
+                {done && <span className="text-3xs font-semibold text-emerald-700 ml-auto">Done</span>}
+                {active && <span className="text-3xs font-semibold text-brand-700 animate-pulse ml-auto">In Progress</span>}
+              </div>
+              <p className="text-3xs text-slate-500 truncate mt-0.5">{s.subtitle}</p>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function Row({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="flex justify-between gap-4 py-1.5 border-b border-slate-100 last:border-0 text-xs">
+      <span className="text-slate-500">{label}</span>
+      <span className="font-medium text-slate-900 text-right break-all">{children}</span>
+    </div>
+  );
+}
+
+function ConfigureForm({ dep, onStarted }: { dep: DeploymentDetail; onStarted: () => void }) {
+  const eligible = dep.decision?.eligible ?? [];
+  const [target, setTarget] = useState<DeploymentTarget | null>(dep.target_type ?? dep.decision?.recommended ?? eligible[0] ?? null);
+  const [staticSettings, setStaticSettings] = useState<StaticSiteSettings>({
+    price_class: (dep.settings?.price_class as StaticSiteSettings["price_class"]) ?? "PriceClass_100",
+    spa_mode: dep.settings?.spa_mode ?? false,
+  });
+  const [lambdaSettings, setLambdaSettings] = useState<LambdaSettings>({
+    memory_mb: dep.settings?.memory_mb ?? 256,
+    timeout_s: dep.settings?.timeout_s ?? 30,
+    public_url: dep.settings?.public_url ?? true,
+  });
+  const [ecsSettings, setEcsSettings] = useState<EcsSettings>({
+    container_port: dep.settings?.container_port ?? dep.profile?.listens_on_port ?? 8080,
+    cpu: dep.settings?.cpu ?? 256,
+    memory_mb: dep.settings?.memory_mb ?? 512,
+    desired_count: dep.settings?.desired_count ?? 1,
+    certificate_arn: dep.settings?.certificate_arn ?? "",
+  });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  if (eligible.length === 0 || !target) return null;
+
+  const start = async () => {
+    setBusy(true);
+    setError(null);
+    let payload: PrepareDeploymentPayload;
+    if (target === "static_site") {
+      payload = { target, settings: staticSettings };
+    } else if (target === "lambda_http") {
+      payload = { target, settings: lambdaSettings };
+    } else {
+      payload = {
+        target: "ecs_service",
+        settings: {
+          ...ecsSettings,
+          certificate_arn: ecsSettings.certificate_arn?.trim() || undefined,
+        },
+      };
+    }
+    try {
+      await prepareDeployment(dep.id, payload);
+      onStarted();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not start the build");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="card p-5 space-y-4">
+      <SectionHeading icon={Hammer} title="Target and settings" description="Choose one of the eligible targets, then build and verify." />
+      <div className="grid sm:grid-cols-3 gap-2">
+        {eligible.map((t) => (
+          <button
+            key={t}
+            type="button"
+            onClick={() => setTarget(t)}
+            aria-pressed={target === t}
+            className={`text-left rounded-xl border px-3 py-2.5 text-xs transition-colors ${
+              target === t ? "border-brand-600 bg-brand-50 text-brand-800" : "border-slate-200 hover:bg-slate-50"
+            }`}
+          >
+            <div className="font-semibold">{TARGET_LABELS[t]}</div>
+            {dep.decision?.recommended === t && <div className="text-2xs text-brand-700 mt-0.5">Recommended</div>}
+          </button>
+        ))}
+      </div>
+
+      {target === "static_site" ? (
+        <div className="grid sm:grid-cols-2 gap-4">
+          <div className="space-y-1.5">
+            <label htmlFor="price" className="field-label">CloudFront price class</label>
+            <select id="price" className="field-input" value={staticSettings.price_class}
+              onChange={(e) => setStaticSettings({ ...staticSettings, price_class: e.target.value as StaticSiteSettings["price_class"] })}>
+              <option value="PriceClass_100">100 · North America &amp; Europe</option>
+              <option value="PriceClass_200">200 · + Asia, Middle East, Africa</option>
+              <option value="PriceClass_All">All edge locations</option>
+            </select>
+          </div>
+          <label className="flex items-center gap-2 text-xs text-slate-700 sm:mt-6">
+            <input type="checkbox" checked={staticSettings.spa_mode}
+              onChange={(e) => setStaticSettings({ ...staticSettings, spa_mode: e.target.checked })} />
+            Single-page app (serve index.html for unknown paths)
+          </label>
+        </div>
+      ) : target === "lambda_http" ? (
+        <div className="grid sm:grid-cols-3 gap-4">
+          <div className="space-y-1.5">
+            <label htmlFor="mem" className="field-label">Memory (MB)</label>
+            <input id="mem" type="number" min={128} max={10240} step={64} className="field-input" value={lambdaSettings.memory_mb}
+              onChange={(e) => setLambdaSettings({ ...lambdaSettings, memory_mb: Number(e.target.value) })} />
+          </div>
+          <div className="space-y-1.5">
+            <label htmlFor="timeout" className="field-label">Timeout (s)</label>
+            <input id="timeout" type="number" min={1} max={900} className="field-input" value={lambdaSettings.timeout_s}
+              onChange={(e) => setLambdaSettings({ ...lambdaSettings, timeout_s: Number(e.target.value) })} />
+          </div>
+          <label className="flex items-center gap-2 text-xs text-slate-700 sm:mt-6">
+            <input type="checkbox" checked={lambdaSettings.public_url}
+              onChange={(e) => setLambdaSettings({ ...lambdaSettings, public_url: e.target.checked })} />
+            Public URL (unchecked: callers must sign with IAM)
+          </label>
+        </div>
+      ) : (
+        <div className="space-y-4">
+          <div className="grid sm:grid-cols-4 gap-4">
+            <div className="space-y-1.5">
+              <label htmlFor="port" className="field-label">Container Port</label>
+              <input id="port" type="number" min={1} max={65535} className="field-input" value={ecsSettings.container_port}
+                onChange={(e) => setEcsSettings({ ...ecsSettings, container_port: Number(e.target.value) })} />
+            </div>
+            <div className="space-y-1.5">
+              <label htmlFor="cpu" className="field-label">CPU Units</label>
+              <select id="cpu" className="field-input" value={ecsSettings.cpu}
+                onChange={(e) => setEcsSettings({ ...ecsSettings, cpu: Number(e.target.value) })}>
+                <option value={256}>256 (0.25 vCPU)</option>
+                <option value={512}>512 (0.5 vCPU)</option>
+                <option value={1024}>1024 (1 vCPU)</option>
+                <option value={2048}>2048 (2 vCPU)</option>
+              </select>
+            </div>
+            <div className="space-y-1.5">
+              <label htmlFor="ecs_mem" className="field-label">Memory (MB)</label>
+              <select id="ecs_mem" className="field-input" value={ecsSettings.memory_mb}
+                onChange={(e) => setEcsSettings({ ...ecsSettings, memory_mb: Number(e.target.value) })}>
+                <option value={512}>512 MB</option>
+                <option value={1024}>1024 MB (1 GB)</option>
+                <option value={2048}>2048 MB (2 GB)</option>
+                <option value={4096}>4096 MB (4 GB)</option>
+              </select>
+            </div>
+            <div className="space-y-1.5">
+              <label htmlFor="count" className="field-label">Task Replicas</label>
+              <input id="count" type="number" min={1} max={10} className="field-input" value={ecsSettings.desired_count}
+                onChange={(e) => setEcsSettings({ ...ecsSettings, desired_count: Number(e.target.value) })} />
+            </div>
+          </div>
+          <div className="space-y-1.5">
+            <label htmlFor="cert" className="field-label">ACM Certificate ARN (optional for HTTPS)</label>
+            <input id="cert" type="text" placeholder="arn:aws:acm:region:account:certificate/..." className="field-input text-xs" value={ecsSettings.certificate_arn || ""}
+              onChange={(e) => setEcsSettings({ ...ecsSettings, certificate_arn: e.target.value })} />
+            <p className="text-2xs text-slate-500">If omitted, ALB provisions an HTTP listener on port 80.</p>
+          </div>
+        </div>
+      )}
+
+      {error && <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-800">{error}</div>}
+      <button type="button" className="btn-primary" onClick={start} disabled={busy || !dep.can_prepare}>
+        {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Hammer className="w-4 h-4" />}
+        {dep.status === "VERIFIED" ? "Rebuild & verify" : "Build & verify"}
+      </button>
+    </div>
+  );
+}
+
+function AnalysisCard({ dep }: { dep: DeploymentDetail }) {
+  const p = dep.profile;
+  const intake = dep.intake;
+  return (
+    <div className="card p-5 space-y-4">
+      <SectionHeading icon={Search} title="Analysis" description="Read from the files only; nothing in the project was run." />
+      {intake && (
+        <div>
+          <Row label="Source">{dep.source_name}</Row>
+          <Row label="Files kept">{`${intake.file_count} (${formatBytes(intake.total_bytes)})`}</Row>
+          {intake.dropped_count > 0 && (
+            <details className="text-xs py-1.5">
+              <summary className="cursor-pointer text-slate-500">{intake.dropped_count} files not packaged</summary>
+              <ul className="mt-2 space-y-1 max-h-48 overflow-y-auto font-mono text-2xs">
+                {intake.dropped.map((d) => (
+                  <li key={d.path}><span className="text-slate-900">{d.path}</span> <span className="text-slate-500">· {d.reason}</span></li>
+                ))}
+              </ul>
+            </details>
+          )}
+        </div>
+      )}
+      {intake?.secret_hits && intake.secret_hits.length > 0 && (
+        <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-900 space-y-1">
+          <div className="font-semibold flex items-center gap-1.5"><AlertTriangle className="w-4 h-4" /> Credentials found</div>
+          <ul className="font-mono text-2xs space-y-0.5">
+            {intake.secret_hits.map((h) => (
+              <li key={`${h.path}:${h.line}:${h.kind}`}>{h.path}{h.line ? `:${h.line}` : ""} · {h.kind}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {p && (
+        <div>
+          <Row label="Runtime">{p.runtime}{p.runtime_version ? ` ${p.runtime_version}` : ""}</Row>
+          <Row label="Framework">{p.framework ?? "—"}</Row>
+          {p.lambda_handler && <Row label="Lambda handler"><code>{p.lambda_handler}</code></Row>}
+          {p.static_output_dir !== null && <Row label="Static site">{p.static_output_dir || "project root"}</Row>}
+          {p.dependencies.length > 0 && <Row label="Dependencies">{`${p.dependencies.length} (${p.dependency_manifest})`}</Row>}
+          {p.server_entrypoint && <Row label="Server">{p.listens_on_port ? `listens on ${p.listens_on_port}` : "yes"}</Row>}
+          {Object.keys(p.evidence).length > 0 && (
+            <details className="text-xs py-1.5">
+              <summary className="cursor-pointer text-slate-500">Evidence</summary>
+              <ul className="mt-2 space-y-1 font-mono text-2xs">
+                {Object.entries(p.evidence).flatMap(([field, items]) =>
+                  items.map((e) => <li key={`${field}-${e.file}-${e.rule}`}>{field}: {e.file} ({e.rule})</li>),
+                )}
+              </ul>
+            </details>
+          )}
+        </div>
+      )}
+      {dep.decision && dep.decision.reasons.length > 0 && (
+        <ul className="space-y-1.5">
+          {dep.decision.reasons.map((r) => {
+            const fits = POSITIVE_REASONS.has(r.code);
+            return (
+              <li key={r.code} className="flex gap-2 text-xs">
+                {fits ? <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" /> : <Circle className="w-4 h-4 text-amber-500 shrink-0" />}
+                <span className="text-slate-700">{r.message}</span>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function VerificationCard({ dep }: { dep: DeploymentDetail }) {
+  const v = dep.verification;
+  if (!v) return null;
+  const tone = v.verdict === "PASS" ? "text-emerald-700" : v.verdict === "FAIL" ? "text-rose-700" : "text-amber-700";
+  const findings = v.security.findings ?? [];
+  return (
+    <div className="card p-5 space-y-4">
+      <SectionHeading icon={ShieldCheck} title="Verification" description="Terraform validation, security scans and cost estimate." />
+      <div className={`text-sm font-bold ${tone}`}>Verdict: {v.verdict}</div>
+      {v.incomplete_reasons.length > 0 && (
+        <p className="text-xs text-amber-800">Not fully verified: {v.incomplete_reasons.join("; ")}. Missing checks are never counted as passing.</p>
+      )}
+      <div className="grid sm:grid-cols-3 gap-3">
+        {v.validation.checks.map((c) => (
+          <div key={c.check_name} className="p-3 rounded-xl bg-slate-50 border border-slate-100 flex items-center justify-between text-xs">
+            <span className="font-semibold">terraform {c.check_name}</span>
+            {c.passed ? <CheckCircle2 className="w-4 h-4 text-emerald-600" /> : <XCircle className="w-4 h-4 text-rose-600" />}
+          </div>
+        ))}
+      </div>
+      <div className="grid sm:grid-cols-2 gap-3 text-xs">
+        <div className="p-3 rounded-xl border border-slate-100">
+          <div className="text-slate-500">Security posture</div>
+          <div className="text-lg font-bold">{v.security_posture.score ?? "—"}{v.security_posture.score !== null && <span className="text-xs text-slate-500">/100</span>}</div>
+          <div className="text-2xs text-slate-500">{v.security_posture.reason}</div>
+        </div>
+        <div className="p-3 rounded-xl border border-slate-100">
+          <div className="text-slate-500">Estimated monthly cost</div>
+          <div className="text-lg font-bold">
+            {v.cost.tool_skipped || v.cost.total_monthly_cost === undefined
+              ? "Not estimated"
+              : `${v.cost.total_monthly_cost.toFixed(2)} ${v.cost.currency ?? "USD"}`}
+          </div>
+          <div className="text-2xs text-slate-500">
+            {v.cost.tool_skipped
+              ? "Infracost API key missing in Settings (this is not $0)"
+              : "Infracost, usage-based items excluded"}
+          </div>
+        </div>
+      </div>
+      {findings.length > 0 && (
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead className="text-3xs uppercase tracking-wider text-slate-500 bg-slate-50">
+              <tr><th className="text-left px-3 py-2">Severity</th><th className="text-left px-3 py-2">Rule</th><th className="text-left px-3 py-2">Resource</th><th className="text-left px-3 py-2">Finding</th></tr>
+            </thead>
+            <tbody>
+              {findings.slice(0, 50).map((f, i) => (
+                <tr key={`${f.rule_id}-${f.resource}-${i}`} className="border-t border-slate-100">
+                  <td className="px-3 py-2 font-semibold">{f.severity}</td>
+                  <td className="px-3 py-2 font-mono">{f.rule_id}</td>
+                  <td className="px-3 py-2 font-mono">{f.resource ?? ""}</td>
+                  <td className="px-3 py-2">{f.description}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TerraformFiles({ dep }: { dep: DeploymentDetail }) {
+  const [files, setFiles] = useState<Record<string, string> | null>(null);
+  const [active, setActive] = useState<string>("main.tf");
+  const key = `${dep.id}:${dep.updated_at}`;
+
+  useEffect(() => {
+    if (dep.rendered_files.length === 0) return;
+    let cancelled = false;
+    fetchDeploymentTerraform(dep.id).then((f) => !cancelled && setFiles(f)).catch(() => !cancelled && setFiles({}));
+    return () => {
+      cancelled = true;
+    };
+  }, [key, dep.id, dep.rendered_files.length]);
+
+  if (dep.rendered_files.length === 0 || !files) return null;
+  const names = Object.keys(files).sort();
+  const shown = files[active] !== undefined ? active : names[0];
+  return (
+    <div className="card overflow-hidden">
+      <div className="card-header">
+        <SectionHeading icon={FileCode2} title="Generated Terraform" description="From TerraAgent's vetted template; your values are in terraform.tfvars.json." />
+      </div>
+      <div className="flex flex-wrap gap-1 px-4 pt-3">
+        {names.map((n) => (
+          <button key={n} type="button" onClick={() => setActive(n)}
+            className={`px-2.5 py-1 rounded-lg text-2xs font-mono ${n === shown ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-700"}`}>
+            {n}
+          </button>
+        ))}
+      </div>
+      <pre className="m-4 p-4 rounded-xl bg-slate-950 text-slate-100 text-2xs overflow-auto max-h-[28rem]">{files[shown]}</pre>
+    </div>
+  );
+}
+
+function Logs({ lines }: { lines: JobLogLine[] }) {
+  if (lines.length === 0) return null;
+  return (
+    <details className="card p-5" open>
+      <summary className="cursor-pointer section-title"><Terminal className="w-4 h-4" /> Live log</summary>
+      <pre className="mt-3 p-3 rounded-xl bg-slate-950 text-slate-100 text-2xs overflow-auto max-h-72 whitespace-pre-wrap">
+        {lines.slice(-200).map((l) => l.message).join("\n")}
+      </pre>
+    </details>
+  );
+}
+
+function GitOpsPrCard({ dep, onStarted }: { dep: DeploymentDetail; onStarted: () => void }) {
+  const [token, setToken] = useState("");
+  const defaultRepo = dep.source_name.includes("/") ? dep.source_name.split("@")[0] : "";
+  const [repo, setRepo] = useState(defaultRepo);
+  const [baseBranch, setBaseBranch] = useState("main");
+  const [targetDir, setTargetDir] = useState("terraform");
+  const [addWorkflows, setAddWorkflows] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleOpenPr = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!token.trim() || !repo.trim()) {
+      setError("GitHub Personal Access Token and Repository are required.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await createDeploymentPullRequest(dep.id, {
+        github_token: token.trim(),
+        repo: repo.trim(),
+        base_branch: baseBranch.trim() || "main",
+        target_dir: targetDir.trim() || "terraform",
+        add_workflows: addWorkflows,
+      });
+      onStarted();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to open Pull Request");
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="card p-5 space-y-4 border-slate-200 bg-slate-50/50">
+      <SectionHeading
+        icon={GitPullRequest}
+        title="Deliver via GitHub Pull Request (GitOps)"
+        description="Creates a feature branch and Pull Request with Terraform configurations and GitHub Actions CI/CD workflows."
+      />
+      {error && <p className="text-xs text-rose-700">{error}</p>}
+      <form onSubmit={handleOpenPr} className="space-y-3">
+        <div className="grid sm:grid-cols-2 gap-3">
+          <div className="space-y-1">
+            <label className="field-label">Target Repository (owner/repo)</label>
+            <input
+              type="text"
+              placeholder="e.g. acme-corp/infrastructure"
+              value={repo}
+              onChange={(e) => setRepo(e.target.value)}
+              className="field-input text-xs"
+              required
+            />
+          </div>
+          <div className="space-y-1">
+            <label className="field-label">GitHub Personal Access Token (PAT)</label>
+            <input
+              type="password"
+              placeholder="ghp_... (contents=write, pull_requests=write)"
+              value={token}
+              onChange={(e) => setToken(e.target.value)}
+              className="field-input text-xs"
+              required
+            />
+          </div>
+        </div>
+        <div className="grid sm:grid-cols-2 gap-3">
+          <div className="space-y-1">
+            <label className="field-label">Base Branch</label>
+            <input
+              type="text"
+              value={baseBranch}
+              onChange={(e) => setBaseBranch(e.target.value)}
+              className="field-input text-xs"
+            />
+          </div>
+          <div className="space-y-1">
+            <label className="field-label">Subdirectory in Repo</label>
+            <input
+              type="text"
+              value={targetDir}
+              onChange={(e) => setTargetDir(e.target.value)}
+              className="field-input text-xs"
+            />
+          </div>
+        </div>
+        <label className="flex items-center gap-2 text-xs text-slate-700 cursor-pointer pt-1">
+          <input
+            type="checkbox"
+            checked={addWorkflows}
+            onChange={(e) => setAddWorkflows(e.target.checked)}
+            className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+          />
+          <span>Include GitHub Actions CI/CD workflows (<code>.github/workflows/terraagent-*.yml</code>)</span>
+        </label>
+        <button
+          type="submit"
+          disabled={busy || !token.trim() || !repo.trim()}
+          className="btn-secondary w-full py-2 rounded-xl text-xs flex items-center justify-center gap-2 font-medium border-slate-300 hover:bg-white"
+        >
+          {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <GitPullRequest className="w-4 h-4 text-indigo-600" />}
+          {busy ? "Opening Pull Request..." : "Open GitHub Pull Request"}
+        </button>
+      </form>
+    </div>
+  );
+}
+
+function PullRequestStatusCard({ dep, onStarted }: { dep: DeploymentDetail; onStarted: () => void }) {
+  const pr = dep.pr;
+  const [token, setToken] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  if (!pr) return null;
+
+  const handleMerge = async () => {
+    if (!token.trim()) {
+      setError("GitHub Personal Access Token is required to merge.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await mergeDeploymentPullRequest(dep.id, {
+        github_token: token.trim(),
+        merge_method: "squash",
+      });
+      onStarted();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to merge Pull Request");
+      setBusy(false);
+    }
+  };
+
+  const isMerged = dep.status === "MERGED";
+
+  return (
+    <div className={`card p-5 space-y-4 border ${isMerged ? "border-purple-200 bg-purple-50/40" : "border-blue-200 bg-blue-50/40"}`}>
+      <div className="flex justify-between items-start gap-4 flex-wrap">
+        <SectionHeading
+          icon={isMerged ? GitMerge : GitPullRequest}
+          title={isMerged ? "GitHub Pull Request Merged" : "GitHub Pull Request Active"}
+          description={isMerged ? "The deployment PR has been successfully merged into the target repository." : "Review and merge this PR on GitHub or merge directly below."}
+        />
+        <a
+          href={pr.html_url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="btn-secondary px-3 py-1.5 text-xs flex items-center gap-1.5 font-semibold text-slate-900 border-slate-300 hover:bg-white"
+        >
+          <span>View PR #{pr.number}</span>
+          <ExternalLink className="w-3.5 h-3.5" />
+        </a>
+      </div>
+
+      <div className="grid sm:grid-cols-3 gap-3 text-xs">
+        <div className="p-3 rounded-xl bg-white border border-slate-200/80">
+          <div className="text-slate-500 text-2xs uppercase">Repository</div>
+          <div className="font-mono font-semibold text-slate-800 break-all">{pr.repo}</div>
+        </div>
+        <div className="p-3 rounded-xl bg-white border border-slate-200/80">
+          <div className="text-slate-500 text-2xs uppercase">Branch</div>
+          <div className="font-mono font-semibold text-slate-800 break-all">{pr.branch}</div>
+        </div>
+        <div className="p-3 rounded-xl bg-white border border-slate-200/80">
+          <div className="text-slate-500 text-2xs uppercase">Commit SHA</div>
+          <div className="font-mono font-semibold text-slate-800">{pr.commit_sha?.substring(0, 8)}</div>
+        </div>
+      </div>
+
+      {dep.status === "PR_OPEN" && (
+        <div className="p-4 rounded-xl bg-white border border-blue-100 space-y-3">
+          <div className="text-xs font-semibold text-slate-900">Merge PR from TerraAgent</div>
+          {error && <p className="text-xs text-rose-700">{error}</p>}
+          <div className="flex gap-2 items-center flex-wrap sm:flex-nowrap">
+            <input
+              type="password"
+              placeholder="GitHub PAT (to authorize merge)"
+              value={token}
+              onChange={(e) => setToken(e.target.value)}
+              className="field-input text-xs flex-1"
+            />
+            <button
+              type="button"
+              onClick={handleMerge}
+              disabled={busy || !token.trim()}
+              className="btn-primary py-2 px-4 rounded-xl text-xs flex items-center gap-2 whitespace-nowrap bg-purple-600 hover:bg-purple-700 text-white font-medium"
+            >
+              {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <GitMerge className="w-4 h-4" />}
+              {busy ? "Merging..." : "Merge Pull Request"}
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DeployCard({ dep, onStarted }: { dep: DeploymentDetail; onStarted: () => void }) {
+  const [confirm, setConfirm] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const startDeploy = async () => {
+    if (!confirm) {
+      setError("You must check the confirmation box to deploy.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await deployDeployment(dep.id, true);
+      onStarted();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to trigger deploy");
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="card p-5 space-y-4 border-indigo-200 bg-indigo-50/40">
+      <SectionHeading icon={Rocket} title="Option A: STS Direct Apply" description={`Approved by ${dep.approved_by ?? "operator"}. Apply changes directly to AWS.`} />
+      {error && <p className="text-xs text-rose-700">{error}</p>}
+      <label className="flex items-start gap-2.5 text-xs text-slate-700 cursor-pointer">
+        <input
+          type="checkbox"
+          checked={confirm}
+          onChange={(e) => setConfirm(e.target.checked)}
+          className="mt-0.5 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+        />
+        <span>I confirm that I want TerraAgent to execute this approved Terraform plan against AWS using short-lived STS credentials.</span>
+      </label>
+      <button
+        type="button"
+        onClick={startDeploy}
+        disabled={busy || !confirm}
+        className="btn-primary w-full bg-indigo-600 hover:bg-indigo-700 text-white font-medium py-2 rounded-xl text-xs flex items-center justify-center gap-2"
+      >
+        {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Rocket className="w-4 h-4" />}
+        {busy ? "Initiating deploy..." : "Deploy to AWS Now"}
+      </button>
+    </div>
+  );
+}
+
+function RollbackCard({ dep, onStarted }: { dep: DeploymentDetail; onStarted: () => void }) {
+  const [artifacts, setArtifacts] = useState<BuildHistoryItem[]>([]);
+  const [selectedArtifact, setSelectedArtifact] = useState<string>("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetchDeploymentArtifacts(dep.id).then((items) => {
+      setArtifacts(items);
+      if (items.length > 1) {
+        setSelectedArtifact(items[1].artifact_id);
+      } else if (items.length > 0) {
+        setSelectedArtifact(items[0].artifact_id);
+      }
+    });
+  }, [dep.id, dep.updated_at]);
+
+  if (artifacts.length === 0) return null;
+
+  const handleRollback = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const art = artifacts.find((a) => a.artifact_id === selectedArtifact);
+      await rollbackDeployment(dep.id, {
+        target_artifact_id: selectedArtifact || undefined,
+        target_release_id: art?.release_id || undefined,
+        reason: `Rollback to build ${selectedArtifact?.substring(0, 8)}`,
+      });
+      onStarted();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Rollback request failed");
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="card p-5 space-y-4 border-amber-200 bg-amber-50/30">
+      <SectionHeading
+        icon={RotateCcw}
+        title="Zero-Downtime Rollback"
+        description="Switch CloudFront origin_path or Lambda live alias to a previous build version."
+      />
+      {error && <p className="text-xs text-rose-700">{error}</p>}
+      <div className="space-y-3">
+        <div className="space-y-1">
+          <label className="field-label">Select Target Build Version</label>
+          <select
+            className="field-input text-xs"
+            value={selectedArtifact}
+            onChange={(e) => setSelectedArtifact(e.target.value)}
+          >
+            {artifacts.map((a, idx) => (
+              <option key={a.artifact_id} value={a.artifact_id}>
+                {idx === 0 ? "Latest Build" : `Build ${idx + 1}`} ({a.release_id || a.sha256.substring(0, 8)}) - {new Date(a.created_at).toLocaleString()}
+              </option>
+            ))}
+          </select>
+        </div>
+        <button
+          type="button"
+          onClick={handleRollback}
+          disabled={busy || !selectedArtifact}
+          className="btn-secondary w-full py-2 rounded-xl text-xs flex items-center justify-center gap-2 font-medium border-amber-300 text-amber-900 hover:bg-amber-100/60"
+        >
+          {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <RotateCcw className="w-4 h-4 text-amber-700" />}
+          {busy ? "Preparing Rollback Plan..." : "Rollback to Selected Build"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function TeardownCard({ dep, onStarted }: { dep: DeploymentDetail; onStarted: () => void }) {
+  const [confirm, setConfirm] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handlePlanDestroy = async () => {
+    if (!confirm) {
+      setError("Please check the confirmation box to initiate teardown planning.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await planDestroyDeployment(dep.id);
+      onStarted();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to initiate teardown");
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="card p-5 space-y-4 border-rose-200 bg-rose-50/40">
+      <SectionHeading
+        icon={Trash2}
+        title="Infrastructure Teardown (Destroy)"
+        description="Plan and destroy all AWS infrastructure provisioned for this deployment."
+      />
+      {error && <p className="text-xs text-rose-700">{error}</p>}
+      <div className="p-3 rounded-xl bg-white/80 border border-rose-200 text-xs text-rose-900 space-y-1">
+        <p className="font-semibold">Destructive Action Warning</p>
+        <p>This generates a <code>terraform plan -destroy</code> against AWS. All live resources associated with this deployment will be planned for deletion.</p>
+      </div>
+      <label className="flex items-start gap-2.5 text-xs text-slate-700 cursor-pointer">
+        <input
+          type="checkbox"
+          checked={confirm}
+          onChange={(e) => setConfirm(e.target.checked)}
+          className="mt-0.5 rounded border-slate-300 text-rose-600 focus:ring-rose-500"
+        />
+        <span>I understand that this will initiate a teardown plan to delete live AWS resources.</span>
+      </label>
+      <button
+        type="button"
+        onClick={handlePlanDestroy}
+        disabled={busy || !confirm}
+        className="btn-danger w-full py-2 rounded-xl text-xs flex items-center justify-center gap-2 font-medium bg-rose-600 hover:bg-rose-700 text-white"
+      >
+        {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
+        {busy ? "Generating Destroy Plan..." : "Plan Infrastructure Teardown"}
+      </button>
+    </div>
+  );
+}
+
+function OutputsCard({ outputs }: { outputs: Record<string, unknown> }) {
+  return (
+    <div className="card p-5 space-y-3 bg-emerald-50/40 border-emerald-200">
+      <SectionHeading icon={CheckCircle2} title="Deployed Outputs" description="Live AWS endpoints and provisioned infrastructure resources." />
+      <div className="space-y-2">
+        {Object.entries(outputs).map(([k, v]) => {
+          const valStr = typeof v === "string" ? v : JSON.stringify(v);
+          const isUrl = typeof v === "string" && (v.startsWith("http://") || v.startsWith("https://"));
+          return (
+            <div key={k} className="flex justify-between items-center gap-4 py-1.5 border-b border-emerald-100 last:border-0 text-xs">
+              <span className="font-mono text-slate-600 font-medium">{k}</span>
+              {isUrl ? (
+                <a
+                  href={valStr}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-indigo-600 hover:text-indigo-800 font-mono font-semibold flex items-center gap-1"
+                >
+                  {valStr}
+                  <ExternalLink className="w-3 h-3" />
+                </a>
+              ) : (
+                <span className="font-mono text-slate-900 break-all">{valStr}</span>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function ReconciliationAlert({ error }: { error?: string | null }) {
+  return (
+    <div className="p-4 rounded-2xl bg-amber-50 border border-amber-200 text-xs text-amber-900 space-y-2">
+      <div className="flex items-center gap-2 font-semibold">
+        <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+        <span>Deployment Needs Reconciliation</span>
+      </div>
+      <p>{error ?? "Apply was interrupted before reporting completion. State may have partial resources."}</p>
+      <div className="text-2xs text-amber-800 pt-1">
+        Please follow <a href="file:///c:/Users/USER/Desktop/AIKART/Terraform%20Agent/docs/runbooks/deploy-reconciliation.md" className="underline font-bold">docs/runbooks/deploy-reconciliation.md</a> to inspect the state lock and re-plan.
+      </div>
+    </div>
+  );
+}
+
+export default function DeploymentDetailView({ id }: { id: string }) {
+  const [dep, setDep] = useState<DeploymentDetail | null>(null);
+  const [logs, setLogs] = useState<JobLogLine[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  // Bumped after starting a build so polling restarts.
+  const [reloadKey, setReloadKey] = useState(0);
+  const reload = useCallback(() => setReloadKey((k) => k + 1), []);
+
+  useEffect(() => {
+    let cancelled = false;
+    let timer: ReturnType<typeof setInterval> | null = null;
+
+    const load = async () => {
+      try {
+        const [d, l] = await Promise.all([fetchDeployment(id), fetchDeploymentLogs(id)]);
+        if (cancelled) return;
+        setDep(d);
+        setLogs(l);
+        setError(null);
+        if (IN_PROGRESS_STATUSES.includes(d.status)) {
+          if (!timer) timer = setInterval(load, POLL_MS);
+        } else if (timer) {
+          clearInterval(timer);
+          timer = null;
+        }
+      } catch (e) {
+        if (!cancelled) setError(e instanceof Error ? e.message : "Failed to load the deployment");
+      }
+    };
+
+    load();
+    return () => {
+      cancelled = true;
+      if (timer) clearInterval(timer);
+    };
+  }, [id, reloadKey]);
+
+  if (error && !dep) {
+    return <div className="card p-6 text-xs text-rose-700">{error}</div>;
+  }
+  if (!dep) {
+    return <div className="card p-6 text-xs text-slate-500 flex items-center gap-2"><Loader2 className="w-4 h-4 animate-spin" /> Loading…</div>;
+  }
+
+  return (
+    <div className="space-y-5">
+      <div className="flex items-center gap-3 flex-wrap">
+        <StatusBadge status={dep.status} size="md" />
+        {dep.target_type && <span className="text-xs text-slate-600">{TARGET_LABELS[dep.target_type]}</span>}
+        <span className="text-xs text-slate-500">{dep.region} · {dep.environment}</span>
+      </div>
+      <StageTracker status={dep.status} />
+      {dep.status === "FAILED" && dep.error && (
+        <div className="p-4 rounded-2xl bg-rose-50 border border-rose-200 text-xs text-rose-900 flex gap-2 whitespace-pre-wrap">
+          <XCircle className="w-4 h-4 shrink-0 mt-0.5" />
+          <span>{dep.error}</span>
+        </div>
+      )}
+      {dep.status === "NEEDS_RECONCILIATION" && <ReconciliationAlert error={dep.error} />}
+      {dep.can_rollback && <RollbackCard dep={dep} onStarted={reload} />}
+      {dep.can_destroy && <TeardownCard dep={dep} onStarted={reload} />}
+      {/* Active Step Actions (Prominently placed at top for fast execution) */}
+      {dep.outputs && Object.keys(dep.outputs).length > 0 && <OutputsCard outputs={dep.outputs} />}
+      {dep.pr && <PullRequestStatusCard dep={dep} onStarted={reload} />}
+      {dep.can_deploy && (
+        <div className="grid lg:grid-cols-2 gap-5 items-start">
+          <DeployCard dep={dep} onStarted={reload} />
+          <GitOpsPrCard dep={dep} onStarted={reload} />
+        </div>
+      )}
+      {dep.can_approve && <ApprovalCard key={`approve-${dep.plan_bundle_sha256}`} dep={dep} onDecided={reload} />}
+      {dep.can_plan && <PlanCard key={`plan-${dep.updated_at}`} dep={dep} onStarted={reload} />}
+      {dep.can_prepare && <ConfigureForm key={dep.updated_at} dep={dep} onStarted={reload} />}
+
+      {/* Diagnostics and Supporting Information */}
+      <div className="grid lg:grid-cols-2 gap-5 items-start">
+        <AnalysisCard dep={dep} />
+        {dep.build && (
+          <div className="card p-5 space-y-2">
+            <SectionHeading icon={Hammer} title="Build Details" />
+            {dep.build.runtime && <Row label="Runtime">{dep.build.runtime}</Row>}
+            {dep.build.handler && <Row label="Handler"><code>{dep.build.handler}</code></Row>}
+            {dep.build.kind === "static_site" && <Row label="Site files">{dep.build.file_count}</Row>}
+            {dep.build.package_bytes > 0 && <Row label="Package">{formatBytes(dep.build.package_bytes)}</Row>}
+            {dep.build.warnings.map((w) => <p key={w} className="text-xs text-amber-700">{w}</p>)}
+          </div>
+        )}
+      </div>
+      <VerificationCard dep={dep} />
+      <TerraformFiles dep={dep} />
+      <Logs lines={logs} />
+    </div>
+  );
+}

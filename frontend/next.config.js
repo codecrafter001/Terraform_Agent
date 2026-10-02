@@ -2,6 +2,12 @@
 const nextConfig = {
   output: "standalone",
   reactStrictMode: true,
+  experimental: {
+    // proxy.ts buffers request bodies and silently truncates anything past
+    // this limit (default 10MB). Deployment uploads are up to 25MB
+    // (backend/deploy/config.py::MAX_UPLOAD_BYTES) plus multipart overhead.
+    proxyClientMaxBodySize: "26mb",
+  },
   async rewrites() {
     return [
       {

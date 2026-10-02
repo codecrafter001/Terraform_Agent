@@ -92,7 +92,7 @@ If you prefer to configure services manually in the Render dashboard:
 - Runtime: **Docker**
 - Dockerfile Path: `backend/Dockerfile`
 - Docker Context: `backend`
-- Start Command: `celery -A services.celery_app worker --beat --loglevel=info`
+- Start Command: `celery -A services.celery_app worker --beat -Q celery,deploy_plan --loglevel=info`
 - Environment Variables: Same `DATABASE_URL`, `REDIS_URL`, `CELERY_BROKER_URL`, `CELERY_RESULT_BACKEND`, `GEMINI_API_KEY`, `TERRAAGENT_API_KEY` as above.
 
 ### 5. Create Next.js Frontend Web Service

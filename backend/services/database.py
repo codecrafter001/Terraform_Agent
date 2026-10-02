@@ -44,20 +44,33 @@ def init_db() -> None:
     migration system, just enough to keep create_all()'s "safe to call
     every startup" promise true for the additive case that keeps happening.
     """
-    from models.orm import JobRecord  # noqa: F401  (registers model with Base)
+    from models.orm import (  # noqa: F401
+        AppSetting,
+        AwsDeployTarget,
+        Deployment,
+        DeploymentArtifact,
+        DeploymentEvent,
+        GraphCheckpoint,
+        JobRecord,
+    )
     Base.metadata.create_all(bind=engine)
 
     inspector = inspect(engine)
-    if JobRecord.__tablename__ not in inspector.get_table_names():
-        return
-    existing_columns = {col["name"] for col in inspector.get_columns(JobRecord.__tablename__)}
-    missing_columns = [c for c in JobRecord.__table__.columns if c.name not in existing_columns]
-    if not missing_columns:
-        return
-    with engine.begin() as conn:
-        for column in missing_columns:
-            col_type = column.type.compile(dialect=engine.dialect)
-            conn.execute(text(f'ALTER TABLE {JobRecord.__tablename__} ADD COLUMN "{column.name}" {col_type}'))
+    table_names = inspector.get_table_names()
+
+    for model_cls in (JobRecord, Deployment, AwsDeployTarget):
+        tbl = model_cls.__tablename__
+        if tbl not in table_names:
+            continue
+        existing_columns = {col["name"] for col in inspector.get_columns(tbl)}
+        missing_columns = [c for c in model_cls.__table__.columns if c.name not in existing_columns]
+        if not missing_columns:
+            continue
+        with engine.begin() as conn:
+            for column in missing_columns:
+                col_type = column.type.compile(dialect=engine.dialect)
+                conn.execute(text(f'ALTER TABLE {tbl} ADD COLUMN "{column.name}" {col_type}'))
+
 
 
 _CHANGE_KEYS = ("resource", "attribute", "current_value", "target_value", "action")

@@ -19,7 +19,7 @@ exclude = ["tests/"]
 # migrating to SQLAlchemy 2.0's Mapped[]-typed-columns style is a real,
 # separate refactor rather than a config tweak.
 [[tool.mypy.overrides]]
-module = ["services.database", "models.orm"]
+module = ["services.database", "models.orm", "deploy.store"]
 disable_error_code = ["assignment", "valid-type", "misc"]
 
 # main.py: slowapi's _rate_limit_exceeded_handler is typed as

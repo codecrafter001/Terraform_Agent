@@ -14,6 +14,7 @@ import {
   PauseCircle,
   PlusCircle,
   RefreshCw,
+  Rocket,
   Search,
   SearchX,
   ShieldCheck,
@@ -244,12 +245,15 @@ export default function HomePage() {
     <div className="space-y-6">
       <PageHeader
         title="Dashboard"
-        description="Read-only AWS discovery, four agents with a self-correcting generate/verify loop. Nothing in your AWS account is ever changed."
         actions={
           <>
             <button onClick={refresh} className="btn-secondary px-3" title="Refresh" aria-label="Refresh">
               <RefreshCw className={`w-4 h-4 ${isRefreshing ? "animate-spin" : ""}`} />
             </button>
+            <Link href="/deploy" className="btn-secondary">
+              <Rocket className="w-4 h-4 text-brand-600" />
+              Deploy code
+            </Link>
             <Link href="/scan" className="btn-primary">
               <PlusCircle className="w-4 h-4" />
               New scan

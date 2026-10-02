@@ -65,6 +65,20 @@ const STATUS_CONFIG: Record<string, { label: string; cls: string; icon: LucideIc
     icon: PauseCircle,
   },
   REJECTED: { label: "Rejected", cls: "bg-slate-100 text-slate-700 border-slate-300", icon: AlertTriangle },
+  // Deployment mode (backend/deploy/store.py::DeployStatus)
+  SOURCE_RECEIVED: { label: "Queued", cls: "bg-slate-100 text-slate-600 border-slate-200", icon: Clock },
+  ANALYZING: { label: "Analyzing", cls: "bg-blue-50 text-blue-700 border-blue-200", icon: Loader2, spin: true },
+  ANALYZED: { label: "Analyzed", cls: "bg-indigo-50 text-indigo-700 border-indigo-200", icon: CheckCircle2 },
+  BUILDING: { label: "Building", cls: "bg-blue-50 text-blue-700 border-blue-200", icon: Loader2, spin: true },
+  VERIFYING: { label: "Verifying", cls: "bg-blue-50 text-blue-700 border-blue-200", icon: Loader2, spin: true },
+  VERIFIED: { label: "Verified", cls: "bg-emerald-50 text-emerald-700 border-emerald-200", icon: CheckCircle2 },
+  PLANNING: { label: "Planning", cls: "bg-blue-50 text-blue-700 border-blue-200", icon: Loader2, spin: true },
+  APPROVED: { label: "Approved", cls: "bg-indigo-50 text-indigo-700 border-indigo-200", icon: CheckCircle2 },
+  EXPIRED: { label: "Expired", cls: "bg-slate-100 text-slate-600 border-slate-300", icon: Clock },
+  APPLYING: { label: "Deploying", cls: "bg-amber-50 text-amber-700 border-amber-200", icon: Loader2, spin: true },
+  DEPLOYED: { label: "Deployed", cls: "bg-emerald-50 text-emerald-700 border-emerald-200", icon: CheckCircle2 },
+  FAILED_PARTIAL: { label: "Partial Failure", cls: "bg-rose-50 text-rose-700 border-rose-200", icon: XCircle },
+  NEEDS_RECONCILIATION: { label: "Needs Reconciliation", cls: "bg-purple-50 text-purple-700 border-purple-200", icon: AlertTriangle },
 };
 
 export function StatusBadge({ status, size = "sm" }: { status: string; size?: "sm" | "md" }) {
