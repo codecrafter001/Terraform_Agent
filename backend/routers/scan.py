@@ -1,6 +1,7 @@
 """Router for scan initiation, status polling, and real-time SSE log streaming."""
 
 import asyncio
+import json
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Literal, Optional
@@ -691,6 +692,19 @@ async def merge_pull_request(request: Request, job_id: str, body: MergePullReque
         job_id=job_id, merged=True, sha=merge_result.get("sha"),
         message=merge_result.get("message", "Pull Request successfully merged"), workflow_runs=workflow_runs,
     )
+
+
+@router.get("/{job_id}/logs/history")
+async def get_logs_history(job_id: str):
+    """REST endpoint returning full log history for a job as JSON."""
+    raw_history = await redis_service.get_log_history(job_id)
+    parsed = []
+    for item in raw_history:
+        try:
+            parsed.append(json.loads(item))
+        except Exception:
+            parsed.append({"job_id": job_id, "message": str(item), "agent": "system", "seq": None})
+    return {"job_id": job_id, "logs": parsed, "count": len(parsed)}
 
 
 @router.get("/{job_id}/logs")

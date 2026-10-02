@@ -188,6 +188,27 @@ export async function fetchJobResults(jobId: string): Promise<JobResults> {
   return await res.json();
 }
 
+export interface JobLogLine {
+  job_id?: string;
+  seq?: number | null;
+  agent?: string;
+  message?: string;
+}
+
+export async function fetchJobLogs(jobId: string): Promise<JobLogLine[]> {
+  try {
+    const res = await fetch(`${API_BASE}/scan/${jobId}/logs/history`, {
+      cache: "no-store",
+      headers: authHeaders(),
+    });
+    if (!res.ok) return [];
+    const data = await res.json();
+    return data.logs || [];
+  } catch {
+    return [];
+  }
+}
+
 export interface DecisionPayload {
   reason?: string;
   // Approve only: one allowed choice for every resource the gate listed as in Review.

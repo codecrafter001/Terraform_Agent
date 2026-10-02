@@ -19,7 +19,7 @@ import {
   Wrench,
   XCircle,
 } from "lucide-react";
-import { fetchJobResults, fetchJobStatus } from "@/lib/api";
+import { fetchJobLogs, fetchJobResults, fetchJobStatus } from "@/lib/api";
 import PendingApprovalPanel from "./PendingApprovalPanel";
 import {
   ApprovalDecision,
@@ -201,45 +201,74 @@ export default function ScanProgress({ jobId }: ScanProgressProps) {
     };
   }, [jobId, fetchApprovalDetails]);
 
-  // Live log stream. The server replays the job's history on every connect,
-  // so a late or re-connecting client sees every line; "seq" de-duplicates.
-  // EventSource reconnects on its own after an error - don't close it then.
+  // Live log stream & historical log ingestion.
   useEffect(() => {
-    const seen = new Set<number>();
-    const apiBase = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000/api";
-    const logUrl = `${apiBase.replace(/\/$/, "")}/scan/${jobId}/logs`;
-    const es = new EventSource(logUrl);
-    eventSourceRef.current = es;
+    const seen = new Set<string>();
 
-    es.onopen = () => setStreamState("open");
-    es.onerror = () => setStreamState(es.readyState === EventSource.CLOSED ? "closed" : "reconnecting");
-    es.onmessage = (event) => {
-      let text = event.data as string;
-      let agent = "system";
-      let seq: number | null = null;
-      try {
-        const data = JSON.parse(event.data);
-        text = data.message ?? event.data;
-        agent = data.agent ?? "system";
-        seq = typeof data.seq === "number" ? data.seq : null;
-      } catch {
-        // plain-text line
-      }
-      if (seq !== null) {
-        if (seen.has(seq)) return;
-        seen.add(seq);
-      }
-      const tag = text.match(/^\[AGENT:([a-zA-Z_]+)\]\s*/);
-      const stage = STEP_TO_STAGE[tag?.[1] ?? agent] ?? "system";
-      const clean = tag ? text.slice(tag[0].length) : text;
+    const ingestLogLine = (rawText: string, rawAgent: string = "system", rawSeq: number | null = null) => {
+      const dedupKey = rawSeq !== null ? `s${rawSeq}` : rawText;
+      if (seen.has(dedupKey)) return;
+      seen.add(dedupKey);
+
+      const tag = rawText.match(/^\[AGENT:([a-zA-Z_]+)\]\s*/);
+      const stage = STEP_TO_STAGE[tag?.[1] ?? rawAgent] ?? "system";
+      const clean = tag ? rawText.slice(tag[0].length) : rawText;
       setLogs((prev) => {
-        const next = [...prev, { key: seq !== null ? `s${seq}` : `r${prev.length}-${Date.now()}`, seq, text: clean, stage }];
-        return seq !== null ? next.sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0)) : next;
+        const next = [...prev, { key: rawSeq !== null ? `s${rawSeq}` : `r${prev.length}-${Date.now()}`, seq: rawSeq, text: clean, stage }];
+        return rawSeq !== null ? next.sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0)) : next;
       });
     };
 
+    // Initial historical logs fetch via REST
+    fetchJobLogs(jobId).then((history) => {
+      if (Array.isArray(history)) {
+        history.forEach((item) => {
+          ingestLogLine(item.message || "", item.agent || "system", typeof item.seq === "number" ? item.seq : null);
+        });
+      }
+    }).catch(() => {});
+
+    const apiBase = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000/api";
+    const logUrl = `${apiBase.replace(/\/$/, "")}/scan/${jobId}/logs`;
+    let es: EventSource | null = null;
+    try {
+      es = new EventSource(logUrl);
+      eventSourceRef.current = es;
+
+      es.onopen = () => setStreamState("open");
+      es.onerror = () => {
+        setStreamState(es?.readyState === EventSource.CLOSED ? "closed" : "reconnecting");
+        // Fallback: poll history if SSE fails
+        fetchJobLogs(jobId).then((history) => {
+          if (Array.isArray(history)) {
+            history.forEach((item) => {
+              ingestLogLine(item.message || "", item.agent || "system", typeof item.seq === "number" ? item.seq : null);
+            });
+          }
+        }).catch(() => {});
+      };
+      es.onmessage = (event) => {
+        let text = event.data as string;
+        let agent = "system";
+        let seq: number | null = null;
+        try {
+          const data = JSON.parse(event.data);
+          text = data.message ?? event.data;
+          agent = data.agent ?? "system";
+          seq = typeof data.seq === "number" ? data.seq : null;
+        } catch {
+          // plain-text line
+        }
+        ingestLogLine(text, agent, seq);
+      };
+    } catch {
+      setStreamState("closed");
+    }
+
     return () => {
-      es.close();
+      if (es) {
+        es.close();
+      }
       eventSourceRef.current = null;
     };
   }, [jobId]);
@@ -248,12 +277,30 @@ export default function ScanProgress({ jobId }: ScanProgressProps) {
   // published just after the status flips).
   useEffect(() => {
     if (!isTerminal) return;
+    fetchJobLogs(jobId).then((history) => {
+      if (Array.isArray(history)) {
+        history.forEach((item) => {
+          const text = item.message || "";
+          const agent = item.agent || "system";
+          const seq = typeof item.seq === "number" ? item.seq : null;
+          const tag = text.match(/^\[AGENT:([a-zA-Z_]+)\]\s*/);
+          const stage = STEP_TO_STAGE[tag?.[1] ?? agent] ?? "system";
+          const clean = tag ? text.slice(tag[0].length) : text;
+          setLogs((prev) => {
+            if (seq !== null && prev.some((l) => l.seq === seq)) return prev;
+            if (prev.some((l) => l.text === clean)) return prev;
+            const next = [...prev, { key: seq !== null ? `s${seq}` : `r${prev.length}-${Date.now()}`, seq, text: clean, stage }];
+            return seq !== null ? next.sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0)) : next;
+          });
+        });
+      }
+    }).catch(() => {});
     const t = setTimeout(() => {
       eventSourceRef.current?.close();
       setStreamState("closed");
     }, 4000);
     return () => clearTimeout(t);
-  }, [isTerminal]);
+  }, [isTerminal, jobId]);
 
   // Auto-scroll unless the user scrolled up to read.
   useEffect(() => {
@@ -477,9 +524,15 @@ export default function ScanProgress({ jobId }: ScanProgressProps) {
           className="flex-1 py-3 font-mono overflow-y-auto leading-relaxed selection:bg-brand-600 selection:text-white"
         >
           {logs.length === 0 ? (
-            <div className="px-4 text-slate-500 italic py-2 flex items-center gap-2 text-xs">
-              <Loader2 className="w-3.5 h-3.5 animate-spin" />
-              {streamState === "open" ? "Connected. Waiting for the first log line..." : "Connecting to the log stream..."}
+            <div className="px-4 text-slate-500 italic py-3 flex items-center gap-2 text-xs">
+              {isTerminal ? (
+                <span>Pipeline execution finished. No active log lines.</span>
+              ) : (
+                <>
+                  <Loader2 className="w-3.5 h-3.5 animate-spin text-brand-400" />
+                  <span>{streamState === "open" ? "Connected. Waiting for the first log line..." : "Connecting to the log stream..."}</span>
+                </>
+              )}
             </div>
           ) : (
             logs.map((l, i) => {
