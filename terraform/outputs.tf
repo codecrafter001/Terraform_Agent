@@ -1,29 +1,14 @@
-output "instance_id" {
-  description = "ID of the deployed Ubuntu EC2 instance"
-  value       = aws_instance.ubuntu_server.id
+output "subnet_terraagent_ubuntu_ec2_subnet_4a2dbe19_id" {
+  value       = aws_subnet.terraagent_ubuntu_ec2_subnet_4a2dbe19.id
+  description = "Subnet ID for terraagent_ubuntu_ec2_subnet_4a2dbe19"
 }
 
-output "instance_public_ip" {
-  description = "Public IP address of the EC2 instance"
-  value       = aws_instance.ubuntu_server.public_ip
+output "sg_terraagent_ubuntu_ec2_sg_56255343_id" {
+  value       = aws_security_group.terraagent_ubuntu_ec2_sg_56255343.id
+  description = "Security Group ID for terraagent_ubuntu_ec2_sg_56255343"
 }
 
-output "instance_private_ip" {
-  description = "Private IP address of the EC2 instance"
-  value       = aws_instance.ubuntu_server.private_ip
-}
-
-output "ami_id" {
-  description = "AMI ID used for Ubuntu 22.04 LTS"
-  value       = data.aws_ami.ubuntu.id
-}
-
-output "instance_type" {
-  description = "Instance type of the deployed EC2 server"
-  value       = aws_instance.ubuntu_server.instance_type
-}
-
-output "region" {
-  description = "AWS region"
-  value       = var.aws_region
+output "instance_terraagent_ubuntu_ec2_0ae26311_id" {
+  value       = aws_instance.terraagent_ubuntu_ec2_0ae26311.id
+  description = "EC2 Instance ID for terraagent_ubuntu_ec2_0ae26311"
 }

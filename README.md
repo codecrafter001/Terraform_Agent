@@ -2,10 +2,8 @@
 
 - **AWS Region:** `us-east-1`
 - **Total Discovered Resources:** 20
-- **Main Services:**
-  - **Networking & Content Delivery:** Amazon VPC, Subnets, Route Tables, Internet Gateways
-  - **Compute:** Amazon EC2 (`aws_instance`), Security Groups (`aws_security_group`)
-  - **Storage & State Management:** Amazon S3 (`aws_s3_bucket`), Amazon DynamoDB
+- **Primary AWS Services:** 
+  - **Networking & Content Delivery:** Amazon VPC, Subnets, Route
 
 ## Pending Human Approval
 
