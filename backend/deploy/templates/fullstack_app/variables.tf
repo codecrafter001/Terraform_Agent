@@ -258,3 +258,9 @@ variable "secret_env_keys" {
     error_message = "secret_env_keys must be up to 30 UPPER_CASE names, none starting with AWS_."
   }
 }
+
+variable "run_migrations" {
+  description = "Run the detected schema command (npm run db:push, prisma migrate deploy, alembic upgrade head...) before the server starts."
+  type        = bool
+  default     = false
+}

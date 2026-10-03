@@ -612,7 +612,7 @@ export type DeploymentStatus =
   | 'EXPIRED'
   | 'FAILED';
 
-export type DeploymentTarget = 'static_site' | 'lambda_http' | 'ecs_service';
+export type DeploymentTarget = 'static_site' | 'lambda_http' | 'ecs_service' | 'fullstack_app';
 
 export interface AwsDeployTarget {
   id: string;
@@ -671,6 +671,35 @@ export interface ProjectProfile {
   source_bytes: number;
   has_dockerfile: boolean;
   evidence: Record<string, DeployEvidence[]>;
+  warnings: string[];
+  fullstack?: FullstackLayout | null;
+}
+
+// backend/deploy/fullstack.py::FullstackLayout
+export interface FullstackLayout {
+  backend: {
+    dir: string;
+    runtime: string;
+    framework: string | null;
+    port: number;
+    has_dockerfile: boolean;
+    uses_api_prefix: boolean;
+  };
+  frontend: {
+    dir: string;
+    framework: string | null;
+    build_required: boolean;
+    static_output_dir: string | null;
+    api_url_env: string[];
+  } | null;
+  database: {
+    engine: 'postgres' | 'mysql' | 'mongodb' | 'sqlite';
+    url_scheme: string | null;
+    rds_supported: boolean;
+    evidence: DeployEvidence[];
+  } | null;
+  migration: { command: string[]; evidence: DeployEvidence[] } | null;
+  env_keys: string[];
   warnings: string[];
 }
 
@@ -749,13 +778,32 @@ export interface EcsSettings {
   memory_mb?: number;
   desired_count?: number;
   image_tag?: string;
+  health_check_path?: string;
   certificate_arn?: string | null;
+}
+
+// backend/models/deployment.py::FullstackSettings
+export type FullstackDatabaseMode = 'rds' | 'external' | 'none';
+export interface FullstackSettings {
+  container_port?: number;
+  cpu: number;
+  memory_mb: number;
+  desired_count: number;
+  health_check_path: string;
+  price_class: 'PriceClass_100' | 'PriceClass_200' | 'PriceClass_All';
+  database: FullstackDatabaseMode;
+  db_instance_class: 'db.t4g.micro' | 'db.t4g.small' | 'db.t4g.medium' | 'db.t4g.large' | 'db.m7g.large';
+  db_allocated_storage_gb: number;
+  db_multi_az: boolean;
+  run_migrations: boolean;
+  secret_env_keys: string[];
 }
 
 export type PrepareDeploymentPayload =
   | { target: 'static_site'; settings: StaticSiteSettings }
   | { target: 'lambda_http'; settings: LambdaSettings }
-  | { target: 'ecs_service'; settings: EcsSettings };
+  | { target: 'ecs_service'; settings: EcsSettings }
+  | { target: 'fullstack_app'; settings: FullstackSettings };
 
 export interface PlanResourceChange {
   address: string;
@@ -878,7 +926,7 @@ export interface DeploymentDetail extends DeploymentSummary {
   intake: DeploymentIntake | null;
   profile: ProjectProfile | null;
   decision: DeploymentDecision | null;
-  settings: Partial<StaticSiteSettings & LambdaSettings & EcsSettings> | null;
+  settings: Partial<StaticSiteSettings & LambdaSettings & EcsSettings & FullstackSettings> | null;
   build: DeploymentBuild | null;
   verification: DeploymentVerification | null;
   plan?: Record<string, unknown> | null;

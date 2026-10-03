@@ -13,7 +13,7 @@ Each sub-project is analysed with the same analyzer as a single-app upload.
 
 import json
 import re
-from typing import Dict, List, Optional, Tuple, TypedDict
+from typing import Dict, List, Optional, Tuple, TypedDict, cast
 
 from deploy.analyzer import Evidence, ProjectProfile, _Tree, analyze
 
@@ -93,12 +93,25 @@ class BackendInfo(TypedDict):
     profile: ProjectProfile
 
 
+class MigrationInfo(TypedDict):
+    command: List[str]  # one of the fixed forms in _migration(), run by the generated entrypoint
+    evidence: List[Evidence]
+
+
 class FullstackLayout(TypedDict):
     backend: BackendInfo
     frontend: Optional[FrontendInfo]
     database: Optional[DatabaseInfo]
+    migration: Optional[MigrationInfo]
     env_keys: List[str]
     warnings: List[str]
+
+
+# package.json scripts that apply a schema, most specific first.
+MIGRATION_SCRIPTS = ("db:migrate", "migrate", "db:deploy", "prisma:migrate", "db:push")
+_SCRIPT_NAME = re.compile(r"^[A-Za-z0-9:_-]{1,40}$")
+# Platform-only variables that must never become required secrets.
+_PLATFORM_ENV_PREFIXES = ("REPL_", "REPLIT_", "VERCEL_", "NETLIFY_", "RENDER_", "RAILWAY_", "HEROKU_")
 
 
 def _sub(paths: List[str], sizes: Dict[str, int], prefix: str) -> Tuple[List[str], Dict[str, int]]:
@@ -122,12 +135,18 @@ def _is_server(p: ProjectProfile) -> bool:
     return p["runtime"] in ("node", "python") and (p["server_entrypoint"] or p["has_dockerfile"]) and not p["lambda_handler"]
 
 
-def _frontend(root: str, paths: List[str], sizes: Dict[str, int], prefix: str) -> Optional[FrontendInfo]:
+def _frontend(root: str, paths: List[str], sizes: Dict[str, int], prefix: str,
+              root_builds: bool = False) -> Optional[FrontendInfo]:
     sub_paths, sub_sizes = _sub(paths, sizes, prefix)
     if not sub_paths:
         return None
     base = f"{root}/{prefix}" if prefix else root
     tree = _Tree(base, sub_paths, sub_sizes)
+    # A sub-folder without its own package.json in a project whose root has a build
+    # script (Vite/Replit-style: `vite build` with root: "client") is the source of
+    # the root build, served by the backend - not a separate frontend.
+    if prefix and root_builds and not tree.has("package.json"):
+        return None
     ev: List[Evidence] = []
     pkg: Dict = {}
     if tree.has("package.json"):
@@ -263,7 +282,7 @@ def _env_keys(tree: _Tree, runtime: str, warnings: List[str]) -> List[str]:
                 if name not in aws_keys:
                     aws_keys.append(name)
                 continue
-            if name.startswith(("VITE_", "REACT_APP_", "NEXT_PUBLIC_", "VUE_APP_", "npm_")):
+            if name.startswith(("VITE_", "REACT_APP_", "NEXT_PUBLIC_", "VUE_APP_", "npm_", *_PLATFORM_ENV_PREFIXES)):
                 continue
             keys.append(name)
     if aws_keys:
@@ -281,7 +300,11 @@ def detect(root: str, paths: List[str], sizes: Dict[str, int], root_profile: Pro
     """The project's full-stack layout, or None when no server was found."""
     warnings: List[str] = []
     backend: Optional[BackendInfo] = None
-    candidates = [("", root_profile)] if _is_server(root_profile) else []
+    # A copy: the pipeline stores this layout inside root_profile itself, so keeping
+    # the same object here would make the saved profile a circular structure.
+    candidates: List[Tuple[str, ProjectProfile]] = []
+    if _is_server(root_profile):
+        candidates.append(("", cast(ProjectProfile, {**root_profile, "fullstack": None})))
     for d in BACKEND_DIRS:
         sub_paths, sub_sizes = _sub(paths, sizes, d)
         if sub_paths:
@@ -292,17 +315,18 @@ def detect(root: str, paths: List[str], sizes: Dict[str, int], root_profile: Pro
             texts = _source_texts(tree, (".py",) if p["runtime"] == "python" else (".js", ".ts", ".mjs", ".cjs"))
             backend = {
                 "dir": d, "runtime": p["runtime"], "framework": p["framework"],
-                "port": int(p["listens_on_port"] or 8080), "has_dockerfile": p["has_dockerfile"],
+                "port": p["listens_on_port"] or 8080, "has_dockerfile": p["has_dockerfile"],
                 "uses_api_prefix": any(_API_ROUTE.search(t) for _, t in texts), "profile": p,
             }
             break
     if backend is None:
         return None
 
+    root_builds = _root_has_build_script(root, paths)
     frontend: Optional[FrontendInfo] = None
     for d in FRONTEND_DIRS:
         if d != backend["dir"] and any(x.startswith(d + "/") for x in paths):
-            if frontend := _frontend(root, paths, sizes, d):
+            if frontend := _frontend(root, paths, sizes, d, root_builds=root_builds):
                 break
     if frontend is None and backend["dir"]:
         frontend = _frontend(root, paths, sizes, "")  # root frontend + backend/ subdir
@@ -329,4 +353,49 @@ def detect(root: str, paths: List[str], sizes: Dict[str, int], root_profile: Pro
             env_keys = sorted({*env_keys, "MONGODB_URI"})[:MAX_ENV_KEYS]
     if database:
         warnings.extend(database["warnings"])
-    return {"backend": backend, "frontend": frontend, "database": database, "env_keys": env_keys, "warnings": warnings}
+    migration = _migration(root, backend, paths) if database and database["rds_supported"] else None
+    layout: FullstackLayout = {
+        "backend": backend, "frontend": frontend, "database": database, "migration": migration,
+        "env_keys": env_keys, "warnings": warnings,
+    }
+    return layout
+
+
+def _root_has_build_script(root: str, paths: List[str]) -> bool:
+    if "package.json" not in paths:
+        return False
+    try:
+        pkg = json.loads(_Tree(root, paths, {}).read("package.json") or "{}")
+    except json.JSONDecodeError:
+        return False
+    scripts = pkg.get("scripts") if isinstance(pkg, dict) else None
+    return bool(isinstance(scripts, dict) and scripts.get("build"))
+
+
+def _migration(root: str, backend: BackendInfo, paths: List[str]) -> Optional[MigrationInfo]:
+    """The schema command to run before the server starts, as one of a few fixed
+    forms - never a command string taken from the project."""
+    prefix = backend["dir"]
+    rel = (lambda f: f"{prefix}/{f}" if prefix else f)
+    tree = _Tree(root, paths, {})
+    if backend["runtime"] == "node":
+        try:
+            pkg = json.loads(tree.read(rel("package.json")) or "{}")
+        except json.JSONDecodeError:
+            pkg = {}
+        scripts = pkg.get("scripts") if isinstance(pkg, dict) and isinstance(pkg.get("scripts"), dict) else {}
+        for name in MIGRATION_SCRIPTS:
+            if name in scripts and _SCRIPT_NAME.match(name):
+                return {"command": ["npm", "run", name], "evidence": [{"file": rel("package.json"), "rule": f"migrate.script.{name}"}]}
+        deps = {**(pkg.get("dependencies") or {}), **(pkg.get("devDependencies") or {})} if isinstance(pkg, dict) else {}
+        if "prisma" in deps and rel("prisma/schema.prisma") in paths:
+            has_migrations = any(p.startswith(rel("prisma/migrations/")) for p in paths)
+            command = ["npx", "prisma", "migrate", "deploy"] if has_migrations else ["npx", "prisma", "db", "push"]
+            return {"command": command, "evidence": [{"file": rel("prisma/schema.prisma"), "rule": "migrate.prisma"}]}
+        return None
+    if rel("alembic.ini") in paths:
+        return {"command": ["alembic", "upgrade", "head"], "evidence": [{"file": rel("alembic.ini"), "rule": "migrate.alembic"}]}
+    if rel("manage.py") in paths:
+        return {"command": ["python", "manage.py", "migrate", "--noinput"],
+                "evidence": [{"file": rel("manage.py"), "rule": "migrate.django"}]}
+    return None

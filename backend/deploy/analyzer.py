@@ -10,7 +10,7 @@ import json
 import os
 import re
 import tomllib
-from typing import Any, Dict, List, Optional, TypedDict
+from typing import Any, Dict, List, Optional, Set, TypedDict
 
 from deploy.config import MAX_ANALYZED_SOURCE_FILES
 
@@ -201,8 +201,12 @@ def analyze(root: str, paths: List[str], sizes: Optional[Dict[str, int]] = None)
             "server/index.ts", "server/index.js", "src/server.ts", "src/server.js",
             "src/index.js", "src/index.ts", "src/handler.js", "src/handler.ts", "src/app.ts", "src/app.js",
         ]
+        seen: Set[str] = set()
         for path in candidates:
             path = path.lstrip("./")
+            if path in seen:  # the same file is often named by main, start and dev
+                continue
+            seen.add(path)
             text = tree.read(path)
             if text is None:
                 continue

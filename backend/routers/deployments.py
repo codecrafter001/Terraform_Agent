@@ -12,6 +12,7 @@ import asyncio
 from datetime import datetime
 import json
 import logging
+import os
 from typing import Any, Dict, List, Optional, Set
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
@@ -420,6 +421,15 @@ async def deploy_deployment(request: Request, deployment_id: str, body: DeployRe
         raise HTTPException(status_code=422, detail="Explicit confirmation (confirm: true) is required to deploy.")
 
     user = require_authenticated_user(request)
+
+    # apply_approved re-checks this (it is the real gate), but its refusal happens in the
+    # background where the caller never sees it; refuse here so the UI gets the reason.
+    if os.environ.get("TERRAAGENT_DEPLOY_ENABLED", "").lower() != "true":
+        raise HTTPException(
+            status_code=409,
+            detail="Deploying to AWS is switched off on this TerraAgent server. Set TERRAAGENT_DEPLOY_ENABLED=true "
+                   "in its environment and restart the API. Nothing was sent to AWS.",
+        )
 
     _dispatch("apply", deployment_id)
     return DeploymentAccepted(

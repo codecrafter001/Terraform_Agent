@@ -150,9 +150,12 @@ def evaluate_plan_policy(
             )
 
         # 2. Tagging & Naming scoping
-        # Check tags or name if create action
-        if "create" in actions:
-            tags = after.get("tags") or after.get("tags_all") or {}
+        # Check tags or name if create action. tags_all is the resource's own tags
+        # merged with the provider's default_tags, where the deployment tag lives;
+        # resources with neither attribute (policies, associations, bucket
+        # sub-resources, event targets) can't carry tags at all, so aren't checked.
+        if "create" in actions and ("tags" in after or "tags_all" in after):
+            tags = {**(after.get("tags") or {}), **(after.get("tags_all") or {})}
             dep_tag = tags.get("terraagent:deployment-id")
             res_name = after.get("name") or after.get("bucket") or after.get("function_name") or ""
 

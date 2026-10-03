@@ -61,13 +61,80 @@ class LambdaSettings(BaseModel):
     public_url: bool = True
 
 
+_ENV_KEY = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
+_HEALTH_PATH = re.compile(r"^/[A-Za-z0-9_./-]{0,200}$")
+_FARGATE_CPU = (256, 512, 1024, 2048, 4096)
+_FARGATE_MEMORY = (512, 1024, 2048, 4096, 8192)
+
+
+def _check_cpu(v: int) -> int:
+    if v not in _FARGATE_CPU:
+        raise ValueError(f"cpu must be one of {_FARGATE_CPU}")
+    return v
+
+
+def _check_memory(v: int) -> int:
+    if v not in _FARGATE_MEMORY:
+        raise ValueError(f"memory_mb must be one of {_FARGATE_MEMORY}")
+    return v
+
+
+def _check_health_path(v: str) -> str:
+    if not _HEALTH_PATH.match(v):
+        raise ValueError("health_check_path must start with / and contain only URL path characters")
+    return v
+
+
 class EcsSettings(BaseModel):
     container_port: int = Field(default=8080, ge=1, le=65535)
     cpu: int = Field(default=256)
     memory_mb: int = Field(default=512)
     desired_count: int = Field(default=1, ge=1, le=10)
-    image_tag: str = Field(default="latest")
+    # Empty = the content-addressed tag of the build's source.zip (what CodeBuild pushes).
+    image_tag: Optional[str] = Field(default=None, pattern=r"^[A-Za-z0-9_.-]{1,128}$")
+    health_check_path: str = "/"
     certificate_arn: Optional[str] = None
+
+    _cpu = field_validator("cpu")(_check_cpu)
+    _memory = field_validator("memory_mb")(_check_memory)
+    _health = field_validator("health_check_path")(_check_health_path)
+
+
+class FullstackSettings(BaseModel):
+    container_port: Optional[int] = Field(default=None, ge=1, le=65535, description="Empty = the detected port")
+    cpu: int = Field(default=256)
+    memory_mb: int = Field(default=512)
+    desired_count: int = Field(default=1, ge=1, le=10)
+    health_check_path: str = "/"
+    price_class: Literal["PriceClass_100", "PriceClass_200", "PriceClass_All"] = "PriceClass_100"
+    database: Literal["rds", "external", "none"] = Field(
+        default="rds",
+        description="rds: create PostgreSQL/MySQL on RDS; external: an empty DATABASE_URL secret for a database you host; none",
+    )
+    db_instance_class: Literal["db.t4g.micro", "db.t4g.small", "db.t4g.medium", "db.t4g.large", "db.m7g.large"] = "db.t4g.micro"
+    db_allocated_storage_gb: int = Field(default=20, ge=20, le=500)
+    db_multi_az: bool = False
+    run_migrations: bool = Field(default=True, description="Run the detected schema command before the server starts")
+    secret_env_keys: Optional[List[str]] = Field(
+        default=None, max_length=30,
+        description="Environment variables that get an empty Secrets Manager secret; empty = the detected ones",
+    )
+
+    _cpu = field_validator("cpu")(_check_cpu)
+    _memory = field_validator("memory_mb")(_check_memory)
+    _health = field_validator("health_check_path")(_check_health_path)
+
+    @field_validator("secret_env_keys")
+    @classmethod
+    def _keys(cls, v: Optional[List[str]]) -> Optional[List[str]]:
+        if v is None:
+            return None
+        for key in v:
+            if not _ENV_KEY.match(key):
+                raise ValueError(f"'{key[:40]}' isn't an UPPER_CASE environment variable name")
+            if key.startswith("AWS_"):
+                raise ValueError("AWS_* variables can't be secrets: the container uses its IAM task role")
+        return sorted(set(v))
 
 
 class PrepareStaticSite(BaseModel):
@@ -85,7 +152,12 @@ class PrepareEcs(BaseModel):
     settings: EcsSettings = EcsSettings()
 
 
-PrepareRequest = Annotated[Union[PrepareStaticSite, PrepareLambda, PrepareEcs], Field(discriminator="target")]
+class PrepareFullstack(BaseModel):
+    target: Literal["fullstack_app"]
+    settings: FullstackSettings = FullstackSettings()
+
+
+PrepareRequest = Annotated[Union[PrepareStaticSite, PrepareLambda, PrepareEcs, PrepareFullstack], Field(discriminator="target")]
 
 
 class PlanRequest(BaseModel):

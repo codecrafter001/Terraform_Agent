@@ -6,11 +6,13 @@ import {
   AlertTriangle,
   CheckCircle2,
   Circle,
+  Database,
   ExternalLink,
   FileCode2,
   GitMerge,
   GitPullRequest,
   Hammer,
+  KeyRound,
   Loader2,
   Lock,
   Rocket,
@@ -42,6 +44,8 @@ import type {
   DeploymentStatus,
   DeploymentTarget,
   EcsSettings,
+  FullstackLayout,
+  FullstackSettings,
   LambdaSettings,
   PrepareDeploymentPayload,
   StaticSiteSettings,
@@ -55,6 +59,7 @@ const POSITIVE_REASONS = new Set([
   "static.output_present",
   "container.dockerfile_detected",
   "server.container_detected",
+  "fullstack.detected",
 ]);
 
 const STAGES: {
@@ -174,6 +179,21 @@ function ConfigureForm({ dep, onStarted }: { dep: DeploymentDetail; onStarted: (
     desired_count: dep.settings?.desired_count ?? 1,
     certificate_arn: dep.settings?.certificate_arn ?? "",
   });
+  const layout = dep.profile?.fullstack ?? null;
+  const [fullstackSettings, setFullstackSettings] = useState<FullstackSettings>({
+    container_port: dep.settings?.container_port ?? layout?.backend.port ?? 8080,
+    cpu: dep.settings?.cpu ?? 256,
+    memory_mb: dep.settings?.memory_mb ?? 512,
+    desired_count: dep.settings?.desired_count ?? 1,
+    health_check_path: dep.settings?.health_check_path ?? "/",
+    price_class: (dep.settings?.price_class as FullstackSettings["price_class"]) ?? "PriceClass_100",
+    database: dep.settings?.database ?? (layout?.database?.rds_supported ? "rds" : "none"),
+    db_instance_class: dep.settings?.db_instance_class ?? "db.t4g.micro",
+    db_allocated_storage_gb: dep.settings?.db_allocated_storage_gb ?? 20,
+    db_multi_az: dep.settings?.db_multi_az ?? false,
+    run_migrations: dep.settings?.run_migrations ?? true,
+    secret_env_keys: dep.settings?.secret_env_keys ?? layout?.env_keys ?? [],
+  });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -187,6 +207,8 @@ function ConfigureForm({ dep, onStarted }: { dep: DeploymentDetail; onStarted: (
       payload = { target, settings: staticSettings };
     } else if (target === "lambda_http") {
       payload = { target, settings: lambdaSettings };
+    } else if (target === "fullstack_app") {
+      payload = { target, settings: fullstackSettings };
     } else {
       payload = {
         target: "ecs_service",
@@ -261,6 +283,8 @@ function ConfigureForm({ dep, onStarted }: { dep: DeploymentDetail; onStarted: (
             Public URL (unchecked: callers must sign with IAM)
           </label>
         </div>
+      ) : target === "fullstack_app" ? (
+        <FullstackSettingsForm layout={layout} settings={fullstackSettings} onChange={setFullstackSettings} />
       ) : (
         <div className="space-y-4">
           <div className="grid sm:grid-cols-4 gap-4">
@@ -313,6 +337,165 @@ function ConfigureForm({ dep, onStarted }: { dep: DeploymentDetail; onStarted: (
   );
 }
 
+const ENV_KEY_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
+
+function FullstackSettingsForm({
+  layout,
+  settings,
+  onChange,
+}: {
+  layout: FullstackLayout | null;
+  settings: FullstackSettings;
+  onChange: (s: FullstackSettings) => void;
+}) {
+  const [newKey, setNewKey] = useState("");
+  const db = layout?.database ?? null;
+  const detectedKeys = layout?.env_keys ?? [];
+  const allKeys = Array.from(new Set([...detectedKeys, ...settings.secret_env_keys])).sort();
+  const set = <K extends keyof FullstackSettings>(key: K, value: FullstackSettings[K]) => onChange({ ...settings, [key]: value });
+  const toggleKey = (key: string) =>
+    set(
+      "secret_env_keys",
+      settings.secret_env_keys.includes(key)
+        ? settings.secret_env_keys.filter((k) => k !== key)
+        : [...settings.secret_env_keys, key].sort(),
+    );
+  const addKey = () => {
+    const key = newKey.trim().toUpperCase();
+    if (!ENV_KEY_PATTERN.test(key) || key.startsWith("AWS_")) return;
+    if (!settings.secret_env_keys.includes(key)) set("secret_env_keys", [...settings.secret_env_keys, key].sort());
+    setNewKey("");
+  };
+  const newKeyValid = ENV_KEY_PATTERN.test(newKey.trim().toUpperCase()) && !newKey.trim().toUpperCase().startsWith("AWS_");
+
+  return (
+    <div className="space-y-5">
+      <div className="grid sm:grid-cols-4 gap-4">
+        <div className="space-y-1.5">
+          <label htmlFor="fs_port" className="field-label">Backend port</label>
+          <input id="fs_port" type="number" min={1} max={65535} className="field-input" value={settings.container_port ?? ""}
+            onChange={(e) => set("container_port", Number(e.target.value))} />
+        </div>
+        <div className="space-y-1.5">
+          <label htmlFor="fs_cpu" className="field-label">CPU units</label>
+          <select id="fs_cpu" className="field-input" value={settings.cpu} onChange={(e) => set("cpu", Number(e.target.value))}>
+            <option value={256}>256 (0.25 vCPU)</option>
+            <option value={512}>512 (0.5 vCPU)</option>
+            <option value={1024}>1024 (1 vCPU)</option>
+            <option value={2048}>2048 (2 vCPU)</option>
+          </select>
+        </div>
+        <div className="space-y-1.5">
+          <label htmlFor="fs_mem" className="field-label">Memory (MB)</label>
+          <select id="fs_mem" className="field-input" value={settings.memory_mb} onChange={(e) => set("memory_mb", Number(e.target.value))}>
+            <option value={512}>512 MB</option>
+            <option value={1024}>1024 MB (1 GB)</option>
+            <option value={2048}>2048 MB (2 GB)</option>
+            <option value={4096}>4096 MB (4 GB)</option>
+          </select>
+        </div>
+        <div className="space-y-1.5">
+          <label htmlFor="fs_health" className="field-label">Health check path</label>
+          <input id="fs_health" type="text" className="field-input" value={settings.health_check_path}
+            onChange={(e) => set("health_check_path", e.target.value)} />
+        </div>
+      </div>
+
+      <div className="space-y-2">
+        <div className="field-label flex items-center gap-1.5"><Database className="w-3.5 h-3.5" /> Database</div>
+        <div className="grid sm:grid-cols-3 gap-2">
+          {([
+            ["rds", db?.rds_supported ? `New ${db.engine === "mysql" ? "MySQL" : "PostgreSQL"} on RDS` : "New database on RDS", "Private subnets; the password is created and kept by RDS."],
+            ["external", "Database I host", "An empty DATABASE_URL secret you fill with your own connection string."],
+            ["none", "No database", "Nothing database-related is created."],
+          ] as [FullstackSettings["database"], string, string][]).map(([mode, title, hint]) => {
+            const disabled = mode === "rds" && !db?.rds_supported;
+            return (
+              <button key={mode} type="button" disabled={disabled} onClick={() => set("database", mode)} aria-pressed={settings.database === mode}
+                className={`text-left rounded-xl border px-3 py-2.5 text-xs transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+                  settings.database === mode ? "border-brand-600 bg-brand-50 text-brand-800" : "border-slate-200 hover:bg-slate-50"
+                }`}>
+                <div className="font-semibold">{title}</div>
+                <div className="text-2xs text-slate-500 mt-0.5">{disabled ? "No PostgreSQL or MySQL driver was found in the backend." : hint}</div>
+              </button>
+            );
+          })}
+        </div>
+        {settings.database === "rds" && (
+          <div className="grid sm:grid-cols-3 gap-4 pt-1">
+            <div className="space-y-1.5">
+              <label htmlFor="fs_dbclass" className="field-label">Instance class</label>
+              <select id="fs_dbclass" className="field-input" value={settings.db_instance_class}
+                onChange={(e) => set("db_instance_class", e.target.value as FullstackSettings["db_instance_class"])}>
+                <option value="db.t4g.micro">db.t4g.micro (2 vCPU burst, 1 GB)</option>
+                <option value="db.t4g.small">db.t4g.small (2 GB)</option>
+                <option value="db.t4g.medium">db.t4g.medium (4 GB)</option>
+                <option value="db.t4g.large">db.t4g.large (8 GB)</option>
+                <option value="db.m7g.large">db.m7g.large (8 GB, steady)</option>
+              </select>
+            </div>
+            <div className="space-y-1.5">
+              <label htmlFor="fs_dbsize" className="field-label">Storage (GB)</label>
+              <input id="fs_dbsize" type="number" min={20} max={500} className="field-input" value={settings.db_allocated_storage_gb}
+                onChange={(e) => set("db_allocated_storage_gb", Number(e.target.value))} />
+            </div>
+            <label className="flex items-center gap-2 text-xs text-slate-700 sm:mt-6">
+              <input type="checkbox" checked={settings.db_multi_az} onChange={(e) => set("db_multi_az", e.target.checked)} />
+              Standby in a second zone (doubles DB cost)
+            </label>
+            {layout?.migration && (
+              <label className="flex items-start gap-2 text-xs text-slate-700 sm:col-span-3">
+                <input type="checkbox" className="mt-0.5" checked={settings.run_migrations} onChange={(e) => set("run_migrations", e.target.checked)} />
+                <span>
+                  Create/update tables on start with <code className="font-mono">{layout.migration.command.join(" ")}</code>
+                  <span className="block text-2xs text-slate-500">Found in {layout.migration.evidence[0]?.file}. A failure is logged and the app still starts.</span>
+                </span>
+              </label>
+            )}
+          </div>
+        )}
+      </div>
+
+      <div className="space-y-2">
+        <div className="field-label flex items-center gap-1.5"><KeyRound className="w-3.5 h-3.5" /> Secrets (environment variables)</div>
+        <p className="text-2xs text-slate-500">
+          Each checked name becomes an <strong>empty</strong> AWS Secrets Manager secret. You paste the values in the AWS console after
+          deploying; TerraAgent never sees them. The app starts once every checked secret has a value, so untick any it doesn&apos;t need.
+        </p>
+        {allKeys.length > 0 ? (
+          <div className="flex flex-wrap gap-2">
+            {allKeys.map((key) => (
+              <label key={key} className={`flex items-center gap-1.5 rounded-lg border px-2 py-1 text-2xs font-mono cursor-pointer ${
+                settings.secret_env_keys.includes(key) ? "border-brand-300 bg-brand-50 text-brand-800" : "border-slate-200 text-slate-500"
+              }`}>
+                <input type="checkbox" checked={settings.secret_env_keys.includes(key)} onChange={() => toggleKey(key)} />
+                {key}
+                {!detectedKeys.includes(key) && <span className="text-slate-400 font-sans">(added)</span>}
+              </label>
+            ))}
+          </div>
+        ) : (
+          <p className="text-2xs text-slate-500">No environment variables were found in the backend code.</p>
+        )}
+        <div className="flex gap-2 max-w-sm">
+          <input type="text" placeholder="ADD_ANOTHER_KEY" className="field-input text-xs font-mono" value={newKey}
+            onChange={(e) => setNewKey(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addKey(); } }} />
+          <button type="button" className="btn-secondary text-xs" onClick={addKey} disabled={!newKeyValid}>Add</button>
+        </div>
+      </div>
+
+      {layout && layout.warnings.length > 0 && (
+        <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-900 space-y-1">
+          <div className="font-semibold flex items-center gap-1.5"><AlertTriangle className="w-4 h-4" /> Before you deploy</div>
+          <ul className="list-disc pl-5 space-y-0.5">
+            {layout.warnings.map((w) => <li key={w}>{w}</li>)}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function AnalysisCard({ dep }: { dep: DeploymentDetail }) {
   const p = dep.profile;
   const intake = dep.intake;
@@ -353,6 +536,22 @@ function AnalysisCard({ dep }: { dep: DeploymentDetail }) {
           {p.static_output_dir !== null && <Row label="Static site">{p.static_output_dir || "project root"}</Row>}
           {p.dependencies.length > 0 && <Row label="Dependencies">{`${p.dependencies.length} (${p.dependency_manifest})`}</Row>}
           {p.server_entrypoint && <Row label="Server">{p.listens_on_port ? `listens on ${p.listens_on_port}` : "yes"}</Row>}
+          {p.fullstack && (
+            <>
+              <Row label="Backend">{`${p.fullstack.backend.framework ?? p.fullstack.backend.runtime} in ${p.fullstack.backend.dir || "project root"}`}</Row>
+              <Row label="Frontend">
+                {p.fullstack.frontend
+                  ? `${p.fullstack.frontend.framework ?? "static"} in ${p.fullstack.frontend.dir || "project root"}`
+                  : "served by the backend"}
+              </Row>
+              <Row label="Database">
+                {p.fullstack.database
+                  ? `${p.fullstack.database.engine}${p.fullstack.database.rds_supported ? "" : " (not provisioned on AWS)"}`
+                  : "none detected"}
+              </Row>
+              {p.fullstack.env_keys.length > 0 && <Row label="Env variables">{p.fullstack.env_keys.join(", ")}</Row>}
+            </>
+          )}
           {Object.keys(p.evidence).length > 0 && (
             <details className="text-xs py-1.5">
               <summary className="cursor-pointer text-slate-500">Evidence</summary>
@@ -898,6 +1097,45 @@ function OutputsCard({ outputs }: { outputs: Record<string, unknown> }) {
   );
 }
 
+// backend/deploy/templates/fullstack_app/outputs.tf::secrets_to_fill (names only, never values)
+function SecretsToFillCard({ outputs, region }: { outputs: Record<string, unknown>; region: string }) {
+  const raw = outputs.secrets_to_fill;
+  if (!raw || typeof raw !== "object") return null;
+  const secrets = Object.entries(raw as Record<string, string>);
+  if (secrets.length === 0) return null;
+  const service = typeof outputs.service_name === "string" ? outputs.service_name : null;
+  const cluster = typeof outputs.cluster_name === "string" ? outputs.cluster_name : null;
+  return (
+    <div className="card p-5 space-y-3 border-amber-200 bg-amber-50/40">
+      <SectionHeading icon={KeyRound} title="Fill in your secrets"
+        description="The app starts once each of these has a value. TerraAgent created them empty and never reads them." />
+      <ol className="list-decimal pl-5 text-xs text-slate-700 space-y-1">
+        <li>Open each secret below in the AWS console and choose <strong>Retrieve secret value → Set secret value</strong> (plaintext).</li>
+        <li>
+          Then restart the app: ECS console → cluster <code className="font-mono">{cluster ?? "…"}</code> → service{" "}
+          <code className="font-mono">{service ?? "…"}</code> → <strong>Update service → Force new deployment</strong>.
+        </li>
+      </ol>
+      <div className="space-y-1.5">
+        {secrets.map(([env, name]) => (
+          <div key={env} className="flex justify-between items-center gap-4 py-1.5 border-b border-amber-100 last:border-0 text-xs">
+            <span className="font-mono font-semibold text-slate-800">{env}</span>
+            <a
+              href={`https://${region}.console.aws.amazon.com/secretsmanager/secret?name=${encodeURIComponent(name)}&region=${region}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-indigo-600 hover:text-indigo-800 font-mono flex items-center gap-1 break-all"
+            >
+              {name}
+              <ExternalLink className="w-3 h-3 shrink-0" />
+            </a>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function ReconciliationAlert({ error }: { error?: string | null }) {
   return (
     <div className="p-4 rounded-2xl bg-amber-50 border border-amber-200 text-xs text-amber-900 space-y-2">
@@ -976,6 +1214,7 @@ export default function DeploymentDetailView({ id }: { id: string }) {
       {dep.can_destroy && <TeardownCard dep={dep} onStarted={reload} />}
       {/* Active Step Actions (Prominently placed at top for fast execution) */}
       {dep.outputs && Object.keys(dep.outputs).length > 0 && <OutputsCard outputs={dep.outputs} />}
+      {dep.outputs && <SecretsToFillCard outputs={dep.outputs} region={dep.region} />}
       {dep.pr && <PullRequestStatusCard dep={dep} onStarted={reload} />}
       {dep.can_deploy && (
         <div className="grid lg:grid-cols-2 gap-5 items-start">

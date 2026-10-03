@@ -352,7 +352,7 @@ def _stage_source(source: ExtractedSource, stage: str) -> None:
 
 
 def _add_container_recipe(stage: str, app_dir: str, profile: ProjectProfile, port: int, with_db: bool,
-                          result: BuildResult) -> None:
+                          result: BuildResult, migrate: Optional[List[str]] = None) -> None:
     """Writes a vetted Dockerfile (+ DATABASE_URL entrypoint) into `app_dir`
     of the staged source when the project has no Dockerfile of its own."""
     if profile.get("has_dockerfile"):
@@ -369,7 +369,7 @@ def _add_container_recipe(stage: str, app_dir: str, profile: ProjectProfile, por
         for d, _, names in os.walk(app_root) for n in names
     )
     try:
-        recipe = generate_container(app_root, paths, profile, port, with_db=with_db)
+        recipe = generate_container(app_root, paths, profile, port, with_db=with_db, migrate=migrate)
     except DockerfileError as e:
         raise BuildError(str(e)) from e
     for rel, content in recipe.files.items():
@@ -428,7 +428,9 @@ async def build_fullstack(source: ExtractedSource, profile: ProjectProfile, work
     stage = os.path.join(workdir, ".build", "source")
     os.makedirs(stage, exist_ok=True)
     _stage_source(source, stage)
-    _add_container_recipe(stage, backend["dir"], backend["profile"], backend["port"], with_db=with_db, result=result)
+    migration = layout.get("migration") if with_db else None
+    _add_container_recipe(stage, backend["dir"], backend["profile"], backend["port"], with_db=with_db, result=result,
+                          migrate=(migration or {}).get("command"))
     result.warnings.extend(layout.get("warnings") or [])
     await _package_source(stage, workdir, result)
     shutil.rmtree(os.path.join(workdir, ".build"), ignore_errors=True)
