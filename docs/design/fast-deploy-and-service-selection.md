@@ -75,7 +75,7 @@ reaches TerraAgent, the plan or the state.
 | 2. Fast code redeploy | #5 | 2–3 days | Done (see below) |
 | 3. Service selection UI | Presets, frontend/compute/DB choices, live estimate, #6 | 3–4 days | Done (see below) |
 | 4. New services | Aurora Serverless v2, cache, S3 uploads, worker, domain, autoscaling | 5–7 days | Done except custom domain (see below) |
-| 5. Hardening | #8, #9, CloudFormation bootstrap mirror, sandbox end-to-end run per service | 2–3 days | |
+| 5. Hardening | #8, #9, CloudFormation bootstrap mirror, sandbox end-to-end run per service | 2–3 days | Partly done (see below) |
 
 ### Phase 1 as built
 
@@ -176,3 +176,23 @@ reaches TerraAgent, the plan or the state.
   hosted zone, which deserves its own scoping design (e.g. a session-policy condition on
   `route53:ChangeResourceRecordSetsNormalizedRecordNames`). Aurora engine versions are pinned
   and will need bumping as AWS retires them.
+
+### Phase 5 as built (the parts that block real deployments)
+
+- **CloudFormation bootstrap** rewritten to grant exactly what the Terraform bootstrap grants
+  (boundary, plan role, apply role, outputs incl. the boundary ARN; the state bucket is retained
+  on stack deletion). `tests/test_deploy_bootstrap.py` parses both and compares every
+  statement's Sid, effect and actions, so they can't drift apart again.
+- **VPC quota pre-check** (`deploy/preflight.py`, instead of #9's shared VPC): before the first
+  plan of a container deployment, `DescribeVpcs` + `GetServiceQuota` (L-F678F1CE) in the
+  deployment's region; a full region fails the plan with a clear message before anything is
+  created. A failed check never blocks the plan. This is the one deploy module that calls AWS
+  itself: read-only, enforced by `tests/test_deploy_guardrails.py::test_preflight_only_reads_from_aws`;
+  the plan role gained `servicequotas:GetServiceQuota`.
+- **Teardown after a failed update**: `deploy/store.py::can_destroy` - DEPLOYED,
+  FAILED_PARTIAL, NEEDS_RECONCILIATION, or FAILED/REJECTED/EXPIRED when the stack was applied.
+- **#8** Verify starts `terraform validate`, the scanners (already concurrent among
+  themselves) and Infracost together.
+- **Still open**: a shared VPC per account/region (the pre-check makes the quota visible but
+  doesn't remove it); caching `npm ci` in its own Docker layer; one sandbox end-to-end run per
+  service against a real AWS account.

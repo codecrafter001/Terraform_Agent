@@ -77,12 +77,24 @@ TRANSITIONS: Dict[DeployStatus, frozenset] = {
     S.DESTROYED: frozenset(),
     S.FAILED_PARTIAL: frozenset({S.PLANNING, S.DESTROY_PLANNING}),
     S.NEEDS_RECONCILIATION: frozenset({S.PLANNING, S.DESTROY_PLANNING}),
-    S.REJECTED: frozenset({S.BUILDING, S.PLANNING, S.SOURCE_RECEIVED}),
-    S.EXPIRED: frozenset({S.PLANNING, S.SOURCE_RECEIVED}),
-    S.FAILED: frozenset({S.BUILDING, S.PLANNING, S.SOURCE_RECEIVED}),
+    S.REJECTED: frozenset({S.BUILDING, S.PLANNING, S.SOURCE_RECEIVED, S.DESTROY_PLANNING}),
+    S.EXPIRED: frozenset({S.PLANNING, S.SOURCE_RECEIVED, S.DESTROY_PLANNING}),
+    S.FAILED: frozenset({S.BUILDING, S.PLANNING, S.SOURCE_RECEIVED, S.DESTROY_PLANNING}),
 }
 IN_PROGRESS = frozenset({S.SOURCE_RECEIVED, S.ANALYZING, S.BUILDING, S.VERIFYING, S.PLANNING, S.APPLYING, S.DESTROY_PLANNING, S.DESTROYING})
 TERMINAL = frozenset({S.ANALYZED, S.DEPLOYED, S.DESTROYED, S.MERGED, S.FAILED_PARTIAL, S.NEEDS_RECONCILIATION, S.REJECTED, S.EXPIRED, S.FAILED})
+
+
+# A deployed stack can always be torn down from these...
+DESTROYABLE = frozenset({S.DEPLOYED, S.FAILED_PARTIAL, S.NEEDS_RECONCILIATION})
+# ...and from these when it was applied at some point (a code update failed, was
+# rejected or its approval expired, or a destroy plan itself failed).
+DESTROYABLE_IF_APPLIED = frozenset({S.FAILED, S.REJECTED, S.EXPIRED})
+
+
+def can_destroy(dep: Dict[str, Any]) -> bool:
+    status = DeployStatus(dep["status"])
+    return status in DESTROYABLE or (status in DESTROYABLE_IF_APPLIED and bool(dep.get("applied_at")))
 
 
 class InvalidTransition(Exception):

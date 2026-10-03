@@ -64,6 +64,7 @@ def _env(tmp_path, monkeypatch):
 
     monkeypatch.setattr(pipeline, "verify", fake_verify)
     monkeypatch.setattr(pipeline, "plan_session", lambda target, dep_id: {"AWS_ACCESS_KEY_ID": "x"})
+    monkeypatch.setattr(pipeline, "vpc_quota_problem", lambda creds, region: None)
     monkeypatch.setattr(pipeline.TerraformRunner, "plan_saved", staticmethod(fake_plan_saved))
     return {"dispatched": dispatched, "calls": calls}
 
@@ -211,3 +212,14 @@ def test_an_update_that_no_longer_fits_the_target_fails_without_touching_aws(_en
     assert "can no longer be deployed as ecs_service" in after["error"]
     assert after["applied_at"]  # the stack still exists, so another update can be tried
     assert code_update.can_update_code(after)
+    # ...or the stack can be torn down from here.
+    assert store.can_destroy(after) and api._can_destroy(after)
+    store.transition(dep_id, DeployStatus.DESTROY_PLANNING, plan_kind="destroy", is_destructive=True)
+
+
+def test_a_never_deployed_failure_cant_be_destroyed(_env):
+    upload = UploadFile(file=io.BytesIO(_zip({"package.json": PACKAGE, "server.js": SERVER_V1})), filename="a.zip")
+    dep_id = asyncio.run(api.upload_source(_request(), file=upload, region="us-east-1", environment="production")).deployment_id
+    store.transition(dep_id, DeployStatus.ANALYZING)
+    store.transition(dep_id, DeployStatus.FAILED, error="boom")
+    assert not store.can_destroy(store.get_deployment(dep_id))

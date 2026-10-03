@@ -331,6 +331,9 @@ queue with `TERRAAGENT_DEPLOY_ENABLED=true`, verifying plan bundle SHA-256 match
   tokens or source content. A GitHub token is used inside the request handler and dropped.
 - `TerraformRunner.check_argv` is never widened (a test pins it). Apply runs strictly through `check_apply_argv`.
 - `agents/`, `tools/` and `routers/scan.py` must never import `deploy` (`tests/test_deploy_guardrails.py`).
+- `deploy/` doesn't call AWS itself, except `deploy/artifacts.py` (artifact storage) and `deploy/preflight.py`
+  (read-only pre-plan checks: `DescribeVpcs`, `GetServiceQuota`; enforced by `test_preflight_only_reads_from_aws`).
+- The Terraform and CloudFormation bootstraps must grant identical permissions (`tests/test_deploy_bootstrap.py`).
 
 ---
 

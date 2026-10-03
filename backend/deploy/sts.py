@@ -107,6 +107,7 @@ _PLAN_READ_ACTIONS = [
     "codepipeline:Get*", "codepipeline:List*", "events:Describe*", "events:List*",
     "rds:Describe*", "rds:ListTagsForResource", "secretsmanager:DescribeSecret", "secretsmanager:GetResourcePolicy",
     "elasticache:Describe*", "elasticache:List*", "application-autoscaling:Describe*",
+    "servicequotas:GetServiceQuota",  # VPC quota pre-check (deploy/preflight.py)
 ]
 
 

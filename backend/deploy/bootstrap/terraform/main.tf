@@ -257,7 +257,8 @@ resource "aws_iam_role_policy" "plan_policy" {
           "secretsmanager:GetResourcePolicy",
           "elasticache:Describe*",
           "elasticache:List*",
-          "application-autoscaling:Describe*"
+          "application-autoscaling:Describe*",
+          "servicequotas:GetServiceQuota"
         ]
         Resource = "*"
       },

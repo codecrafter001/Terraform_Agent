@@ -26,6 +26,7 @@ from deploy.source_intake import IntakeError, download_github_archive, is_zip
 from deploy.store import (
     DeployStatus,
     InvalidTransition,
+    can_destroy,
     create_deployment,
     delete_artifact_record,
     get_deployment,
@@ -171,11 +172,7 @@ def _can_rollback(dep: Dict[str, Any]) -> bool:
 
 
 def _can_destroy(dep: Dict[str, Any]) -> bool:
-    return DeployStatus(dep["status"]) in {
-        DeployStatus.DEPLOYED,
-        DeployStatus.FAILED_PARTIAL,
-        DeployStatus.NEEDS_RECONCILIATION,
-    } and bool(dep.get("target_id"))
+    return can_destroy(dep) and bool(dep.get("target_id"))
 
 
 

@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Optional
 
 from deploy.artifacts import get_artifact_store
 from deploy.plan_bundle import create_plan_bundle, extract_plan_bundle
-from deploy.store import DeployStatus, get_deployment, transition
+from deploy.store import DESTROYABLE, DESTROYABLE_IF_APPLIED, DeployStatus, can_destroy, get_deployment, transition
 from deploy.sts import apply_session, plan_session
 from models.orm import AwsDeployTarget, Deployment
 from services.database import SessionLocal
@@ -369,15 +369,12 @@ async def plan_destroy(deployment_id: str, actor: str = "operator") -> Dict[str,
     if not dep:
         return {"success": False, "error": f"Deployment '{deployment_id}' not found"}
 
-    allowed_from = frozenset({
-        DeployStatus.DEPLOYED,
-        DeployStatus.FAILED_PARTIAL,
-        DeployStatus.NEEDS_RECONCILIATION,
-    })
-    if DeployStatus(dep["status"]) not in allowed_from:
+    allowed_from = DESTROYABLE | DESTROYABLE_IF_APPLIED
+    if not can_destroy(dep):
         return {
             "success": False,
-            "error": f"Cannot plan destroy from status '{dep['status']}'; must be in DEPLOYED, FAILED_PARTIAL, or NEEDS_RECONCILIATION."
+            "error": f"Cannot plan destroy from status '{dep['status']}'; the deployment must have been applied "
+                     "(DEPLOYED, FAILED_PARTIAL, NEEDS_RECONCILIATION, or a failed/rejected/expired update of a deployed stack)."
         }
 
     target_id = dep.get("target_id")

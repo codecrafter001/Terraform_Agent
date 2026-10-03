@@ -25,6 +25,7 @@ from deploy.decision_engine import blocked_by_secrets, decide
 from deploy.fullstack import detect as detect_fullstack
 from deploy.plan_bundle import create_plan_bundle, extract_plan_bundle
 from deploy.plan_policy import evaluate_plan_policy
+from deploy.preflight import VPC_TARGETS, vpc_quota_problem
 from deploy.renderer import render
 from deploy.secret_scan import scan_source
 from deploy.source_intake import ExtractedSource, IntakeError, extract_archive
@@ -219,6 +220,14 @@ async def run_plan(deployment_id: str) -> None:
     try:
         await log(deployment_id, f"Obtaining short-lived STS credentials for Plan role on target '{target_dict['name']}'")
         plan_creds = await asyncio.to_thread(plan_session, target_dict, deployment_id)
+
+        # A first deployment of a container target creates a VPC: check the quota now
+        # rather than fail half-way through apply. Read-only (DescribeVpcs, GetServiceQuota).
+        if deployment.get("target_type") in VPC_TARGETS and not deployment.get("applied_at"):
+            problem = await asyncio.to_thread(vpc_quota_problem, plan_creds, deployment["region"])
+            if problem:
+                await _fail(deployment_id, problem)
+                return
 
         # Built artifacts first (templates reference them by path), then the
         # rendered files from Postgres - the ones that were verified - on top.
