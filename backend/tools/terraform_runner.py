@@ -551,7 +551,7 @@ class TerraformRunner:
                 return result
 
             # 2. terraform plan -out=tfplan -lock=false (read-only plan role)
-            plan_cmd = [binary, "plan", "-out=tfplan", "-input=false", "-lock=false"]
+            plan_cmd = [binary, "plan", "-out=tfplan", "-input=false", "-lock=false", "-parallelism=20"]
             code, out, err = await cls.run_command(plan_cmd, cwd=workdir, env=env)
             plan_passed = code == 0
             result["checks"].append({

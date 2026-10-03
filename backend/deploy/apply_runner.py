@@ -31,7 +31,9 @@ from tools.terraform_runner import ALLOWED_BINARIES, TerraformRunner
 logger = logging.getLogger("terraagent.deploy.apply")
 
 TERRAAGENT_TF_APPLY_TIMEOUT = float(os.getenv("TERRAAGENT_TF_APPLY_TIMEOUT", "2400"))
-APPLY_ARGV_COMMON = ["apply", "-input=false", "-lock-timeout=5m", "-no-color"]
+# -parallelism=20: independent resources (RDS, CloudFront, the build pipeline) are created
+# concurrently instead of Terraform's default 10 at a time.
+APPLY_ARGV_COMMON = ["apply", "-input=false", "-lock-timeout=5m", "-parallelism=20", "-no-color"]
 DESTROY_PLAN_ARGV = ["plan", "-destroy", "-out=tfplan.destroy", "-input=false", "-lock=false"]
 FORBIDDEN_APPLY_FLAGS = frozenset({"auto-approve", "target", "replace", "var", "var-file", "destroy", "import"})
 
@@ -61,7 +63,7 @@ def check_apply_argv(cmd: List[str], plan_kind: str = "apply") -> str:
     """Strict argv validation for apply subprocess execution.
 
     Only allows:
-    [binary, "apply", "-input=false", "-lock-timeout=5m", "-no-color", "tfplan"]
+    [binary, "apply", "-input=false", "-lock-timeout=5m", "-parallelism=20", "-no-color", "tfplan"]
     (or "tfplan.destroy" if plan_kind == "destroy").
     """
     if not cmd:

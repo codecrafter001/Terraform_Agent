@@ -5,10 +5,11 @@
 # TerraAgent never calls a build or deploy API itself.
 
 locals {
-  name     = "terraagent-${var.deployment_id}"
-  azs      = slice(data.aws_availability_zones.available.names, 0, 2)
-  boundary = coalesce(var.permissions_boundary_arn, "arn:${data.aws_partition.current.partition}:iam::${data.aws_caller_identity.current.account_id}:policy/TerraAgentWorkloadBoundary")
-  registry = split("/", aws_ecr_repository.app.repository_url)[0]
+  name        = "terraagent-${var.deployment_id}"
+  azs         = slice(data.aws_availability_zones.available.names, 0, 2)
+  boundary    = coalesce(var.permissions_boundary_arn, "arn:${data.aws_partition.current.partition}:iam::${data.aws_caller_identity.current.account_id}:policy/TerraAgentWorkloadBoundary")
+  registry    = split("/", aws_ecr_repository.app.repository_url)[0]
+  service_arn = "arn:${data.aws_partition.current.partition}:ecs:${var.region}:${data.aws_caller_identity.current.account_id}:service/${local.name}/${local.name}"
 }
 
 data "aws_availability_zones" "available" {
@@ -262,7 +263,7 @@ data "aws_iam_policy_document" "codebuild_policy" {
 
   statement {
     actions   = ["ecs:UpdateService", "ecs:DescribeServices"]
-    resources = [aws_ecs_service.app.id]
+    resources = [local.service_arn]
   }
 }
 
@@ -355,7 +356,7 @@ resource "aws_codebuild_project" "builder" {
   }
 
   environment {
-    compute_type    = "BUILD_GENERAL1_SMALL"
+    compute_type    = "BUILD_GENERAL1_MEDIUM"
     image           = "aws/codebuild/amazonlinux2-x86_64-standard:5.0"
     type            = "LINUX_CONTAINER"
     privileged_mode = true
@@ -382,13 +383,20 @@ resource "aws_codebuild_project" "builder" {
 
     environment_variable {
       name  = "ECS_CLUSTER"
-      value = aws_ecs_cluster.app.name
+      value = local.name
     }
 
     environment_variable {
       name  = "ECS_SERVICE"
-      value = aws_ecs_service.app.name
+      value = local.name
     }
+  }
+
+  # Docker layers (base images, unchanged layers) and the source stay on the build
+  # host between runs, so rebuilds skip most of the pull and install work.
+  cache {
+    type  = "LOCAL"
+    modes = ["LOCAL_DOCKER_LAYER_CACHE", "LOCAL_SOURCE_CACHE", "LOCAL_CUSTOM_CACHE"]
   }
 
   logs_config {
@@ -418,8 +426,13 @@ resource "aws_codebuild_project" "builder" {
               fi
         post_build:
           commands:
-            - aws ecs update-service --cluster "$ECS_CLUSTER" --service "$ECS_SERVICE" --force-new-deployment >/dev/null
-            - echo "Rolled $ECS_SERVICE onto $IMAGE_TAG"
+            - |
+              if aws ecs describe-services --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" --query 'services[?status==`ACTIVE`].serviceName' --output text 2>/dev/null | grep -q .; then
+                aws ecs update-service --cluster "$ECS_CLUSTER" --service "$ECS_SERVICE" --force-new-deployment >/dev/null
+                echo "Rolled $ECS_SERVICE onto $IMAGE_TAG"
+              else
+                echo "$ECS_SERVICE doesn't exist yet; it starts directly on $IMAGE_TAG when Terraform creates it"
+              fi
     BUILDSPEC
   }
 
@@ -474,7 +487,7 @@ resource "aws_codepipeline" "app" {
     }
   }
 
-  depends_on = [aws_iam_role_policy.codepipeline, aws_s3_object.source, aws_ecs_service.app]
+  depends_on = [aws_iam_role_policy.codepipeline, aws_s3_object.source]
 }
 
 resource "aws_cloudwatch_event_rule" "source_updated" {
@@ -568,12 +581,12 @@ resource "aws_lb_target_group" "app" {
   protocol             = "HTTP"
   vpc_id               = aws_vpc.main.id
   target_type          = "ip"
-  deregistration_delay = 30
+  deregistration_delay = 10
 
   health_check {
     path                = var.health_check_path
     matcher             = "200-499"
-    interval            = 30
+    interval            = 10
     timeout             = 5
     healthy_threshold   = 2
     unhealthy_threshold = 3
@@ -660,16 +673,16 @@ resource "aws_ecs_task_definition" "app" {
   depends_on = [aws_iam_role_policy.execution, aws_cloudwatch_log_group.ecs]
 }
 
-# Until the pipeline has pushed the first image the tasks can't start; the
-# circuit breaker stops that first deployment, and CodeBuild's force-new-deployment
-# starts a fresh one as soon as the image exists.
+# The image builds in parallel with the rest of the stack. If the service is
+# created first, its tasks wait for the image: the circuit breaker stops that
+# first deployment and CodeBuild's force-new-deployment starts a fresh one.
 resource "aws_ecs_service" "app" {
   name                              = local.name
   cluster                           = aws_ecs_cluster.app.id
   task_definition                   = aws_ecs_task_definition.app.arn
   desired_count                     = var.desired_count
   launch_type                       = "FARGATE"
-  health_check_grace_period_seconds = 60
+  health_check_grace_period_seconds = 30
 
   deployment_circuit_breaker {
     enable   = true

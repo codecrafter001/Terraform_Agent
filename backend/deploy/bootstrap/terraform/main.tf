@@ -113,7 +113,8 @@ resource "aws_iam_policy" "workload_boundary" {
           "logs:PutLogEvents",
           "cloudwatch:PutMetricData",
           "ecr:GetAuthorizationToken",
-          "cloudfront:CreateInvalidation"
+          "cloudfront:CreateInvalidation",
+          "cloudfront:ListDistributions"
         ]
         Resource = "*"
       },

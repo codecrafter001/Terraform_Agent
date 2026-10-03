@@ -15,15 +15,16 @@
 # TerraAgent.
 
 locals {
-  name       = "terraagent-${var.deployment_id}"
-  azs        = slice(data.aws_availability_zones.available.names, 0, 2)
-  boundary   = coalesce(var.permissions_boundary_arn, "arn:${data.aws_partition.current.partition}:iam::${data.aws_caller_identity.current.account_id}:policy/TerraAgentWorkloadBoundary")
-  registry   = split("/", aws_ecr_repository.app.repository_url)[0]
-  frontend   = var.frontend_enabled
-  db_enabled = var.database_engine != null
-  db_port    = var.database_engine == "postgres" ? 5432 : 3306
-  db_name    = "app"
-  site_url   = "https://${aws_cloudfront_distribution.app.domain_name}"
+  name        = "terraagent-${var.deployment_id}"
+  azs         = slice(data.aws_availability_zones.available.names, 0, 2)
+  boundary    = coalesce(var.permissions_boundary_arn, "arn:${data.aws_partition.current.partition}:iam::${data.aws_caller_identity.current.account_id}:policy/TerraAgentWorkloadBoundary")
+  registry    = split("/", aws_ecr_repository.app.repository_url)[0]
+  frontend    = var.frontend_enabled
+  db_enabled  = var.database_engine != null
+  db_port     = var.database_engine == "postgres" ? 5432 : 3306
+  db_name     = "app"
+  site_url    = "https://${aws_cloudfront_distribution.app.domain_name}"
+  service_arn = "arn:${data.aws_partition.current.partition}:ecs:${var.region}:${data.aws_caller_identity.current.account_id}:service/${local.name}/${local.name}"
 
   db_secret_arn    = local.db_enabled ? aws_db_instance.main[0].master_user_secret[0].secret_arn : null
   env_secret_arns  = [for k in sort(var.secret_env_keys) : aws_secretsmanager_secret.env[k].arn]
@@ -34,13 +35,13 @@ locals {
       { name = "PORT", value = tostring(var.container_port) },
       { name = "HOST", value = "0.0.0.0" },
       { name = "NODE_ENV", value = "production" },
-      { name = "PUBLIC_URL", value = local.site_url },
     ],
     local.db_enabled ? [
       { name = "DB_HOST", value = aws_db_instance.main[0].address },
       { name = "DB_PORT", value = tostring(local.db_port) },
       { name = "DB_NAME", value = local.db_name },
       { name = "DB_URL_SCHEME", value = coalesce(var.database_url_scheme, var.database_engine == "postgres" ? "postgresql" : "mysql") },
+      { name = "TERRAAGENT_RUN_MIGRATIONS", value = tostring(var.run_migrations) },
     ] : [],
   )
   container_secrets = concat(
@@ -461,7 +462,7 @@ data "aws_iam_policy_document" "codebuild_policy" {
 
   statement {
     actions   = ["ecs:UpdateService", "ecs:DescribeServices"]
-    resources = [aws_ecs_service.app.id]
+    resources = [local.service_arn]
   }
 
   dynamic "statement" {
@@ -480,11 +481,21 @@ data "aws_iam_policy_document" "codebuild_policy" {
     }
   }
 
+  # Not tied to this distribution's ARN: that would make the build wait for
+  # CloudFront. Invalidations are harmless; the build finds its distribution by comment.
   dynamic "statement" {
     for_each = local.frontend ? [1] : []
     content {
       actions   = ["cloudfront:CreateInvalidation"]
-      resources = [aws_cloudfront_distribution.app.arn]
+      resources = ["arn:${data.aws_partition.current.partition}:cloudfront::${data.aws_caller_identity.current.account_id}:distribution/*"]
+    }
+  }
+
+  dynamic "statement" {
+    for_each = local.frontend ? [1] : []
+    content {
+      actions   = ["cloudfront:ListDistributions"]
+      resources = ["*"]
     }
   }
 }
@@ -605,12 +616,12 @@ resource "aws_codebuild_project" "builder" {
 
     environment_variable {
       name  = "ECS_CLUSTER"
-      value = aws_ecs_cluster.app.name
+      value = local.name
     }
 
     environment_variable {
       name  = "ECS_SERVICE"
-      value = aws_ecs_service.app.name
+      value = local.name
     }
 
     environment_variable {
@@ -644,18 +655,28 @@ resource "aws_codebuild_project" "builder" {
     }
 
     environment_variable {
-      name  = "DISTRIBUTION_ID"
-      value = aws_cloudfront_distribution.app.id
+      name  = "DISTRIBUTION_COMMENT"
+      value = local.name
     }
 
-    # Build-time variables the frontend reads for its API base URL.
-    dynamic "environment_variable" {
-      for_each = toset(var.frontend_api_env)
-      content {
-        name  = environment_variable.value
-        value = "${local.site_url}${var.frontend_api_suffix}"
-      }
+    # Build-time variables the frontend reads for its API base URL; the build sets
+    # each to https://<distribution domain><suffix> once it has found the distribution.
+    environment_variable {
+      name  = "FRONTEND_API_ENV"
+      value = join(" ", var.frontend_api_env)
     }
+
+    environment_variable {
+      name  = "FRONTEND_API_SUFFIX"
+      value = var.frontend_api_suffix
+    }
+  }
+
+  # Docker layers (base images, unchanged layers) and the source stay on the build
+  # host between runs, so rebuilds skip most of the pull and install work.
+  cache {
+    type  = "LOCAL"
+    modes = ["LOCAL_DOCKER_LAYER_CACHE", "LOCAL_SOURCE_CACHE", "LOCAL_CUSTOM_CACHE"]
   }
 
   logs_config {
@@ -670,6 +691,9 @@ resource "aws_codebuild_project" "builder" {
       version: 0.2
       env:
         shell: bash
+      cache:
+        paths:
+          - '/root/.npm/**/*'
       phases:
         install:
           runtime-versions:
@@ -692,6 +716,20 @@ resource "aws_codebuild_project" "builder" {
             - |
               set -euo pipefail
               if [ "$FRONTEND_ENABLED" = "true" ]; then
+                # The distribution is created in parallel with this build; find it by its comment.
+                DIST_ID=""
+                DIST_DOMAIN=""
+                for attempt in $(seq 1 60); do
+                  read -r DIST_ID DIST_DOMAIN <<< "$(aws cloudfront list-distributions --query "DistributionList.Items[?Comment=='$DISTRIBUTION_COMMENT'] | [0].[Id,DomainName]" --output text 2>/dev/null || true)"
+                  if [ -n "$DIST_ID" ] && [ "$DIST_ID" != "None" ]; then break; fi
+                  echo "Waiting for the CloudFront distribution to exist..."
+                  sleep 20
+                done
+                if [ -z "$DIST_ID" ] || [ "$DIST_ID" = "None" ]; then
+                  echo "CloudFront distribution $DISTRIBUTION_COMMENT not found"
+                  exit 1
+                fi
+                for v in $FRONTEND_API_ENV; do export "$v=https://$DIST_DOMAIN$FRONTEND_API_SUFFIX"; done
                 cd "$CODEBUILD_SRC_DIR/$FRONTEND_DIR"
                 if [ "$FRONTEND_BUILD" = "true" ]; then
                   if [ -f package-lock.json ]; then npm ci; else npm install; fi
@@ -710,13 +748,18 @@ resource "aws_codebuild_project" "builder" {
                   exit 1
                 fi
                 aws s3 sync "$OUT" "s3://$WEB_BUCKET" --delete --only-show-errors
-                aws cloudfront create-invalidation --distribution-id "$DISTRIBUTION_ID" --paths "/*" >/dev/null
+                aws cloudfront create-invalidation --distribution-id "$DIST_ID" --paths "/*" >/dev/null
                 echo "Frontend from $FRONTEND_DIR/$OUT published"
               fi
         post_build:
           commands:
-            - aws ecs update-service --cluster "$ECS_CLUSTER" --service "$ECS_SERVICE" --force-new-deployment >/dev/null
-            - echo "Rolled $ECS_SERVICE onto $IMAGE_TAG"
+            - |
+              if aws ecs describe-services --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" --query 'services[?status==`ACTIVE`].serviceName' --output text 2>/dev/null | grep -q .; then
+                aws ecs update-service --cluster "$ECS_CLUSTER" --service "$ECS_SERVICE" --force-new-deployment >/dev/null
+                echo "Rolled $ECS_SERVICE onto $IMAGE_TAG"
+              else
+                echo "$ECS_SERVICE doesn't exist yet; it starts directly on $IMAGE_TAG when Terraform creates it"
+              fi
     BUILDSPEC
   }
 
@@ -771,7 +814,7 @@ resource "aws_codepipeline" "app" {
     }
   }
 
-  depends_on = [aws_iam_role_policy.codepipeline, aws_s3_object.source, aws_ecs_service.app, aws_s3_bucket_policy.web]
+  depends_on = [aws_iam_role_policy.codepipeline, aws_s3_object.source]
 }
 
 resource "aws_cloudwatch_event_rule" "source_updated" {
@@ -874,12 +917,12 @@ resource "aws_lb_target_group" "app" {
   protocol             = "HTTP"
   vpc_id               = aws_vpc.main.id
   target_type          = "ip"
-  deregistration_delay = 30
+  deregistration_delay = 10
 
   health_check {
     path                = var.health_check_path
     matcher             = "200-499"
-    interval            = 30
+    interval            = 10
     timeout             = 5
     healthy_threshold   = 2
     unhealthy_threshold = 3
@@ -1067,16 +1110,17 @@ resource "aws_ecs_task_definition" "app" {
   depends_on = [aws_iam_role_policy.execution, aws_cloudwatch_log_group.ecs]
 }
 
-# Until the pipeline has pushed the first image (and every secret has a value)
-# the tasks can't start; the circuit breaker stops that first deployment, and
-# CodeBuild's force-new-deployment starts a fresh one once the image exists.
+# The image builds in parallel with RDS and CloudFront, so it usually exists by
+# the time this service is created. Tasks also need every secret to have a value;
+# until then the circuit breaker stops the deployment, and a force-new-deployment
+# (CodeBuild's, or the customer's after filling the secrets) starts a fresh one.
 resource "aws_ecs_service" "app" {
   name                              = local.name
   cluster                           = aws_ecs_cluster.app.id
   task_definition                   = aws_ecs_task_definition.app.arn
   desired_count                     = var.desired_count
   launch_type                       = "FARGATE"
-  health_check_grace_period_seconds = 60
+  health_check_grace_period_seconds = 30
 
   deployment_circuit_breaker {
     enable   = true

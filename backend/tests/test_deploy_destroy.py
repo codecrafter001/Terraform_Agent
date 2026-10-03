@@ -137,8 +137,8 @@ def test_check_destroy_plan_argv_exact_validation():
 
 def test_check_apply_argv_with_plan_kind():
     """check_apply_argv accepts tfplan.destroy ONLY when plan_kind == 'destroy'."""
-    normal_cmd = ["terraform", "apply", "-input=false", "-lock-timeout=5m", "-no-color", "tfplan"]
-    destroy_cmd = ["terraform", "apply", "-input=false", "-lock-timeout=5m", "-no-color", "tfplan.destroy"]
+    normal_cmd = ["terraform", "apply", "-input=false", "-lock-timeout=5m", "-parallelism=20", "-no-color", "tfplan"]
+    destroy_cmd = ["terraform", "apply", "-input=false", "-lock-timeout=5m", "-parallelism=20", "-no-color", "tfplan.destroy"]
 
     # Normal apply allows tfplan
     assert check_apply_argv(normal_cmd, plan_kind="apply") == "apply"
