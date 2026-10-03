@@ -9,7 +9,7 @@ upload can ever become Terraform syntax. No LLM is involved.
 import json
 import os
 import re
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from deploy.builder import BuildResult
 
@@ -33,8 +33,58 @@ def template_files(target: str) -> Dict[str, str]:
     return files
 
 
+def _container_vars(settings: Dict[str, Any], build: BuildResult) -> Dict[str, Any]:
+    """Variables shared by the ecs_service and fullstack_app templates."""
+    if not build.package_file or not build.image_tag:
+        raise ValueError("container targets need a packaged source.zip")
+    return {
+        "source_file": build.package_file,
+        "image_tag": str(settings.get("image_tag") or build.image_tag),
+        "container_port": int(settings.get("container_port") or build.container_port or 8080),
+        "cpu": int(settings.get("cpu", 256)),
+        "memory_mb": int(settings.get("memory_mb", 512)),
+        "desired_count": int(settings.get("desired_count", 1)),
+        "health_check_path": str(settings.get("health_check_path") or "/"),
+        "log_retention_days": int(settings.get("log_retention_days", 30)),
+        "permissions_boundary_arn": settings.get("permissions_boundary_arn") or None,
+    }
+
+
+def _fullstack_vars(settings: Dict[str, Any], profile: Dict[str, Any]) -> Dict[str, Any]:
+    layout = profile.get("fullstack") or {}
+    backend = layout.get("backend") or {}
+    frontend = layout.get("frontend")
+    db = layout.get("database")
+    mode = settings.get("database") or ("rds" if db and db.get("rds_supported") else "none")
+    if mode == "rds" and not (db and db.get("rds_supported")):
+        raise ValueError("an RDS database needs a detected PostgreSQL or MySQL driver")
+    engine = (db or {}).get("engine") if mode == "rds" else None
+    keys = settings.get("secret_env_keys")
+    secret_keys = sorted(set((layout.get("env_keys") or []) if keys is None else keys))
+    if mode == "external" and "DATABASE_URL" not in secret_keys:
+        secret_keys = sorted([*secret_keys, "DATABASE_URL"])
+    committed_output = bool(frontend) and not frontend.get("build_required")
+    return {
+        "backend_dir": backend.get("dir") or "",
+        "frontend_enabled": bool(frontend),
+        "frontend_dir": (frontend or {}).get("dir") or "",
+        "frontend_build": bool((frontend or {}).get("build_required")),
+        "frontend_output": (frontend.get("static_output_dir") or ".") if committed_output else "",
+        "frontend_api_env": list((frontend or {}).get("api_url_env") or []),
+        "frontend_api_suffix": "" if (frontend or {}).get("appends_api_prefix") else "/api",
+        "api_strip_prefix": bool(frontend) and not backend.get("uses_api_prefix", False),
+        "price_class": settings.get("price_class", "PriceClass_100"),
+        "database_engine": engine,
+        "database_url_scheme": (db or {}).get("url_scheme") if engine else None,
+        "db_instance_class": settings.get("db_instance_class", "db.t4g.micro"),
+        "db_allocated_storage_gb": int(settings.get("db_allocated_storage_gb", 20)),
+        "db_multi_az": bool(settings.get("db_multi_az", False)),
+        "secret_env_keys": secret_keys,
+    }
+
+
 def tfvars(target: str, deployment_id: str, region: str, environment: str,
-           settings: Dict[str, Any], build: BuildResult) -> Dict[str, Any]:
+           settings: Dict[str, Any], build: BuildResult, profile: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     if not _DEPLOYMENT_ID.match(deployment_id):
         raise ValueError("invalid deployment id")
     common = {"deployment_id": deployment_id, "region": region, "environment": environment}
@@ -62,26 +112,27 @@ def tfvars(target: str, deployment_id: str, region: str, environment: str,
     if target == "ecs_service":
         return {
             **common,
-            "container_port": int(settings.get("container_port") or build.container_port or 8080),
-            "cpu": int(settings.get("cpu", 256)),
-            "memory_mb": int(settings.get("memory_mb", 512)),
-            "desired_count": int(settings.get("desired_count", 1)),
-            "image_tag": str(settings.get("image_tag", "latest")),
-            "certificate_arn": settings.get("certificate_arn"),
-            "log_retention_days": int(settings.get("log_retention_days", 30)),
-            "permissions_boundary_arn": settings.get("permissions_boundary_arn"),
+            **_container_vars(settings, build),
+            "certificate_arn": settings.get("certificate_arn") or None,
+        }
+    if target == "fullstack_app":
+        return {
+            **common,
+            **_container_vars(settings, build),
+            **_fullstack_vars(settings, profile or {}),
         }
     raise ValueError(f"Unknown deployment target '{target}'")
 
 
 def render(target: str, deployment_id: str, region: str, environment: str,
-           settings: Dict[str, Any], build: BuildResult, workdir: str) -> Dict[str, str]:
+           settings: Dict[str, Any], build: BuildResult, workdir: str,
+           profile: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
     """Write the project into `workdir` (next to the builder's site/ or
     artifacts/ output) and return its text files: the .tf files plus
     terraform.tfvars.json."""
     files = template_files(target)
     files[TFVARS_FILENAME] = json.dumps(
-        tfvars(target, deployment_id, region, environment, settings, build), indent=2, sort_keys=True
+        tfvars(target, deployment_id, region, environment, settings, build, profile), indent=2, sort_keys=True
     ) + "\n"
     for name, content in files.items():
         with open(os.path.join(workdir, name), "w", encoding="utf-8", newline="\n") as f:

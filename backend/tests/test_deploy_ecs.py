@@ -36,7 +36,7 @@ def make_source(tmp_path, files):
 
 
 def test_ecs_decision_rules_version():
-    assert DECISION_RULES_VERSION == 2
+    assert DECISION_RULES_VERSION == 3
 
 
 def test_dockerfile_triggers_ecs_eligibility_and_recommendation(tmp_path):

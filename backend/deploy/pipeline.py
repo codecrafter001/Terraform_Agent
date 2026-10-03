@@ -21,7 +21,8 @@ from deploy.artifacts import get_artifact_store
 from deploy.builder import BuildError, build
 from deploy.config import BUILD_RETENTION_DAYS
 from deploy.decision_engine import blocked_by_secrets, decide
-from deploy.plan_bundle import create_plan_bundle
+from deploy.fullstack import detect as detect_fullstack
+from deploy.plan_bundle import create_plan_bundle, extract_plan_bundle
 from deploy.plan_policy import evaluate_plan_policy
 from deploy.renderer import render
 from deploy.secret_scan import scan_source
@@ -74,6 +75,7 @@ async def run_analysis(deployment_id: str) -> None:
 
         sizes = {f.path: f.size for f in source.files}
         profile = await asyncio.to_thread(analyze, sandbox, source.paths, sizes)
+        profile["fullstack"] = await asyncio.to_thread(detect_fullstack, sandbox, source.paths, sizes, profile)
         decision = decide(profile)
         await log(deployment_id, f"Detected runtime={profile['runtime']} framework={profile['framework'] or '-'}; "
                                  f"eligible targets: {', '.join(decision['eligible']) or 'none'}")
@@ -112,17 +114,21 @@ async def run_build_and_verify(deployment_id: str) -> None:
     try:
         source = await asyncio.to_thread(_extract, deployment, src_dir)
         await log(deployment_id, f"Building for {target}")
-        result = await build(source, deployment["profile"], target, workdir)
+        result = await build(source, deployment["profile"], target, workdir, settings)
         for warning in result.warnings:
             await log(deployment_id, f"WARNING: {warning}")
-        files = render(target, deployment_id, deployment["region"], deployment["environment"], settings, result, workdir)
+        files = render(target, deployment_id, deployment["region"], deployment["environment"], settings, result, workdir,
+                       profile=deployment["profile"])
         await log(deployment_id, f"Rendered {len(files)} Terraform files from the '{target}' template")
 
         bundle = get_artifact_store().put_bytes(await asyncio.to_thread(_zip_dir, workdir))
         record_artifact(deployment_id, "bundle", bundle, sensitive=True, retention_days=BUILD_RETENTION_DAYS)
+        # The plan stage unpacks this bundle so built artifacts (site/, function.zip,
+        # source.zip) sit next to the .tf files that reference them.
+        build_summary = {**result.summary(), "bundle_artifact_id": bundle["artifact_id"]}
 
         transition(deployment_id, DeployStatus.VERIFYING, reason="build complete",
-                   build=result.summary(), rendered=files)
+                   build=build_summary, rendered=files)
         await log(deployment_id, "Verifying: terraform fmt/init/validate, Checkov, Trivy, OPA, Infracost")
         verification = await verify(deployment_id, files)
         await log(deployment_id, f"Verification verdict: {verification['verdict']}")
@@ -182,7 +188,12 @@ async def run_plan(deployment_id: str) -> None:
         await log(deployment_id, f"Obtaining short-lived STS credentials for Plan role on target '{target_dict['name']}'")
         plan_creds = await asyncio.to_thread(plan_session, target_dict, deployment_id)
 
-        # Write rendered terraform files to plan workdir
+        # Built artifacts first (templates reference them by path), then the
+        # rendered files from Postgres - the ones that were verified - on top.
+        bundle_id = (deployment.get("build") or {}).get("bundle_artifact_id")
+        if bundle_id:
+            bundle_data = get_artifact_store().read_bytes(bundle_id)
+            await asyncio.to_thread(extract_plan_bundle, bundle_data, workdir)
         rendered = deployment.get("rendered") or {}
         for fname, content in rendered.items():
             fpath = os.path.join(workdir, fname)

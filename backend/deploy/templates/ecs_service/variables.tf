@@ -76,31 +76,60 @@ variable "image_tag" {
 }
 
 variable "certificate_arn" {
-  description = "Optional ACM certificate ARN for HTTPS listener on the ALB."
+  description = "Optional ACM certificate ARN for an HTTPS listener on the ALB (HTTP then redirects to HTTPS)."
   type        = string
   default     = null
+  validation {
+    condition     = var.certificate_arn == null || can(regex("^arn:aws[a-z-]*:acm:[a-z0-9-]+:[0-9]{12}:certificate/[A-Za-z0-9-]+$", var.certificate_arn))
+    error_message = "certificate_arn must be an ACM certificate ARN."
+  }
 }
 
 variable "log_retention_days" {
   description = "CloudWatch logs retention period in days."
   type        = number
   default     = 30
+  validation {
+    condition     = contains([1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365], var.log_retention_days)
+    error_message = "log_retention_days must be a CloudWatch retention value (1-365)."
+  }
 }
 
 variable "permissions_boundary_arn" {
-  description = "Permissions boundary ARN for task execution and CodeBuild IAM roles."
+  description = "Permissions boundary for every role this stack creates; defaults to the account's TerraAgentWorkloadBoundary."
   type        = string
   default     = null
+  validation {
+    condition     = var.permissions_boundary_arn == null || can(regex("^arn:aws[a-z-]*:iam::[0-9]{12}:policy/", var.permissions_boundary_arn))
+    error_message = "permissions_boundary_arn must be an IAM policy ARN."
+  }
 }
 
-variable "vpc_id" {
-  description = "VPC ID for ALB and ECS tasks (defaults to default VPC if null)."
+variable "vpc_cidr" {
+  description = "CIDR block of the deployment's own VPC."
   type        = string
-  default     = null
+  default     = "10.42.0.0/16"
+  validation {
+    condition     = can(cidrhost(var.vpc_cidr, 0)) && tonumber(split("/", var.vpc_cidr)[1]) <= 20
+    error_message = "vpc_cidr must be an IPv4 CIDR block of /20 or larger."
+  }
 }
 
-variable "subnet_ids" {
-  description = "Subnet IDs for ALB and ECS tasks (defaults to default VPC subnets if null)."
-  type        = list(string)
-  default     = null
+variable "source_file" {
+  description = "Path (relative to this module) of the source.zip CodeBuild builds the image from."
+  type        = string
+  validation {
+    condition     = can(regex("^artifacts/[A-Za-z0-9_.-]+\\.zip$", var.source_file))
+    error_message = "source_file must be a zip under artifacts/."
+  }
+}
+
+variable "health_check_path" {
+  description = "Path the load balancer health check requests."
+  type        = string
+  default     = "/"
+  validation {
+    condition     = can(regex("^/[A-Za-z0-9_./-]{0,200}$", var.health_check_path))
+    error_message = "health_check_path must start with / and contain only URL path characters."
+  }
 }

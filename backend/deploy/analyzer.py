@@ -68,6 +68,7 @@ class ProjectProfile(TypedDict):
     has_dockerfile: bool
     evidence: Dict[str, List[Evidence]]
     warnings: List[str]
+    fullstack: Optional[Dict[str, Any]]  # deploy.fullstack.FullstackLayout, filled in by the pipeline
 
 
 def _obj(value: Any) -> Dict[str, Any]:
@@ -152,6 +153,7 @@ def analyze(root: str, paths: List[str], sizes: Optional[Dict[str, int]] = None)
         "static_output_dir": None, "dependency_manifest": None, "dependencies": [], "has_lockfile": False,
         "native_dependencies": [], "source_bytes": sum((sizes or {}).values()),
         "has_dockerfile": tree.has("Dockerfile"), "evidence": evidence, "warnings": warnings,
+        "fullstack": None,
     }
     if profile["has_dockerfile"]:
         ev("has_dockerfile").append({"file": "Dockerfile", "rule": "container.dockerfile"})

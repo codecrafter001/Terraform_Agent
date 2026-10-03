@@ -10,6 +10,7 @@ import hashlib
 import io
 import os
 import zipfile
+from dataclasses import dataclass
 from typing import Tuple
 
 # Directories to exclude from the bundle
@@ -58,12 +59,21 @@ def verify_plan_bundle(bundle_bytes: bytes, expected_sha256: str) -> bool:
     return actual_sha256.lower() == expected_sha256.lower()
 
 
-def extract_plan_bundle(bundle_bytes: bytes, dest_dir: str) -> None:
-    """Extracts a plan bundle safely into dest_dir."""
+@dataclass(frozen=True)
+class ExtractedBundle:
+    path: str
+    sha256: str
+
+
+def extract_plan_bundle(bundle_bytes: bytes, dest_dir: str) -> ExtractedBundle:
+    """Extracts a plan bundle safely into dest_dir and returns where it went
+    plus the SHA-256 of the bytes that were extracted (what approval binds to)."""
+    root = os.path.abspath(dest_dir)
     with zipfile.ZipFile(io.BytesIO(bundle_bytes), "r") as zf:
         for member in zf.infolist():
-            # Prevent zip-slip
-            target_path = os.path.abspath(os.path.join(dest_dir, member.filename))
-            if not target_path.startswith(os.path.abspath(dest_dir)):
+            # Prevent zip-slip (commonpath, so /tmp/a can't escape into /tmp/ab)
+            target_path = os.path.abspath(os.path.join(root, member.filename))
+            if os.path.commonpath([root, target_path]) != root:
                 raise ValueError(f"Unsafe path in bundle: {member.filename}")
-            zf.extract(member, dest_dir)
+            zf.extract(member, root)
+    return ExtractedBundle(path=root, sha256=hashlib.sha256(bundle_bytes).hexdigest())
