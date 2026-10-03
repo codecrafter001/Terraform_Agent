@@ -7,3 +7,18 @@ import {
   to = aws_route_table.rtb_003b648347930edfc_24811887
   id = "rtb-003b648347930edfc"
 }
+
+import {
+  to = aws_security_group.terraagent_ubuntu_ec2_sg_56255343
+  id = "sg-077154641a32fe103"
+}
+
+import {
+  to = aws_subnet.terraagent_ubuntu_ec2_subnet_4a2dbe19
+  id = "subnet-06e40849d4b8443f3"
+}
+
+import {
+  to = aws_instance.terraagent_ubuntu_ec2_0ae26311
+  id = "i-072f8b8170e7a534c"
+}
