@@ -24,6 +24,11 @@ from models.deployment import RollbackRequest
 import routers.deployments as api
 from services.database import init_db
 
+# Approvals expire after 24 h (deploy/apply_runner.py): approve "now", not on a fixed date.
+from datetime import datetime, timezone
+
+_APPROVED_AT = datetime.now(timezone.utc).isoformat()
+
 
 def _request() -> Request:
     return Request({
@@ -69,7 +74,7 @@ def deployed_static_site():
 
     transition(dep_id, DeployStatus.PLANNING, target_id=target_id, rendered=rendered_files)
     transition(dep_id, DeployStatus.AWAITING_APPROVAL, plan_bundle_sha256="hash123")
-    transition(dep_id, DeployStatus.APPROVED, approved_by="lead@example.com", approved_at="2026-10-02T10:00:00Z")
+    transition(dep_id, DeployStatus.APPROVED, approved_by="lead@example.com", approved_at=_APPROVED_AT)
     transition(dep_id, DeployStatus.APPLYING)
     transition(dep_id, DeployStatus.DEPLOYED, applied_at="2026-10-02T10:05:00Z")
 
@@ -114,7 +119,7 @@ def deployed_lambda_http():
 
     transition(dep_id, DeployStatus.PLANNING, target_id=target_id, rendered=rendered_files)
     transition(dep_id, DeployStatus.AWAITING_APPROVAL, plan_bundle_sha256="lambdahash123")
-    transition(dep_id, DeployStatus.APPROVED, approved_by="lead@example.com", approved_at="2026-10-02T10:00:00Z")
+    transition(dep_id, DeployStatus.APPROVED, approved_by="lead@example.com", approved_at=_APPROVED_AT)
     transition(dep_id, DeployStatus.APPLYING)
     transition(dep_id, DeployStatus.DEPLOYED, applied_at="2026-10-02T10:05:00Z")
 

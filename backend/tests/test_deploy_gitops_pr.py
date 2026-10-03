@@ -14,6 +14,11 @@ from models.deployment import CreatePullRequestRequest, MergePullRequestRequest
 import routers.deployments as api
 from services.database import init_db
 
+# Approvals expire after 24 h (deploy/apply_runner.py): approve "now", not on a fixed date.
+from datetime import datetime, timezone
+
+_APPROVED_AT = datetime.now(timezone.utc).isoformat()
+
 
 def _request(headers: list = None) -> Request:
     raw_headers = [(b"x-forwarded-email", b"lead-devops@example.com")] if headers is None else headers
@@ -75,7 +80,7 @@ def approved_deployment():
         verification=verification,
         plan_bundle_sha256="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         approved_by="lead-devops@example.com",
-        approved_at="2026-10-02T12:00:00Z",
+        approved_at=_APPROVED_AT,
     )
     return dep_id
 

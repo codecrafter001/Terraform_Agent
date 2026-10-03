@@ -29,6 +29,11 @@ import routers.deployments as api
 from services.database import SessionLocal, init_db
 from tools.terraform_runner import check_argv
 
+# Approvals expire after 24 h (deploy/apply_runner.py): approve "now", not on a fixed date.
+from datetime import datetime, timezone
+
+_APPROVED_AT = datetime.now(timezone.utc).isoformat()
+
 
 @pytest.fixture(autouse=True)
 def _trusted_sso_proxy(monkeypatch):
@@ -61,7 +66,7 @@ def setup_env(tmp_path, monkeypatch):
 def mock_target():
     session = SessionLocal()
     target_id = f"target-destroy-{uuid.uuid4().hex[:8]}"
-    now = "2026-10-02T10:00:00Z"
+    now = _APPROVED_AT
     t = AwsDeployTarget(
         id=target_id,
         name="Destroy Target",
@@ -96,7 +101,7 @@ def deployed_service(mock_target):
     }
     transition(dep_id, DeployStatus.PLANNING, target_id=mock_target, rendered=rendered_files)
     transition(dep_id, DeployStatus.AWAITING_APPROVAL, plan_bundle_sha256="fakehash")
-    transition(dep_id, DeployStatus.APPROVED, approved_by="admin@example.com", approved_at="2026-10-02T10:00:00Z")
+    transition(dep_id, DeployStatus.APPROVED, approved_by="admin@example.com", approved_at=_APPROVED_AT)
     transition(dep_id, DeployStatus.APPLYING)
     transition(dep_id, DeployStatus.DEPLOYED, applied_at="2026-10-02T10:05:00Z")
     return dep_id
@@ -250,11 +255,11 @@ async def test_apply_destroy_flow_transitions_to_destroyed(deployed_service, tmp
         plan_artifact_id=art["artifact_id"],
         plan_bundle_sha256=bundle_sha,
         approved_by="lead@example.com",
-        approved_at="2026-10-02T12:00:00Z",
+        approved_at=_APPROVED_AT,
     )
     transition(deployed_service, DeployStatus.DESTROY_PLANNING)
     transition(deployed_service, DeployStatus.AWAITING_APPROVAL)
-    transition(deployed_service, DeployStatus.APPROVED, approved_by="lead@example.com", approved_at="2026-10-02T12:00:00Z")
+    transition(deployed_service, DeployStatus.APPROVED, approved_by="lead@example.com", approved_at=_APPROVED_AT)
 
     with patch("deploy.apply_runner.extract_plan_bundle") as mock_extract, \
          patch("deploy.apply_runner.apply_session", return_value={"access_key": "AKIA...", "secret_key": "sec..."}), \
