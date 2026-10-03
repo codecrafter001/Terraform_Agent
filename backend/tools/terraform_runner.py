@@ -267,12 +267,17 @@ class TerraformRunner:
     @staticmethod
     def _scoped_aws_env(aws_credentials: Dict[str, Optional[str]], region: str) -> Dict[str, str]:
         """Minimal env for a single credentialed subprocess - never
-        os.environ.copy(). Only PATH/HOME/TF_PLUGIN_CACHE_DIR plus the AWS
+        os.environ.copy(). Only PATH/HOME/SystemRoot/TF_PLUGIN_CACHE_DIR plus the AWS
         credential vars; TF_LOG/TF_LOG_PATH forced unset (provider debug logs
         can write raw request bodies, credentials included, to disk)."""
         env = {
             "PATH": os.environ.get("PATH", ""),
             "HOME": os.environ.get("HOME", ""),
+            "USERPROFILE": os.environ.get("USERPROFILE", ""),
+            "SYSTEMROOT": os.environ.get("SYSTEMROOT", os.environ.get("SystemRoot", "C:\\Windows")),
+            "SystemRoot": os.environ.get("SystemRoot", os.environ.get("SYSTEMROOT", "C:\\Windows")),
+            "TMP": os.environ.get("TMP", ""),
+            "TEMP": os.environ.get("TEMP", ""),
             "TF_PLUGIN_CACHE_DIR": os.environ.get("TF_PLUGIN_CACHE_DIR", ""),
             "TF_IN_AUTOMATION": "1",
             "AWS_ACCESS_KEY_ID": aws_credentials.get("access_key") or "",
