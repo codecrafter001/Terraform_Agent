@@ -256,7 +256,12 @@ export default function GitHubPrViewer({ jobId, kind, prInfo, results }: GitHubP
 
       {/* Post-Merge Deployment Status Card */}
       {isMerged && (() => {
-        const latestRun = workflowRuns[0];
+        // Prioritize the deployment/apply workflow run over lint/general CI runs
+        const deployRun = workflowRuns.find((r) => {
+          const n = (r.name || "").toLowerCase();
+          return n.includes("apply") || n.includes("deploy") || n.includes("terraform");
+        }) ?? workflowRuns[0];
+        const latestRun = deployRun;
         const isFailed = latestRun?.conclusion === "failure";
         const isInProgress = latestRun?.status === "in_progress" || latestRun?.status === "queued";
         const isSuccess = latestRun?.conclusion === "success";
