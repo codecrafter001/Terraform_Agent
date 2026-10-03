@@ -15,15 +15,18 @@
 # TerraAgent.
 
 locals {
-  name        = "terraagent-${var.deployment_id}"
-  azs         = slice(data.aws_availability_zones.available.names, 0, 2)
-  boundary    = coalesce(var.permissions_boundary_arn, "arn:${data.aws_partition.current.partition}:iam::${data.aws_caller_identity.current.account_id}:policy/TerraAgentWorkloadBoundary")
-  registry    = split("/", aws_ecr_repository.app.repository_url)[0]
-  frontend    = var.frontend_enabled
+  name     = "terraagent-${var.deployment_id}"
+  azs      = slice(data.aws_availability_zones.available.names, 0, 2)
+  boundary = coalesce(var.permissions_boundary_arn, "arn:${data.aws_partition.current.partition}:iam::${data.aws_caller_identity.current.account_id}:policy/TerraAgentWorkloadBoundary")
+  registry = split("/", aws_ecr_repository.app.repository_url)[0]
+  frontend = var.frontend_enabled
+  # A separately built frontend is served from a private S3 bucket, which needs
+  # CloudFront in front of it; a backend-only app can skip it (faster, ALB URL).
+  cdn         = var.cdn_enabled || var.frontend_enabled
   db_enabled  = var.database_engine != null
   db_port     = var.database_engine == "postgres" ? 5432 : 3306
   db_name     = "app"
-  site_url    = "https://${aws_cloudfront_distribution.app.domain_name}"
+  site_url    = local.cdn ? "https://${aws_cloudfront_distribution.app[0].domain_name}" : "http://${aws_lb.app.dns_name}"
   service_arn = "arn:${data.aws_partition.current.partition}:ecs:${var.region}:${data.aws_caller_identity.current.account_id}:service/${local.name}/${local.name}"
 
   db_secret_arn    = local.db_enabled ? aws_db_instance.main[0].master_user_secret[0].secret_arn : null
@@ -234,7 +237,7 @@ data "aws_iam_policy_document" "web_bucket" {
     condition {
       test     = "StringEquals"
       variable = "AWS:SourceArn"
-      values   = [aws_cloudfront_distribution.app.arn]
+      values   = [aws_cloudfront_distribution.app[0].arn]
     }
   }
 }
@@ -331,12 +334,12 @@ resource "aws_db_instance" "main" {
   vpc_security_group_ids      = [aws_security_group.db[0].id]
   publicly_accessible         = false
   multi_az                    = var.db_multi_az
-  backup_retention_period     = var.environment == "production" ? 7 : 1
+  backup_retention_period     = var.db_backup_retention_days
   copy_tags_to_snapshot       = true
   auto_minor_version_upgrade  = true
   apply_immediately           = true
   deletion_protection         = false
-  skip_final_snapshot         = var.environment != "production"
+  skip_final_snapshot         = !var.db_final_snapshot
   final_snapshot_identifier   = "${local.name}-final"
 }
 
@@ -839,19 +842,34 @@ resource "aws_cloudwatch_event_target" "source_updated" {
 
 # --- Security groups -----------------------------------------------------------
 
-# Only CloudFront can reach the load balancer, so every request goes through the
-# HTTPS URL.
+# With CloudFront, only CloudFront can reach the load balancer, so every request
+# goes through the HTTPS URL. Without it (Dev preset, no separate frontend) the
+# load balancer is the app's public HTTP endpoint.
 resource "aws_security_group" "alb" {
   name        = "${local.name}-alb"
-  description = "HTTP from CloudFront only"
+  description = local.cdn ? "HTTP from CloudFront only" : "HTTP from the internet"
   vpc_id      = aws_vpc.main.id
 
-  ingress {
-    description     = "HTTP from CloudFront origin-facing servers"
-    from_port       = 80
-    to_port         = 80
-    protocol        = "tcp"
-    prefix_list_ids = [data.aws_ec2_managed_prefix_list.cloudfront.id]
+  dynamic "ingress" {
+    for_each = local.cdn ? [1] : []
+    content {
+      description     = "HTTP from CloudFront origin-facing servers"
+      from_port       = 80
+      to_port         = 80
+      protocol        = "tcp"
+      prefix_list_ids = [data.aws_ec2_managed_prefix_list.cloudfront.id]
+    }
+  }
+
+  dynamic "ingress" {
+    for_each = local.cdn ? [] : [1]
+    content {
+      description = "HTTP from the internet (no CloudFront)"
+      from_port   = 80
+      to_port     = 80
+      protocol    = "tcp"
+      cidr_blocks = ["0.0.0.0/0"]
+    }
   }
 
   egress {
@@ -987,7 +1005,11 @@ resource "aws_cloudfront_function" "strip_api" {
 }
 
 resource "aws_cloudfront_distribution" "app" {
-  enabled             = true
+  count   = local.cdn ? 1 : 0
+  enabled = true
+  # Don't hold the apply for global propagation (often 5-15 min): the distribution
+  # serves from the first edge locations within minutes, while the rest catch up.
+  wait_for_deployment = false
   comment             = local.name
   price_class         = var.price_class
   is_ipv6_enabled     = true

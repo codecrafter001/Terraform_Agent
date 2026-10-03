@@ -264,3 +264,25 @@ variable "run_migrations" {
   type        = bool
   default     = false
 }
+
+variable "cdn_enabled" {
+  description = "Put CloudFront (HTTPS, caching) in front of the app. Always on when there is a separate frontend."
+  type        = bool
+  default     = true
+}
+
+variable "db_backup_retention_days" {
+  description = "Days of automated database backups (0 turns them off)."
+  type        = number
+  default     = 7
+  validation {
+    condition     = var.db_backup_retention_days >= 0 && var.db_backup_retention_days <= 35
+    error_message = "db_backup_retention_days must be between 0 and 35."
+  }
+}
+
+variable "db_final_snapshot" {
+  description = "Take a final database snapshot when the stack is destroyed."
+  type        = bool
+  default     = true
+}

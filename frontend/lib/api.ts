@@ -397,6 +397,18 @@ export async function uploadDeploymentSource(
   return _json(res, "Upload failed");
 }
 
+export async function estimateDeployment(
+  id: string,
+  settings: import("./types").FullstackSettings,
+): Promise<import("./types").DeploymentEstimateResponse> {
+  const res = await fetch(`${API_BASE}/deployments/${encodeURIComponent(id)}/estimate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify(settings),
+  });
+  return _json(res, "Could not estimate cost and time");
+}
+
 export async function updateDeploymentSource(id: string, file: File): Promise<import("./types").DeploymentAccepted> {
   const form = new FormData();
   form.append("file", file);

@@ -110,6 +110,9 @@ class EcsSettings(BaseModel):
 
 
 class FullstackSettings(BaseModel):
+    preset: Optional[Literal["dev", "staging", "production"]] = Field(
+        default=None, description="The preset the settings started from (deploy/estimates.py::PRESETS); kept for the record")
+    cdn_enabled: bool = Field(default=True, description="CloudFront in front of the app; always on with a separate frontend")
     container_port: Optional[int] = Field(default=None, ge=1, le=65535, description="Empty = the detected port")
     cpu: int = Field(default=256)
     memory_mb: int = Field(default=512)
@@ -123,6 +126,8 @@ class FullstackSettings(BaseModel):
     db_instance_class: Literal["db.t4g.micro", "db.t4g.small", "db.t4g.medium", "db.t4g.large", "db.m7g.large"] = "db.t4g.micro"
     db_allocated_storage_gb: int = Field(default=20, ge=20, le=500)
     db_multi_az: bool = False
+    db_backup_retention_days: int = Field(default=7, ge=0, le=35)
+    db_final_snapshot: bool = True
     run_migrations: bool = Field(default=True, description="Run the detected schema command before the server starts")
     secret_env_keys: Optional[List[str]] = Field(
         default=None, max_length=30,

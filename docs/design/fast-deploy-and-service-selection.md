@@ -73,7 +73,7 @@ reaches TerraAgent, the plan or the state.
 |---|---|---|---|
 | 1. Speed quick wins | #1–4, #7 | 1–2 days | Done (see below) |
 | 2. Fast code redeploy | #5 | 2–3 days | Done (see below) |
-| 3. Service selection UI | Presets, frontend/compute/DB choices, live estimate, #6 | 3–4 days | |
+| 3. Service selection UI | Presets, frontend/compute/DB choices, live estimate, #6 | 3–4 days | Done (see below) |
 | 4. New services | Aurora Serverless v2, cache, S3 uploads, worker, domain, autoscaling | 5–7 days | |
 | 5. Hardening | #8, #9, CloudFormation bootstrap mirror, sandbox end-to-end run per service | 2–3 days | |
 
@@ -123,3 +123,25 @@ reaches TerraAgent, the plan or the state.
   image is pushed.
 - Not yet: destroying a stack whose code update failed (destroy still requires DEPLOYED,
   FAILED_PARTIAL or NEEDS_RECONCILIATION); retrying the update works.
+
+### Phase 3 as built
+
+- **Presets** (`deploy/estimates.py::PRESETS`): Dev (no CloudFront, 1-day backups, no final
+  snapshot), Staging (CloudFront, 3-day backups), Production (2 tasks, 0.5 vCPU / 1 GB,
+  db.t4g.small, 7-day backups, final snapshot). A never-configured deployment starts from the
+  preset matching its environment; a preset only fills the form, edits afterwards are kept, and
+  the chosen preset is stored in `settings.preset` for the record.
+- **#6 CloudFront optional**: `cdn_enabled` (default true). The template keeps CloudFront on
+  whenever there is a separate frontend (private S3 needs it); without it the ALB accepts HTTP
+  from the internet and `url` is the ALB's HTTP URL. The ALB security group's description is
+  unchanged when CloudFront is on, so existing stacks don't get a replaced security group.
+  CloudFront no longer holds the apply for global propagation (`wait_for_deployment = false`).
+- **Database safety settings**: `db_backup_retention_days` (0-35) and `db_final_snapshot`
+  replace the old "environment == production" rule.
+- **Live estimate**: `POST /deployments/{id}/estimate` (pure arithmetic on the analysed layout,
+  no AWS call) returns monthly cost lines, first-deploy minutes, notes, the presets and the
+  suggested preset. Approximate us-east-1 list prices and observed creation times; the UI
+  refreshes it 350 ms after each change and points to Infracost after Build for the real price.
+- **Choices already covered elsewhere**: backend compute (ECS vs Lambda) is the target choice;
+  database mode (RDS / external / none) and secrets came with the full-stack target. Overriding
+  the detected frontend layout (e.g. forcing S3 hosting) is not offered yet.

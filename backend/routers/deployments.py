@@ -19,6 +19,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Uplo
 from sse_starlette.sse import EventSourceResponse
 
 from deploy import code_update
+from deploy.estimates import PRESET_DESCRIPTIONS, PRESETS, estimate_fullstack, preset_for_environment
 from deploy.artifacts import get_artifact_store
 from deploy.config import MAX_UPLOAD_BYTES, SOURCE_RETENTION_DAYS
 from deploy.source_intake import IntakeError, download_github_archive, is_zip
@@ -40,6 +41,7 @@ from models.deployment import (
     BuildHistoryItem,
     CreatePullRequestRequest,
     DeployRequest,
+    FullstackSettings,
     DeploymentAccepted,
     DeploymentDetail,
     DeploymentEventResponse,
@@ -222,6 +224,23 @@ async def github_source(request: Request, body: GitHubSourceRequest) -> Deployme
     deployment_id = _accept_source(data, "github", name, body.region, body.environment, requested_by=user, owner=user, tenant_id=tenant)
     return DeploymentAccepted(deployment_id=deployment_id, status=DeployStatus.SOURCE_RECEIVED.value,
                               message="Repository downloaded; analysis started")
+
+
+@router.post("/{deployment_id}/estimate")
+@limiter.limit("240/hour")
+async def estimate_deployment(request: Request, deployment_id: str, body: FullstackSettings) -> Dict[str, Any]:
+    """Monthly cost and first-deploy time for full-stack settings, plus the presets.
+    Pure arithmetic on the analysed layout: nothing is built and AWS isn't called."""
+    dep = get_deployment(deployment_id, tenant_id=current_tenant(request))
+    if not dep:
+        raise HTTPException(status_code=404, detail="Deployment not found")
+    layout = (dep.get("profile") or {}).get("fullstack")
+    return {
+        "estimate": estimate_fullstack(body.model_dump(), layout),
+        "presets": PRESETS,
+        "preset_descriptions": PRESET_DESCRIPTIONS,
+        "suggested_preset": preset_for_environment(dep.get("environment")),
+    }
 
 
 def _start_code_update(request: Request, deployment_id: str, data: bytes, source_name: str) -> DeploymentAccepted:

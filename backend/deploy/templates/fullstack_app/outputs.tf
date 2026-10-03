@@ -1,11 +1,11 @@
 output "url" {
-  description = "The app's public HTTPS URL (CloudFront)."
+  description = "The app's public URL: HTTPS through CloudFront, or the load balancer's HTTP URL without it."
   value       = local.site_url
 }
 
 output "cloudfront_distribution_id" {
   description = "CloudFront distribution in front of the app."
-  value       = aws_cloudfront_distribution.app.id
+  value       = local.cdn ? aws_cloudfront_distribution.app[0].id : null
 }
 
 output "alb_dns_name" {

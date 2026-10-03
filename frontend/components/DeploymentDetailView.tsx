@@ -1,11 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { LucideIcon } from "lucide-react";
 import {
   AlertTriangle,
   CheckCircle2,
   Circle,
+  Clock,
   Database,
   ExternalLink,
   FileCode2,
@@ -22,11 +23,14 @@ import {
   Terminal,
   Trash2,
   Upload,
+  Wallet,
   XCircle,
+  Zap,
 } from "lucide-react";
 import {
   createDeploymentPullRequest,
   deployDeployment,
+  estimateDeployment,
   fetchDeployment,
   fetchDeploymentArtifacts,
   fetchDeploymentLogs,
@@ -44,10 +48,12 @@ import { ApprovalCard, PlanCard } from "./DeploymentPlanApproval";
 import type {
   BuildHistoryItem,
   DeploymentDetail,
+  DeploymentEstimateResponse,
   DeploymentStatus,
   DeploymentTarget,
   EcsSettings,
   FullstackLayout,
+  FullstackPreset,
   FullstackSettings,
   LambdaSettings,
   PrepareDeploymentPayload,
@@ -184,6 +190,8 @@ function ConfigureForm({ dep, onStarted }: { dep: DeploymentDetail; onStarted: (
   });
   const layout = dep.profile?.fullstack ?? null;
   const [fullstackSettings, setFullstackSettings] = useState<FullstackSettings>({
+    preset: dep.settings?.preset ?? null,
+    cdn_enabled: dep.settings?.cdn_enabled ?? true,
     container_port: dep.settings?.container_port ?? layout?.backend.port ?? 8080,
     cpu: dep.settings?.cpu ?? 256,
     memory_mb: dep.settings?.memory_mb ?? 512,
@@ -194,6 +202,8 @@ function ConfigureForm({ dep, onStarted }: { dep: DeploymentDetail; onStarted: (
     db_instance_class: dep.settings?.db_instance_class ?? "db.t4g.micro",
     db_allocated_storage_gb: dep.settings?.db_allocated_storage_gb ?? 20,
     db_multi_az: dep.settings?.db_multi_az ?? false,
+    db_backup_retention_days: dep.settings?.db_backup_retention_days ?? 7,
+    db_final_snapshot: dep.settings?.db_final_snapshot ?? true,
     run_migrations: dep.settings?.run_migrations ?? true,
     secret_env_keys: dep.settings?.secret_env_keys ?? layout?.env_keys ?? [],
   });
@@ -287,7 +297,8 @@ function ConfigureForm({ dep, onStarted }: { dep: DeploymentDetail; onStarted: (
           </label>
         </div>
       ) : target === "fullstack_app" ? (
-        <FullstackSettingsForm layout={layout} settings={fullstackSettings} onChange={setFullstackSettings} />
+        <FullstackSettingsForm depId={dep.id} applySuggestedPreset={!dep.settings} layout={layout}
+          settings={fullstackSettings} onChange={setFullstackSettings} />
       ) : (
         <div className="space-y-4">
           <div className="grid sm:grid-cols-4 gap-4">
@@ -342,16 +353,56 @@ function ConfigureForm({ dep, onStarted }: { dep: DeploymentDetail; onStarted: (
 
 const ENV_KEY_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
 
+const PRESET_TITLES: Record<FullstackPreset, string> = { dev: "Dev", staging: "Staging", production: "Production" };
+
 function FullstackSettingsForm({
+  depId,
+  applySuggestedPreset,
   layout,
   settings,
   onChange,
 }: {
+  depId: string;
+  applySuggestedPreset: boolean;
   layout: FullstackLayout | null;
   settings: FullstackSettings;
   onChange: (s: FullstackSettings) => void;
 }) {
   const [newKey, setNewKey] = useState("");
+  const [estimate, setEstimate] = useState<DeploymentEstimateResponse | null>(null);
+  const [estimateError, setEstimateError] = useState<string | null>(null);
+  const presetApplied = useRef(!applySuggestedPreset);
+  const settingsKey = JSON.stringify(settings);
+
+  // Live estimate (backend/deploy/estimates.py), debounced while the user edits.
+  useEffect(() => {
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      estimateDeployment(depId, JSON.parse(settingsKey) as FullstackSettings)
+        .then((res) => {
+          if (cancelled) return;
+          setEstimate(res);
+          setEstimateError(null);
+          // A deployment that was never configured starts from the preset for its environment.
+          if (!presetApplied.current) {
+            presetApplied.current = true;
+            const current = JSON.parse(settingsKey) as FullstackSettings;
+            onChange({ ...current, ...res.presets[res.suggested_preset], preset: res.suggested_preset });
+          }
+        })
+        .catch((e) => !cancelled && setEstimateError(e instanceof Error ? e.message : "Estimate unavailable"));
+    }, 350);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [depId, settingsKey, onChange]);
+
+  const applyPreset = (name: FullstackPreset) => {
+    if (!estimate) return;
+    onChange({ ...settings, ...estimate.presets[name], preset: name });
+  };
+  const hasFrontend = Boolean(layout?.frontend);
   const db = layout?.database ?? null;
   const detectedKeys = layout?.env_keys ?? [];
   const allKeys = Array.from(new Set([...detectedKeys, ...settings.secret_env_keys])).sort();
@@ -373,6 +424,35 @@ function FullstackSettingsForm({
 
   return (
     <div className="space-y-5">
+      <div className="space-y-2">
+        <div className="field-label flex items-center gap-1.5"><Zap className="w-3.5 h-3.5" /> Preset</div>
+        <div className="grid sm:grid-cols-3 gap-2">
+          {(["dev", "staging", "production"] as FullstackPreset[]).map((name) => (
+            <button key={name} type="button" disabled={!estimate} onClick={() => applyPreset(name)} aria-pressed={settings.preset === name}
+              className={`text-left rounded-xl border px-3 py-2.5 text-xs transition-colors disabled:opacity-60 ${
+                settings.preset === name ? "border-brand-600 bg-brand-50 text-brand-800" : "border-slate-200 hover:bg-slate-50"
+              }`}>
+              <div className="font-semibold">{PRESET_TITLES[name]}</div>
+              <div className="text-2xs text-slate-500 mt-0.5">{estimate?.preset_descriptions[name] ?? "Loading…"}</div>
+            </button>
+          ))}
+        </div>
+        <p className="text-2xs text-slate-500">A preset fills in the settings below; anything you change afterwards is kept.</p>
+      </div>
+
+      <label className={`flex items-start gap-2 text-xs ${hasFrontend ? "text-slate-400" : "text-slate-700"}`}>
+        <input type="checkbox" className="mt-0.5" disabled={hasFrontend} checked={settings.cdn_enabled || hasFrontend}
+          onChange={(e) => onChange({ ...settings, cdn_enabled: e.target.checked })} />
+        <span>
+          CloudFront in front of the app (HTTPS URL, caching)
+          <span className="block text-2xs text-slate-500">
+            {hasFrontend
+              ? "Always on here: the separate frontend is served from a private S3 bucket through CloudFront."
+              : "Off: the app is served over plain HTTP from the load balancer URL, and the first deploy is 4–8 minutes faster."}
+          </span>
+        </span>
+      </label>
+
       <div className="grid sm:grid-cols-4 gap-4">
         <div className="space-y-1.5">
           <label htmlFor="fs_port" className="field-label">Backend port</label>
@@ -446,6 +526,15 @@ function FullstackSettingsForm({
               <input type="checkbox" checked={settings.db_multi_az} onChange={(e) => set("db_multi_az", e.target.checked)} />
               Standby in a second zone (doubles DB cost)
             </label>
+            <div className="space-y-1.5">
+              <label htmlFor="fs_backups" className="field-label">Backup retention (days)</label>
+              <input id="fs_backups" type="number" min={0} max={35} className="field-input" value={settings.db_backup_retention_days}
+                onChange={(e) => set("db_backup_retention_days", Number(e.target.value))} />
+            </div>
+            <label className="flex items-center gap-2 text-xs text-slate-700 sm:mt-6 sm:col-span-2">
+              <input type="checkbox" checked={settings.db_final_snapshot} onChange={(e) => set("db_final_snapshot", e.target.checked)} />
+              Keep a final snapshot when this deployment is torn down
+            </label>
             {layout?.migration && (
               <label className="flex items-start gap-2 text-xs text-slate-700 sm:col-span-3">
                 <input type="checkbox" className="mt-0.5" checked={settings.run_migrations} onChange={(e) => set("run_migrations", e.target.checked)} />
@@ -487,6 +576,8 @@ function FullstackSettingsForm({
         </div>
       </div>
 
+      <EstimatePanel estimate={estimate?.estimate ?? null} error={estimateError} />
+
       {layout && layout.warnings.length > 0 && (
         <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-900 space-y-1">
           <div className="font-semibold flex items-center gap-1.5"><AlertTriangle className="w-4 h-4" /> Before you deploy</div>
@@ -495,6 +586,39 @@ function FullstackSettingsForm({
           </ul>
         </div>
       )}
+    </div>
+  );
+}
+
+function EstimatePanel({ estimate, error }: { estimate: DeploymentEstimateResponse["estimate"] | null; error: string | null }) {
+  if (error) return <p className="text-2xs text-slate-500">Estimate unavailable: {error}</p>;
+  if (!estimate) return <p className="text-2xs text-slate-500">Estimating cost and time…</p>;
+  return (
+    <div className="rounded-xl border border-slate-200 bg-slate-50/60 p-4 space-y-3">
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <div className="text-2xs text-slate-500 flex items-center gap-1"><Wallet className="w-3.5 h-3.5" /> Estimated cost</div>
+          <div className="text-lg font-bold text-slate-900">${estimate.monthly_usd.toFixed(0)}<span className="text-xs font-medium text-slate-500"> / month</span></div>
+        </div>
+        <div>
+          <div className="text-2xs text-slate-500 flex items-center gap-1"><Clock className="w-3.5 h-3.5" /> First deploy</div>
+          <div className="text-lg font-bold text-slate-900">{estimate.minutes_low}–{estimate.minutes_high}<span className="text-xs font-medium text-slate-500"> min</span></div>
+        </div>
+      </div>
+      <details className="text-xs">
+        <summary className="cursor-pointer text-slate-500">Breakdown</summary>
+        <ul className="mt-2 space-y-1">
+          {estimate.lines.map((line) => (
+            <li key={line.item} className="flex justify-between gap-4">
+              <span className="text-slate-600">{line.item}</span>
+              <span className="font-mono text-slate-900">${line.monthly_usd.toFixed(2)}</span>
+            </li>
+          ))}
+        </ul>
+      </details>
+      <ul className="text-2xs text-slate-500 list-disc pl-4 space-y-0.5">
+        {estimate.notes.map((n) => <li key={n}>{n}</li>)}
+      </ul>
     </div>
   );
 }

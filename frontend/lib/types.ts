@@ -784,7 +784,10 @@ export interface EcsSettings {
 
 // backend/models/deployment.py::FullstackSettings
 export type FullstackDatabaseMode = 'rds' | 'external' | 'none';
+export type FullstackPreset = 'dev' | 'staging' | 'production';
 export interface FullstackSettings {
+  preset?: FullstackPreset | null;
+  cdn_enabled: boolean;
   container_port?: number;
   cpu: number;
   memory_mb: number;
@@ -795,8 +798,33 @@ export interface FullstackSettings {
   db_instance_class: 'db.t4g.micro' | 'db.t4g.small' | 'db.t4g.medium' | 'db.t4g.large' | 'db.m7g.large';
   db_allocated_storage_gb: number;
   db_multi_az: boolean;
+  db_backup_retention_days: number;
+  db_final_snapshot: boolean;
   run_migrations: boolean;
   secret_env_keys: string[];
+}
+
+// backend/deploy/estimates.py::Estimate and POST /deployments/{id}/estimate
+export interface DeploymentEstimate {
+  monthly_usd: number;
+  lines: { item: string; monthly_usd: number }[];
+  minutes_low: number;
+  minutes_high: number;
+  cdn: boolean;
+  notes: string[];
+}
+
+export type FullstackPresetValues = Pick<
+  FullstackSettings,
+  'cdn_enabled' | 'cpu' | 'memory_mb' | 'desired_count' | 'db_instance_class' | 'db_allocated_storage_gb' |
+  'db_multi_az' | 'db_backup_retention_days' | 'db_final_snapshot'
+>;
+
+export interface DeploymentEstimateResponse {
+  estimate: DeploymentEstimate;
+  presets: Record<FullstackPreset, FullstackPresetValues>;
+  preset_descriptions: Record<FullstackPreset, string>;
+  suggested_preset: FullstackPreset;
 }
 
 export type PrepareDeploymentPayload =

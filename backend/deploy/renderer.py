@@ -79,6 +79,10 @@ def _fullstack_vars(settings: Dict[str, Any], profile: Dict[str, Any]) -> Dict[s
         "db_instance_class": settings.get("db_instance_class", "db.t4g.micro"),
         "db_allocated_storage_gb": int(settings.get("db_allocated_storage_gb", 20)),
         "db_multi_az": bool(settings.get("db_multi_az", False)),
+        "db_backup_retention_days": int(settings.get("db_backup_retention_days", 7)),
+        "db_final_snapshot": bool(settings.get("db_final_snapshot", True)),
+        # The template keeps CloudFront on regardless when there is a separate frontend.
+        "cdn_enabled": bool(settings.get("cdn_enabled", True)),
         "run_migrations": bool(engine and layout.get("migration") and settings.get("run_migrations", True)),
         "secret_env_keys": secret_keys,
     }
