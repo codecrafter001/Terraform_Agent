@@ -16,11 +16,11 @@ logger = logging.getLogger(__name__)
 class LLMClient:
     """Unified LLM Client supporting Google Gemini API with fallback to local Ollama."""
 
-    def __init__(self, host: Optional[str] = None, default_model: str = "gemini-flash-latest"):
+    def __init__(self, host: Optional[str] = None, default_model: str = "gemini-3.8-flash"):
         self.gemini_api_key = os.getenv("GEMINI_API_KEY")
         self.host = host or os.getenv("OLLAMA_HOST", "http://localhost:11434")
         self.default_model = os.getenv("OLLAMA_MODEL", "codellama")
-        self.gemini_model = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
+        self.gemini_model = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
         self.timeout = float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "300"))
         self._gemini_client = None
 

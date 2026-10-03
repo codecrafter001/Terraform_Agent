@@ -79,3 +79,11 @@ Thumbs.db
 # Celery runtime
 celerybeat-schedule
 celerybeat-schedule.*
+
+# Local DB and build artifacts
+*.db
+*.tsbuildinfo
+.local-output/
+backend/.local-output/
+backend/scratch_*.py
+

@@ -214,7 +214,10 @@ export default function ScanProgress({ jobId }: ScanProgressProps) {
       const stage = STEP_TO_STAGE[tag?.[1] ?? rawAgent] ?? "system";
       const clean = tag ? rawText.slice(tag[0].length) : rawText;
       setLogs((prev) => {
-        const next = [...prev, { key: rawSeq !== null ? `s${rawSeq}` : `r${prev.length}-${Date.now()}`, seq: rawSeq, text: clean, stage }];
+        if (rawSeq !== null && prev.some((l) => l.seq === rawSeq)) return prev;
+        if (rawSeq === null && prev.some((l) => l.text === clean)) return prev;
+        const itemKey = rawSeq !== null ? `s${rawSeq}` : `r${prev.length}-${Date.now()}`;
+        const next = [...prev, { key: itemKey, seq: rawSeq, text: clean, stage }];
         return rawSeq !== null ? next.sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0)) : next;
       });
     };
@@ -356,7 +359,7 @@ export default function ScanProgress({ jobId }: ScanProgressProps) {
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-      {(awaiting || rejected || (complete && approvalDecision)) && (pendingApproval || approvalRequest) && (
+      {(awaiting || rejected || (complete && approvalDecision)) && (pendingApproval || approvalRequest || approvalDecision) && (
         <div className="lg:col-span-12">
           <PendingApprovalPanel
             jobId={jobId}
@@ -373,32 +376,103 @@ export default function ScanProgress({ jobId }: ScanProgressProps) {
       )}
 
       {/* Outcome banners */}
-      {complete && (
-        <OutcomeBanner
-          tone={verified ? "emerald" : "amber"}
-          icon={verified ? CheckCircle2 : AlertTriangle}
-          title={verified ? "Pipeline complete" : "Delivered, but not fully verified"}
-          body={
-            !verified
-              ? verdict === "FAIL"
-                ? `Validation still failed after ${repairAttempts} repair cycle${repairAttempts === 1 ? "" : "s"}. Review the bundle before using it.`
-                : `Some checks couldn't run: ${(iterations[iterations.length - 1]?.incomplete_reasons ?? []).join("; ") || "see the log"}.`
-              : iterations.length > 1
-              ? `Verified after ${iterations.length} passes and ${repairAttempts} repair cycle${repairAttempts === 1 ? "" : "s"}. The bundle and reports are ready.`
-              : "Verified on the first pass. The bundle and reports are ready."
-          }
-          summary={runSummary}
-          action={
-            <button
-              onClick={() => router.push(`/results/${jobId}#deliverables`)}
-              className={`btn text-white shadow-sm shrink-0 ${verified ? "bg-emerald-600 hover:bg-emerald-700" : "bg-amber-600 hover:bg-amber-700"}`}
-            >
-              View results
-              <ArrowRight className="w-4 h-4" />
-            </button>
-          }
-        />
-      )}
+      {complete && (() => {
+        const rawReasons = iterations[iterations.length - 1]?.incomplete_reasons ?? [];
+        const infraSummary = summaries.infrastructure ?? "";
+        const isAuthError =
+          /AuthFailure|InvalidClientTokenId|SignatureDoesNotMatch|UnrecognizedClientException/i.test(infraSummary) ||
+          rawReasons.some((r) => /AuthFailure|InvalidClientTokenId|SignatureDoesNotMatch/i.test(r));
+        const zeroResources =
+          /Found 0 resources/i.test(infraSummary) || (runSummary?.includes("0 found") ?? false);
+
+        if (isAuthError && zeroResources) {
+          return (
+            <OutcomeBanner
+              tone="rose"
+              icon={AlertTriangle}
+              title="AWS Authentication Failed — No Resources Scanned"
+              body="AWS rejected the credentials provided for this scan (AuthFailure). Because authentication was unauthorized, no cloud resources could be inspected. Please verify your AWS Access Key, Secret Key, and region in the AWS Console, then run a new scan."
+              summary="0 resources discovered due to AWS credential authentication failure"
+              action={
+                <button
+                  onClick={() => router.push("/scan")}
+                  className="btn bg-rose-600 hover:bg-rose-700 text-white shrink-0 shadow-sm"
+                >
+                  Start a new scan
+                  <ArrowRight className="w-3.5 h-3.5" />
+                </button>
+              }
+            />
+          );
+        }
+
+        if (verified) {
+          return (
+            <OutcomeBanner
+              tone="emerald"
+              icon={CheckCircle2}
+              title="Pipeline complete"
+              body={
+                iterations.length > 1
+                  ? `Verified after ${iterations.length} passes and ${repairAttempts} repair cycle${repairAttempts === 1 ? "" : "s"}. The bundle and reports are ready.`
+                  : "Verified on the first pass. The bundle and reports are ready."
+              }
+              summary={runSummary}
+              action={
+                <button
+                  onClick={() => router.push(`/results/${jobId}#deliverables`)}
+                  className="btn text-white shadow-sm shrink-0 bg-emerald-600 hover:bg-emerald-700"
+                >
+                  View results
+                  <ArrowRight className="w-4 h-4" />
+                </button>
+              }
+            />
+          );
+        }
+
+        if (verdict === "FAIL") {
+          return (
+            <OutcomeBanner
+              tone="amber"
+              icon={AlertTriangle}
+              title="Code Generated (Validation Warnings)"
+              body={`Terraform validation reported syntax or dependency errors after ${repairAttempts} repair attempts. Please inspect the code deliverables before deploying.`}
+              summary={runSummary}
+              action={
+                <button
+                  onClick={() => router.push(`/results/${jobId}#deliverables`)}
+                  className="btn text-white shadow-sm shrink-0 bg-amber-600 hover:bg-amber-700"
+                >
+                  View results
+                  <ArrowRight className="w-4 h-4" />
+                </button>
+              }
+            />
+          );
+        }
+
+        // INCOMPLETE verdict (e.g. optional scanners skipped or partial AWS permissions)
+        const formattedBody = formatIncompleteReasons(rawReasons);
+        return (
+          <OutcomeBanner
+            tone="amber"
+            icon={AlertTriangle}
+            title="Delivered with Verification Warnings"
+            body={formattedBody || "Some optional checks could not be run. Review the generated deliverables."}
+            summary={runSummary}
+            action={
+              <button
+                onClick={() => router.push(`/results/${jobId}#deliverables`)}
+                className="btn text-white shadow-sm shrink-0 bg-amber-600 hover:bg-amber-700"
+              >
+                View results
+                <ArrowRight className="w-4 h-4" />
+              </button>
+            }
+          />
+        );
+      })()}
       {failed && (
         <OutcomeBanner
           tone="rose"
@@ -540,7 +614,7 @@ export default function ScanProgress({ jobId }: ScanProgressProps) {
               const isError = /error|failed|✗/i.test(l.text) && !/0 failed/i.test(l.text);
               const isGood = /✓|passed\.|complete|Bundle ready/i.test(l.text);
               return (
-                <div key={l.key} className="flex items-start gap-2.5 px-4 py-px hover:bg-white/[0.03] text-2xs">
+                <div key={`${l.key ?? l.seq ?? "log"}-${i}`} className="flex items-start gap-2.5 px-4 py-px hover:bg-white/[0.03] text-2xs">
                   <span className="text-slate-600 select-none tabular-nums w-7 text-right shrink-0">{i + 1}</span>
                   <span className={`shrink-0 w-[4.5rem] ${tag.cls}`}>{tag.label}</span>
                   <span
@@ -595,6 +669,35 @@ function runSummaryLine(r: JobResults): string {
     parts.push(`${plural(sp.total_findings, "security finding", "security findings")} reported, no Hardening fixes`);
   }
   return parts.join(" · ");
+}
+
+function formatIncompleteReasons(reasons: string[]): string {
+  if (!reasons.length) return "All core checks passed.";
+  const cleaned: string[] = [];
+  const missingTools: string[] = [];
+  let hadAuth = false;
+
+  for (const r of reasons) {
+    if (r.includes("not installed")) {
+      const tool = r.replace(" not installed", "").trim();
+      missingTools.push(tool);
+    } else if (/AuthFailure|InvalidClientTokenId|SignatureDoesNotMatch/i.test(r)) {
+      hadAuth = true;
+    } else if (r.startsWith("discovery was incomplete")) {
+      cleaned.push("Some AWS resources were inaccessible due to limited IAM permissions.");
+    } else {
+      cleaned.push(r);
+    }
+  }
+
+  if (hadAuth) {
+    cleaned.unshift("AWS credentials failed authentication during discovery.");
+  }
+  if (missingTools.length > 0) {
+    cleaned.push(`Optional security scanners (${missingTools.join(", ")}) were not installed on this server and were skipped.`);
+  }
+
+  return cleaned.join(" · ");
 }
 
 function OutcomeBanner({
