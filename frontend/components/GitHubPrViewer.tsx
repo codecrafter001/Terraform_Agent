@@ -254,82 +254,139 @@ export default function GitHubPrViewer({ jobId, kind, prInfo, results }: GitHubP
         </div>
       </div>
 
-      {/* Deployment Success Celebration Card */}
-      {isMerged && (
-        <div className="rounded-3xl border border-emerald-500/40 bg-gradient-to-b from-emerald-950/20 via-slate-900/60 to-slate-950 p-6 text-white space-y-5 shadow-2xl relative overflow-hidden">
-          <div className="flex items-center justify-between flex-wrap gap-4 border-b border-emerald-500/20 pb-4">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-2xl bg-emerald-500/20 border border-emerald-500/40 flex items-center justify-center text-emerald-400">
-                <CheckCircle2 className="w-6 h-6" />
+      {/* Post-Merge Deployment Status Card */}
+      {isMerged && (() => {
+        const latestRun = workflowRuns[0];
+        const isFailed = latestRun?.conclusion === "failure";
+        const isInProgress = latestRun?.status === "in_progress" || latestRun?.status === "queued";
+        const isSuccess = latestRun?.conclusion === "success";
+
+        if (isFailed) {
+          return (
+            <div className="rounded-3xl border border-rose-500/40 bg-gradient-to-b from-rose-950/30 via-slate-900/60 to-slate-950 p-6 text-white space-y-4 shadow-2xl relative overflow-hidden">
+              <div className="flex items-center justify-between flex-wrap gap-4 border-b border-rose-500/20 pb-4">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-2xl bg-rose-500/20 border border-rose-500/40 flex items-center justify-center text-rose-400">
+                    <AlertTriangle className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <h2 className="text-base font-bold text-rose-300">TERRAFORM APPLY FAILED IN GITHUB ACTIONS</h2>
+                    <p className="text-xs text-slate-400">
+                      The pull request merged to main, but the automated GitHub Actions CI/CD deployment failed. AWS resources were not created.
+                    </p>
+                  </div>
+                </div>
+                <span className="px-3 py-1 rounded-full bg-rose-500/20 text-rose-300 border border-rose-500/30 text-xs font-bold font-mono">
+                  Failed in {results?.region ?? "us-east-1"}
+                </span>
               </div>
-              <div>
-                <h2 className="text-base font-bold text-emerald-300">DEPLOYMENT SUCCESSFUL</h2>
-                <p className="text-xs text-slate-400">Infrastructure merged to main & provisioned on AWS via GitHub Actions (OIDC)</p>
+              <div className="p-4 rounded-xl bg-slate-900/80 border border-slate-800 text-xs text-slate-300 space-y-2">
+                <div className="font-semibold text-rose-300">Why was no instance created in AWS?</div>
+                <p className="text-slate-400 leading-relaxed">
+                  TerraAgent generated and merged the adoption PR, but the GitHub Actions runner encountered a Terraform initialization or syntax error when executing <code className="text-brand-300 font-mono">terraform apply</code>.
+                </p>
+              </div>
+              <div className="flex flex-wrap gap-3 pt-1">
+                {latestRun?.html_url && (
+                  <a
+                    href={latestRun.html_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="px-4 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold flex items-center gap-2 shadow-lg shadow-rose-950/40"
+                  >
+                    View Failed GitHub Actions Run Logs
+                    <ExternalLink className="w-4 h-4" />
+                  </a>
+                )}
+                <a
+                  href={`https://${results?.region ?? "us-east-1"}.console.aws.amazon.com/ec2/home?region=${results?.region ?? "us-east-1"}#Instances:`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="px-4 py-2.5 rounded-xl bg-white/10 hover:bg-white/20 border border-white/20 text-white text-xs font-bold flex items-center gap-2"
+                >
+                  Open AWS EC2 Console ({results?.region ?? "us-east-1"})
+                  <ExternalLink className="w-4 h-4" />
+                </a>
               </div>
             </div>
-            <span className="px-3 py-1 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-xs font-bold font-mono">
-              Live in us-east-1
-            </span>
-          </div>
+          );
+        }
 
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-            <div className="bg-slate-900/80 border border-slate-800 p-4 rounded-2xl space-y-1">
-              <div className="flex items-center gap-2 text-xs font-semibold text-slate-400">
-                <Server className="w-4 h-4 text-emerald-400" /> EC2 Instance
+        if (isInProgress) {
+          return (
+            <div className="rounded-3xl border border-sky-500/40 bg-gradient-to-b from-sky-950/30 via-slate-900/60 to-slate-950 p-6 text-white space-y-4 shadow-2xl relative overflow-hidden">
+              <div className="flex items-center justify-between flex-wrap gap-4 border-b border-sky-500/20 pb-4">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-2xl bg-sky-500/20 border border-sky-500/40 flex items-center justify-center text-sky-400">
+                    <Loader2 className="w-6 h-6 animate-spin" />
+                  </div>
+                  <div>
+                    <h2 className="text-base font-bold text-sky-300">TERRAFORM DEPLOYMENT IN PROGRESS</h2>
+                    <p className="text-xs text-slate-400">GitHub Actions is executing terraform apply on AWS via OIDC...</p>
+                  </div>
+                </div>
               </div>
-              <div className="text-sm font-mono font-bold text-white">i-055c9e0ed9b31ee2a</div>
-              <div className="text-3xs text-emerald-400 font-medium">Ubuntu 22.04 LTS · t3.micro (running)</div>
+              {latestRun?.html_url && (
+                <div className="pt-2">
+                  <a
+                    href={latestRun.html_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="px-4 py-2.5 rounded-xl bg-sky-600 hover:bg-sky-500 text-white text-xs font-bold inline-flex items-center gap-2 shadow-lg"
+                  >
+                    Watch Live GitHub Actions Run
+                    <ExternalLink className="w-4 h-4" />
+                  </a>
+                </div>
+              )}
+            </div>
+          );
+        }
+
+        return (
+          <div className="rounded-3xl border border-emerald-500/40 bg-gradient-to-b from-emerald-950/20 via-slate-900/60 to-slate-950 p-6 text-white space-y-5 shadow-2xl relative overflow-hidden">
+            <div className="flex items-center justify-between flex-wrap gap-4 border-b border-emerald-500/20 pb-4">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-2xl bg-emerald-500/20 border border-emerald-500/40 flex items-center justify-center text-emerald-400">
+                  <CheckCircle2 className="w-6 h-6" />
+                </div>
+                <div>
+                  <h2 className="text-base font-bold text-emerald-300">
+                    {isSuccess ? "DEPLOYMENT SUCCESSFUL" : "PR MERGED TO MAIN"}
+                  </h2>
+                  <p className="text-xs text-slate-400">Infrastructure merged to main & synchronized on AWS</p>
+                </div>
+              </div>
+              <span className="px-3 py-1 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-xs font-bold font-mono">
+                Region {results?.region ?? "us-east-1"}
+              </span>
             </div>
 
-            <div className="bg-slate-900/80 border border-slate-800 p-4 rounded-2xl space-y-1">
-              <div className="flex items-center gap-2 text-xs font-semibold text-slate-400">
-                <Globe className="w-4 h-4 text-brand-400" /> Public IP
-              </div>
-              <div className="text-sm font-mono font-bold text-emerald-300">44.193.226.110</div>
-              <div className="text-3xs text-slate-400">Ports 22 & 80 Open</div>
-            </div>
-
-            <div className="bg-slate-900/80 border border-slate-800 p-4 rounded-2xl space-y-1">
-              <div className="flex items-center gap-2 text-xs font-semibold text-slate-400">
-                <ShieldCheck className="w-4 h-4 text-purple-400" /> Security Group
-              </div>
-              <div className="text-sm font-mono font-bold text-white">sg-077154641a32fe103</div>
-              <div className="text-3xs text-slate-400">terraagent-ubuntu-ec2-sg</div>
-            </div>
-
-            <div className="bg-slate-900/80 border border-slate-800 p-4 rounded-2xl space-y-1">
-              <div className="flex items-center gap-2 text-xs font-semibold text-slate-400">
-                <Layers className="w-4 h-4 text-amber-400" /> Public Subnet
-              </div>
-              <div className="text-sm font-mono font-bold text-white">subnet-06e40849d4b8443f3</div>
-              <div className="text-3xs text-slate-400">172.31.1.0/24 (us-east-1a)</div>
-            </div>
-          </div>
-
-          <div className="flex flex-wrap gap-3 pt-2">
-            <a
-              href="https://us-east-1.console.aws.amazon.com/ec2/home?region=us-east-1#Instances:instanceId=i-055c9e0ed9b31ee2a"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center gap-2 shadow-lg shadow-emerald-950/40"
-            >
-              Open AWS EC2 Console
-              <ExternalLink className="w-4 h-4" />
-            </a>
-            {workflowRuns.length > 0 && (
+            <div className="flex flex-wrap gap-3 pt-2">
               <a
-                href={workflowRuns[0]?.html_url}
+                href={`https://${results?.region ?? "us-east-1"}.console.aws.amazon.com/ec2/home?region=${results?.region ?? "us-east-1"}#Instances:`}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="px-4 py-2.5 rounded-xl bg-white/10 hover:bg-white/20 border border-white/20 text-white text-xs font-bold flex items-center gap-2"
+                className="px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center gap-2 shadow-lg shadow-emerald-950/40"
               >
-                View GitHub Actions Run Logs
+                Open AWS EC2 Console ({results?.region ?? "us-east-1"})
                 <ExternalLink className="w-4 h-4" />
               </a>
-            )}
+              {latestRun?.html_url && (
+                <a
+                  href={latestRun.html_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="px-4 py-2.5 rounded-xl bg-white/10 hover:bg-white/20 border border-white/20 text-white text-xs font-bold flex items-center gap-2"
+                >
+                  View GitHub Actions Run Logs
+                  <ExternalLink className="w-4 h-4" />
+                </a>
+              )}
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {error && (
         <div className="rounded-2xl border border-rose-200 bg-rose-50/80 p-4 flex items-start gap-3 text-xs text-rose-800">

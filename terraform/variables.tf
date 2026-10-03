@@ -15,3 +15,15 @@ variable "project_name" {
   description = "Project identifier tag"
   default     = "TerraAgent-Adopted"
 }
+
+variable "instance_type" {
+  type        = string
+  description = "EC2 instance size"
+  default     = "t3.micro"
+}
+
+variable "instance_name" {
+  type        = string
+  description = "Name tag for the EC2 instance"
+  default     = "terraagent-ubuntu-ec2"
+}
