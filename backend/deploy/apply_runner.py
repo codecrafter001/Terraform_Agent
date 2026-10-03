@@ -324,6 +324,7 @@ async def apply_approved(deployment_id: str, routing_key: Optional[str] = None) 
                 applied_at=applied_at,
                 completed_at=applied_at,
                 outputs=outputs,
+                code_update=None,  # a code update (deploy/code_update.py) is complete once applied
             )
             await _publish_log(deployment_id, f"Deployment finished: DEPLOYED. Outputs: {json.dumps(outputs)}")
 

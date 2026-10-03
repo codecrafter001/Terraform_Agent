@@ -50,6 +50,15 @@ class GitHubSourceRequest(BaseModel):
         return check_environment(v)
 
 
+class GitHubUpdateRequest(BaseModel):
+    """New source for a deployed app from the GitHub repository it was deployed from."""
+    ref: Optional[str] = Field(default=None, description="Branch, tag or commit SHA; the originally deployed ref when empty")
+    github_token: Optional[SecretStr] = Field(
+        default=None,
+        description="Only for private repositories (Contents: Read-only). Used once for the download, never stored.",
+    )
+
+
 class StaticSiteSettings(BaseModel):
     price_class: Literal["PriceClass_100", "PriceClass_200", "PriceClass_All"] = "PriceClass_100"
     spa_mode: bool = False
@@ -280,6 +289,8 @@ class DeploymentDetail(DeploymentSummary):
     can_merge_pr: bool = False
     can_rollback: bool = False
     can_destroy: bool = False
+    can_update_code: bool = False
+    code_update: Optional[Dict[str, Any]] = None
 
 
 

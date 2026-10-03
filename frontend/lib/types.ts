@@ -821,6 +821,8 @@ export interface PlanSummary {
   };
   changes: PlanResourceChange[];
   is_destructive: boolean;
+  // backend/deploy/code_update.py::is_code_only - only the new source, image and task revision change
+  code_only?: boolean;
 }
 
 export interface PlanPolicyResult {
@@ -945,6 +947,15 @@ export interface DeploymentDetail extends DeploymentSummary {
   can_merge_pr?: boolean;
   can_rollback?: boolean;
   can_destroy?: boolean;
+  can_update_code?: boolean;
+  // backend/deploy/code_update.py: present while new code is being rolled out to this deployment
+  code_update?: {
+    active: boolean;
+    started_at: string;
+    requested_by: string | null;
+    previous_source_sha256: string | null;
+    previous_image_tag: string | null;
+  } | null;
 }
 
 export interface DeploymentAccepted {

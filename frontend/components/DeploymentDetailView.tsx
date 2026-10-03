@@ -21,6 +21,7 @@ import {
   ShieldCheck,
   Terminal,
   Trash2,
+  Upload,
   XCircle,
 } from "lucide-react";
 import {
@@ -35,6 +36,8 @@ import {
   planDestroyDeployment,
   prepareDeployment,
   rollbackDeployment,
+  updateDeploymentFromGithub,
+  updateDeploymentSource,
 } from "@/lib/api";
 import { IN_PROGRESS_STATUSES, TARGET_LABELS } from "@/lib/deployments";
 import { ApprovalCard, PlanCard } from "./DeploymentPlanApproval";
@@ -1097,6 +1100,90 @@ function OutputsCard({ outputs }: { outputs: Record<string, unknown> }) {
   );
 }
 
+/** DEPLOYED -> new source: same stack, target and settings; stops at approval. */
+function UpdateCodeCard({ dep, onStarted }: { dep: DeploymentDetail; onStarted: () => void }) {
+  const [file, setFile] = useState<File | null>(null);
+  const [ref, setRef] = useState("");
+  const [token, setToken] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const fromGithub = dep.source_kind === "github";
+
+  const start = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      if (fromGithub) {
+        await updateDeploymentFromGithub(dep.id, { ref: ref.trim() || undefined, github_token: token.trim() || undefined });
+      } else if (file) {
+        await updateDeploymentSource(dep.id, file);
+      }
+      onStarted();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not start the code update");
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="card p-5 space-y-4">
+      <SectionHeading
+        icon={Upload}
+        title="Deploy a new version"
+        description="Same AWS stack, target and settings. TerraAgent analyzes, builds, verifies and plans it on its own, then waits for your approval."
+      />
+      {fromGithub ? (
+        <div className="grid sm:grid-cols-2 gap-4">
+          <div className="space-y-1.5">
+            <label htmlFor="upd_ref" className="field-label">Branch, tag or commit</label>
+            <input id="upd_ref" type="text" className="field-input font-mono text-xs" placeholder={dep.source_name.split("@")[1] || "default branch"}
+              value={ref} onChange={(e) => setRef(e.target.value)} />
+          </div>
+          <div className="space-y-1.5">
+            <label htmlFor="upd_token" className="field-label">GitHub token (private repos only)</label>
+            <input id="upd_token" type="password" autoComplete="off" className="field-input text-xs" value={token}
+              onChange={(e) => setToken(e.target.value)} />
+            <p className="text-2xs text-slate-500">Used once for the download, never stored.</p>
+          </div>
+        </div>
+      ) : (
+        <div className="space-y-1.5">
+          <label htmlFor="upd_zip" className="field-label">New version (.zip)</label>
+          <input id="upd_zip" type="file" accept=".zip,application/zip" className="field-input text-xs"
+            onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
+        </div>
+      )}
+      <p className="text-2xs text-slate-500">
+        A code-only change usually takes 5–7 minutes from approval to live, with no downtime. If the new version needs
+        different infrastructure, the plan shows it before anything changes.
+      </p>
+      {error && <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-800">{error}</div>}
+      <button type="button" className="btn-primary" onClick={start} disabled={busy || (!fromGithub && !file)}>
+        {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
+        {fromGithub ? "Pull latest and plan" : "Upload and plan"}
+      </button>
+    </div>
+  );
+}
+
+function CodeUpdateBanner({ dep }: { dep: DeploymentDetail }) {
+  const update = dep.code_update;
+  if (!update) return null;
+  return (
+    <div className="p-3 rounded-xl bg-indigo-50 border border-indigo-200 text-xs text-indigo-900 flex items-start gap-2">
+      <Upload className="w-4 h-4 shrink-0 mt-0.5" />
+      <div>
+        <div className="font-semibold">Updating the deployed app to {dep.source_name}</div>
+        <div>
+          The live app keeps running the previous version
+          {update.previous_image_tag ? <> (<code className="font-mono">{update.previous_image_tag}</code>)</> : null} until
+          you approve and deploy this plan.
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // backend/deploy/templates/fullstack_app/outputs.tf::secrets_to_fill (names only, never values)
 function SecretsToFillCard({ outputs, region }: { outputs: Record<string, unknown>; region: string }) {
   const raw = outputs.secrets_to_fill;
@@ -1215,6 +1302,8 @@ export default function DeploymentDetailView({ id }: { id: string }) {
       {/* Active Step Actions (Prominently placed at top for fast execution) */}
       {dep.outputs && Object.keys(dep.outputs).length > 0 && <OutputsCard outputs={dep.outputs} />}
       {dep.outputs && <SecretsToFillCard outputs={dep.outputs} region={dep.region} />}
+      {dep.can_update_code && <UpdateCodeCard dep={dep} onStarted={reload} />}
+      {dep.code_update?.active && <CodeUpdateBanner dep={dep} />}
       {dep.pr && <PullRequestStatusCard dep={dep} onStarted={reload} />}
       {dep.can_deploy && (
         <div className="grid lg:grid-cols-2 gap-5 items-start">

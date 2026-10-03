@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional, Set
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
 from sse_starlette.sse import EventSourceResponse
 
+from deploy import code_update
 from deploy.artifacts import get_artifact_store
 from deploy.config import MAX_UPLOAD_BYTES, SOURCE_RETENTION_DAYS
 from deploy.source_intake import IntakeError, download_github_archive, is_zip
@@ -44,6 +45,7 @@ from models.deployment import (
     DeploymentEventResponse,
     DeploymentSummary,
     GitHubSourceRequest,
+    GitHubUpdateRequest,
     MergePullRequestRequest,
     PlanRequest,
     PrepareRequest,
@@ -222,6 +224,65 @@ async def github_source(request: Request, body: GitHubSourceRequest) -> Deployme
                               message="Repository downloaded; analysis started")
 
 
+def _start_code_update(request: Request, deployment_id: str, data: bytes, source_name: str) -> DeploymentAccepted:
+    tenant = current_tenant(request)
+    dep = get_deployment(deployment_id, tenant_id=tenant)
+    if not dep:
+        raise HTTPException(status_code=404, detail="Deployment not found")
+    if not code_update.can_update_code(dep):
+        raise HTTPException(status_code=409, detail=f"New code can be deployed only to a deployed app (this one is {dep['status']})")
+    stored = get_artifact_store().put_bytes(data)
+    user = current_user(request) or "api"
+    try:
+        code_update.start(dep, stored, source_name, actor=user)
+    except InvalidTransition:
+        raise HTTPException(status_code=409, detail="The deployment changed state; reload and try again")
+    record_artifact(deployment_id, "source", stored, sensitive=True, retention_days=SOURCE_RETENTION_DAYS)
+    _dispatch("analyze", deployment_id)
+    return DeploymentAccepted(
+        deployment_id=deployment_id, status=DeployStatus.SOURCE_RECEIVED.value,
+        message="New code received: analyze, build, verify and plan run automatically, then the plan waits for approval",
+    )
+
+
+@router.post("/{deployment_id}/update-source", response_model=DeploymentAccepted, status_code=status.HTTP_202_ACCEPTED)
+@limiter.limit("30/hour")
+async def update_source(request: Request, deployment_id: str,
+                        file: UploadFile = File(..., description="A .zip of the new version")) -> DeploymentAccepted:
+    """Deploy new code to an already-deployed app: same stack, target and settings."""
+    data = await file.read(MAX_UPLOAD_BYTES + 1)
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail=f"The upload is larger than {MAX_UPLOAD_BYTES // (1024 * 1024)} MB")
+    if not is_zip(data):
+        raise HTTPException(status_code=422, detail="The upload is not a ZIP archive")
+    name = (file.filename or "upload.zip").replace("\\", "/").rsplit("/", 1)[-1][:200]
+    return _start_code_update(request, deployment_id, data, name)
+
+
+@router.post("/{deployment_id}/update-source/github", response_model=DeploymentAccepted, status_code=status.HTTP_202_ACCEPTED)
+@limiter.limit("30/hour")
+async def update_source_github(request: Request, deployment_id: str, body: GitHubUpdateRequest) -> DeploymentAccepted:
+    """Re-download the GitHub repository a deployed app came from and deploy it."""
+    dep = get_deployment(deployment_id, tenant_id=current_tenant(request))
+    if not dep:
+        raise HTTPException(status_code=404, detail="Deployment not found")
+    if dep.get("source_kind") != "github":
+        raise HTTPException(status_code=422, detail="This deployment wasn't created from GitHub; upload a ZIP instead")
+    repo, _, deployed_ref = dep["source_name"].partition("@")
+    ref = body.ref or deployed_ref or None
+    token = body.github_token.get_secret_value() if body.github_token else None
+    try:
+        data = await download_github_archive(repo, ref, token)
+    except IntakeError as e:
+        raise HTTPException(status_code=422, detail=CredentialScrubber.scrub_text(str(e)))
+    except Exception as e:
+        logger.warning(f"GitHub download failed for {repo}: {CredentialScrubber.scrub_text(str(e))}")
+        raise HTTPException(status_code=502, detail="Could not download the repository from GitHub; try again")
+    if not is_zip(data):
+        raise HTTPException(status_code=502, detail="GitHub did not return a ZIP archive")
+    return _start_code_update(request, deployment_id, data, f"{repo}@{ref}" if ref else repo)
+
+
 @router.get("", response_model=List[DeploymentSummary])
 async def get_deployments(limit: int = 50, request: Request = None) -> List[DeploymentSummary]:
     tenant = current_tenant(request)
@@ -245,8 +306,12 @@ async def get_deployment_detail(deployment_id: str, request: Request = None) -> 
     dep = get_deployment(deployment_id, tenant_id=tenant)
     if not dep:
         raise HTTPException(status_code=404, detail="Deployment not found")
+    update = dep.get("code_update")
     return DeploymentDetail(
-        **{k: v for k, v in dep.items() if k != "rendered"},
+        **{k: v for k, v in dep.items() if k not in ("rendered", "code_update")},
+        # The previous release's full verification is kept server-side for reuse only.
+        code_update={k: v for k, v in update.items() if k != "previous_verification"} if update else None,
+        can_update_code=code_update.can_update_code(dep),
         rendered_files=sorted((dep.get("rendered") or {}).keys()),
         events=[DeploymentEventResponse(**e) for e in list_events(deployment_id, tenant_id=tenant)],
         can_prepare=_can_prepare(dep),

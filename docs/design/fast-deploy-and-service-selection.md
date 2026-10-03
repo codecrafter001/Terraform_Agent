@@ -72,7 +72,7 @@ reaches TerraAgent, the plan or the state.
 | Phase | Scope | Effort | Status |
 |---|---|---|---|
 | 1. Speed quick wins | #1–4, #7 | 1–2 days | Done (see below) |
-| 2. Fast code redeploy | #5 | 2–3 days | |
+| 2. Fast code redeploy | #5 | 2–3 days | Done (see below) |
 | 3. Service selection UI | Presets, frontend/compute/DB choices, live estimate, #6 | 3–4 days | |
 | 4. New services | Aurora Serverless v2, cache, S3 uploads, worker, domain, autoscaling | 5–7 days | |
 | 5. Hardening | #8, #9, CloudFormation bootstrap mirror, sandbox end-to-end run per service | 2–3 days | |
@@ -97,3 +97,29 @@ reaches TerraAgent, the plan or the state.
 - **#7** `-parallelism=20` on the deployment plan and on the pinned apply argv
   (`APPLY_ARGV_COMMON`). `-refresh=false` was dropped from the plan: a first plan has no state
   to refresh, so it would save nothing.
+
+### Phase 2 as built
+
+- `deploy/code_update.py`; API `POST /deployments/{id}/update-source` (ZIP) and
+  `POST /deployments/{id}/update-source/github` (re-downloads the repo the deployment came from;
+  token used once, never stored); UI card "Deploy a new version" on deployed apps.
+- Allowed from DEPLOYED, or from FAILED/REJECTED/EXPIRED when `applied_at` shows a stack exists.
+  The update keeps the deployment id (so the same Terraform state and resource names), target,
+  settings, AWS account and outputs, clears the previous plan and approval, and stores
+  `code_update` (previous source/image/`.tf` fingerprint/verification) in the new
+  `code_update_json` column (added automatically by `init_db`).
+- The pipeline chains analyze -> build -> verify -> plan with no clicks and stops at
+  AWAITING_APPROVAL; approval and `apply_approved` are unchanged. If the new source is no
+  longer eligible for the deployed target, it fails before building (nothing changes in AWS).
+- Verification is reused when the rendered `.tf` files are byte-identical to the deployed
+  release's (a code change only touches `terraform.tfvars.json`) and that verification didn't fail.
+- A plan whose changes are only `aws_s3_object.source`, `aws_codebuild_project.builder`
+  (update), `aws_ecs_task_definition.app` (update/replace) and `aws_ecs_service.app` (update) is
+  `plan_summary.code_only`; it is not marked destructive (a task definition is a new ECS
+  revision) and the approval card says so. Anything else in the plan keeps the normal rules.
+- Apply clears `code_update`. Known behaviour: the apply updates the service to the new image
+  tag while CodeBuild is still building it; the old tasks keep serving (ECS drains them only
+  when new tasks are healthy) and CodeBuild's force-new-deployment rolls the service once the
+  image is pushed.
+- Not yet: destroying a stack whose code update failed (destroy still requires DEPLOYED,
+  FAILED_PARTIAL or NEEDS_RECONCILIATION); retrying the update works.

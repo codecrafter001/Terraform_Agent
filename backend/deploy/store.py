@@ -29,6 +29,7 @@ _JSON_FIELDS = (
     "plan_policy",
     "outputs",
     "pr",
+    "code_update",
 )
 
 
@@ -72,13 +73,13 @@ TRANSITIONS: Dict[DeployStatus, frozenset] = {
     S.MERGED: frozenset({S.PLANNING}),
     S.APPLYING: frozenset({S.DEPLOYED, S.FAILED_PARTIAL, S.NEEDS_RECONCILIATION}),
     S.DESTROYING: frozenset({S.DESTROYED, S.FAILED_PARTIAL, S.NEEDS_RECONCILIATION, S.FAILED}),
-    S.DEPLOYED: frozenset({S.PLANNING, S.DESTROY_PLANNING}),
+    S.DEPLOYED: frozenset({S.PLANNING, S.DESTROY_PLANNING, S.SOURCE_RECEIVED}),
     S.DESTROYED: frozenset(),
     S.FAILED_PARTIAL: frozenset({S.PLANNING, S.DESTROY_PLANNING}),
     S.NEEDS_RECONCILIATION: frozenset({S.PLANNING, S.DESTROY_PLANNING}),
-    S.REJECTED: frozenset({S.BUILDING, S.PLANNING}),
-    S.EXPIRED: frozenset({S.PLANNING}),
-    S.FAILED: frozenset({S.BUILDING, S.PLANNING}),
+    S.REJECTED: frozenset({S.BUILDING, S.PLANNING, S.SOURCE_RECEIVED}),
+    S.EXPIRED: frozenset({S.PLANNING, S.SOURCE_RECEIVED}),
+    S.FAILED: frozenset({S.BUILDING, S.PLANNING, S.SOURCE_RECEIVED}),
 }
 IN_PROGRESS = frozenset({S.SOURCE_RECEIVED, S.ANALYZING, S.BUILDING, S.VERIFYING, S.PLANNING, S.APPLYING, S.DESTROY_PLANNING, S.DESTROYING})
 TERMINAL = frozenset({S.ANALYZED, S.DEPLOYED, S.DESTROYED, S.MERGED, S.FAILED_PARTIAL, S.NEEDS_RECONCILIATION, S.REJECTED, S.EXPIRED, S.FAILED})
@@ -145,6 +146,7 @@ def _set_fields(rec: Any, fields: Dict[str, Any]) -> None:
             "target_id",
             "verdict",
             "error",
+            "source_name",
             "source_sha256",
             "source_artifact_id",
             "plan_bundle_sha256",

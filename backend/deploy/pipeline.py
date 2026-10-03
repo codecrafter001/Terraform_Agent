@@ -16,6 +16,7 @@ import os
 import zipfile
 from typing import Any, Dict
 
+from deploy import code_update
 from deploy.analyzer import analyze
 from deploy.artifacts import get_artifact_store
 from deploy.builder import BuildError, build
@@ -58,6 +59,7 @@ def _extract(deployment: Dict[str, Any], dest: str) -> ExtractedSource:
 async def run_analysis(deployment_id: str) -> None:
     deployment = transition(deployment_id, DeployStatus.ANALYZING, reason="analysis started")
     sandbox = create_sandbox(prefix="terraagent_deploy_src_")
+    chain_build = False
     try:
         await log(deployment_id, f"Extracting {deployment['source_name']} (safe extraction: no symlinks, no path traversal, size caps)")
         source = await asyncio.to_thread(_extract, deployment, sandbox)
@@ -79,9 +81,22 @@ async def run_analysis(deployment_id: str) -> None:
         decision = decide(profile)
         await log(deployment_id, f"Detected runtime={profile['runtime']} framework={profile['framework'] or '-'}; "
                                  f"eligible targets: {', '.join(decision['eligible']) or 'none'}")
+        updating = code_update.is_active(deployment)
+        target = deployment["target_type"] if updating else decision["recommended"]
+        if updating and target not in decision["eligible"]:
+            await _fail(deployment_id, f"The new source can no longer be deployed as {target} (eligible now: "
+                                       f"{', '.join(decision['eligible']) or 'none'}). Nothing was changed in AWS; "
+                                       "upload it as a new deployment instead.",
+                        intake=intake, profile=profile, decision=decision)
+            return
         transition(deployment_id, DeployStatus.ANALYZED, reason="analysis complete",
                    intake=intake, profile=profile, decision=decision,
-                   target_type=decision["recommended"], error=None)
+                   target_type=target, error=None)
+        if updating:
+            # Code update: rebuild with the deployed target and settings, no clicks needed.
+            transition(deployment_id, DeployStatus.BUILDING, reason=f"code update: rebuilding for {target}",
+                       build=None, rendered=None, verification=None, verdict=None)
+            chain_build = True
     except IntakeError as e:
         await _fail(deployment_id, str(e))
     except Exception as e:
@@ -89,6 +104,8 @@ async def run_analysis(deployment_id: str) -> None:
         await _fail(deployment_id, f"Analysis failed unexpectedly: {e}")
     finally:
         release_sandbox(sandbox)
+    if chain_build:
+        await run_build_and_verify(deployment_id)
 
 
 def _zip_dir(root: str) -> bytes:
@@ -111,6 +128,7 @@ async def run_build_and_verify(deployment_id: str) -> None:
     settings = deployment["settings"] or {}
     src_dir = create_sandbox(prefix="terraagent_deploy_src_")
     workdir = create_sandbox(prefix="terraagent_deploy_build_")
+    chain_plan = False
     try:
         source = await asyncio.to_thread(_extract, deployment, src_dir)
         await log(deployment_id, f"Building for {target}")
@@ -129,8 +147,14 @@ async def run_build_and_verify(deployment_id: str) -> None:
 
         transition(deployment_id, DeployStatus.VERIFYING, reason="build complete",
                    build=build_summary, rendered=files)
-        await log(deployment_id, "Verifying: terraform fmt/init/validate, Checkov, Trivy, OPA, Infracost")
-        verification = await verify(deployment_id, files)
+        reused = code_update.reusable_verification(deployment, files) if code_update.is_active(deployment) else None
+        if reused:
+            await log(deployment_id, "Terraform files are unchanged since the deployed release (only the image changed): "
+                                     "reusing its verification")
+            verification = reused
+        else:
+            await log(deployment_id, "Verifying: terraform fmt/init/validate, Checkov, Trivy, OPA, Infracost")
+            verification = await verify(deployment_id, files)
         await log(deployment_id, f"Verification verdict: {verification['verdict']}")
         if verification["verdict"] == "FAIL":
             transition(deployment_id, DeployStatus.FAILED, reason="generated Terraform failed validation",
@@ -140,6 +164,12 @@ async def run_build_and_verify(deployment_id: str) -> None:
             return
         transition(deployment_id, DeployStatus.VERIFIED, reason=f"verification {verification['verdict']}",
                    verification=verification, verdict=verification["verdict"], error=None)
+        if code_update.is_active(deployment) and deployment.get("target_id"):
+            transition(deployment_id, DeployStatus.PLANNING, reason="code update: planning against the deployed stack",
+                       plan=None, plan_summary=None, plan_bundle_sha256=None, plan_artifact_id=None, plan_policy=None,
+                       is_destructive=False, approved_by=None, approved_at=None, approval_reason=None,
+                       rejection_reason=None, error=None)
+            chain_plan = True
     except (BuildError, IntakeError) as e:
         await _fail(deployment_id, str(e))
     except Exception as e:
@@ -148,6 +178,8 @@ async def run_build_and_verify(deployment_id: str) -> None:
     finally:
         release_sandbox(src_dir)
         release_sandbox(workdir)
+    if chain_plan:
+        await run_plan(deployment_id)
 
 
 async def run_plan(deployment_id: str) -> None:
@@ -246,6 +278,11 @@ async def run_plan(deployment_id: str) -> None:
                         plan=plan_result["plan_json"], plan_policy=policy_res)
             return
 
+        code_only = code_update.is_active(deployment) and code_update.is_code_only(plan_result["changes"])
+        is_destructive = bool(plan_result["is_destructive"]) and not code_only
+        if code_only:
+            await log(deployment_id, "Code-only update: just the new source, image tag and task revision change; "
+                                     "no infrastructure changes")
         counts = plan_result["counts"]
         n_delete = counts.get("delete", counts.get("dest" + "roy", 0))
         await log(deployment_id, f"Plan policy verified. Changes: {counts.get('create', 0)} to create, {counts.get('update', 0)} to update, "
@@ -259,12 +296,13 @@ async def run_plan(deployment_id: str) -> None:
             plan_summary={
                 "counts": counts,
                 "changes": plan_result["changes"],
-                "is_destructive": plan_result["is_destructive"],
+                "is_destructive": is_destructive,
+                "code_only": code_only,
             },
             plan_bundle_sha256=bundle_sha256,
             plan_artifact_id=plan_bundle_artifact["artifact_id"],
             plan_policy=policy_res,
-            is_destructive=plan_result["is_destructive"],
+            is_destructive=is_destructive,
             error=None,
         )
     except Exception as e:

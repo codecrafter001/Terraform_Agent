@@ -324,6 +324,9 @@ templates in `deploy/templates/` copied verbatim; every value only via `terrafor
 `apply_approved` (`backend/deploy/apply_runner.py`: the only apply path, strictly on `deploy_apply`
 queue with `TERRAAGENT_DEPLOY_ENABLED=true`, verifying plan bundle SHA-256 matches approval).
 - Status changes only through `deploy/store.py::transition` (writes a `deployment_events` row).
+- Code updates (`deploy/code_update.py`, `POST /deployments/{id}/update-source[/github]`): new source for a deployed
+  stack reuses its id, state, target and settings; the pipeline chains to AWAITING_APPROVAL by itself (approval and
+  `apply_approved` unchanged); source-only plans are `plan_summary.code_only` and not destructive.
 - Celery tasks (`deploy.plan` on `deploy_plan`, `deploy.apply` on `deploy_apply`) take a deployment id only — never credentials,
   tokens or source content. A GitHub token is used inside the request handler and dropped.
 - `TerraformRunner.check_argv` is never widened (a test pins it). Apply runs strictly through `check_apply_argv`.
