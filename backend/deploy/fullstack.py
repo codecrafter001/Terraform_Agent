@@ -98,13 +98,33 @@ class MigrationInfo(TypedDict):
     evidence: List[Evidence]
 
 
+class AddonInfo(TypedDict):
+    evidence: List[Evidence]
+
+
+class WorkerInfo(TypedDict):
+    command: List[str]  # one of the fixed forms in _worker(), run in a second ECS service
+    evidence: List[Evidence]
+
+
 class FullstackLayout(TypedDict):
     backend: BackendInfo
     frontend: Optional[FrontendInfo]
     database: Optional[DatabaseInfo]
     migration: Optional[MigrationInfo]
+    cache: Optional[AddonInfo]  # the backend talks to Redis/Valkey
+    object_storage: Optional[AddonInfo]  # the backend stores files in S3
+    worker: Optional[WorkerInfo]  # a background worker process
     env_keys: List[str]
     warnings: List[str]
+
+
+NODE_CACHE_DEPS = ("redis", "ioredis", "bull", "bullmq", "@redis/client", "connect-redis", "rate-limit-redis")
+PY_CACHE_DEPS = ("redis", "django-redis", "rq", "celery", "flask-caching", "aioredis")
+NODE_S3_DEPS = ("multer-s3", "@aws-sdk/client-s3", "@aws-sdk/lib-storage", "aws-sdk", "s3-upload-stream")
+PY_S3_DEPS = ("boto3", "django-storages", "aioboto3", "s3fs")
+WORKER_SCRIPTS = ("worker", "start:worker", "worker:start", "queue", "jobs")
+_PY_CELERY_APP = re.compile(r"(?m)^(\w+)\s*=\s*Celery\(")
 
 
 # package.json scripts that apply a schema, most specific first.
@@ -354,11 +374,48 @@ def detect(root: str, paths: List[str], sizes: Dict[str, int], root_profile: Pro
     if database:
         warnings.extend(database["warnings"])
     migration = _migration(root, backend, paths) if database and database["rds_supported"] else None
+    deps = {d.lower() for d in backend["profile"]["dependencies"]}
+    manifest = (f"{backend['dir']}/" if backend["dir"] else "") + (backend["profile"]["dependency_manifest"] or "package.json")
+    node = backend["runtime"] == "node"
+    cache_dep = next((d for d in (NODE_CACHE_DEPS if node else PY_CACHE_DEPS) if d in deps), None)
+    s3_dep = next((d for d in (NODE_S3_DEPS if node else PY_S3_DEPS) if d in deps), None)
     layout: FullstackLayout = {
         "backend": backend, "frontend": frontend, "database": database, "migration": migration,
+        "cache": {"evidence": [{"file": manifest, "rule": f"cache.dep.{cache_dep}"}]} if cache_dep else None,
+        "object_storage": {"evidence": [{"file": manifest, "rule": f"s3.dep.{s3_dep}"}]} if s3_dep else None,
+        "worker": _worker(root, backend, paths),
         "env_keys": env_keys, "warnings": warnings,
     }
     return layout
+
+
+def _worker(root: str, backend: BackendInfo, paths: List[str]) -> Optional[WorkerInfo]:
+    """The background worker command, as one of a few fixed forms - never a command
+    string taken from the project."""
+    prefix = backend["dir"]
+    rel = (lambda f: f"{prefix}/{f}" if prefix else f)
+    tree = _Tree(root, paths, {})
+    if backend["runtime"] == "node":
+        try:
+            pkg = json.loads(tree.read(rel("package.json")) or "{}")
+        except json.JSONDecodeError:
+            return None
+        scripts = pkg.get("scripts") if isinstance(pkg, dict) and isinstance(pkg.get("scripts"), dict) else {}
+        for name in WORKER_SCRIPTS:
+            if name in scripts and _SCRIPT_NAME.match(name):
+                return {"command": ["npm", "run", name], "evidence": [{"file": rel("package.json"), "rule": f"worker.script.{name}"}]}
+        return None
+    deps = {d.lower() for d in backend["profile"]["dependencies"]}
+    if "celery" in deps:
+        for path in sorted(p for p in paths if p.endswith(".py") and (not prefix or p.startswith(prefix + "/"))):
+            if m := _PY_CELERY_APP.search(tree.read(path) or ""):
+                module = (path[len(prefix) + 1:] if prefix else path)[:-3].replace("/", ".")
+                if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]{0,200}", module):
+                    return {"command": ["celery", "-A", f"{module}:{m.group(1)}", "worker", "--loglevel=INFO"],
+                            "evidence": [{"file": path, "rule": "worker.celery_app"}]}
+    if "rq" in deps:
+        return {"command": ["rq", "worker"], "evidence": [{"file": rel(backend["profile"]["dependency_manifest"] or "requirements.txt"), "rule": "worker.rq"}]}
+    return None
 
 
 def _root_has_build_script(root: str, paths: List[str]) -> bool:

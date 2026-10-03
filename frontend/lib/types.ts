@@ -699,6 +699,9 @@ export interface FullstackLayout {
     evidence: DeployEvidence[];
   } | null;
   migration: { command: string[]; evidence: DeployEvidence[] } | null;
+  cache?: { evidence: DeployEvidence[] } | null;
+  object_storage?: { evidence: DeployEvidence[] } | null;
+  worker?: { command: string[]; evidence: DeployEvidence[] } | null;
   env_keys: string[];
   warnings: string[];
 }
@@ -783,7 +786,7 @@ export interface EcsSettings {
 }
 
 // backend/models/deployment.py::FullstackSettings
-export type FullstackDatabaseMode = 'rds' | 'external' | 'none';
+export type FullstackDatabaseMode = 'rds' | 'aurora' | 'external' | 'none';
 export type FullstackPreset = 'dev' | 'staging' | 'production';
 export interface FullstackSettings {
   preset?: FullstackPreset | null;
@@ -800,6 +803,15 @@ export interface FullstackSettings {
   db_multi_az: boolean;
   db_backup_retention_days: number;
   db_final_snapshot: boolean;
+  aurora_min_acu: number;
+  aurora_max_acu: number;
+  // Add-ons: null follows what the analyzer detected.
+  cache: 'valkey' | 'none' | null;
+  cache_max_gb: number;
+  uploads_bucket: boolean | null;
+  worker_enabled: boolean | null;
+  autoscaling_max_count: number | null;
+  autoscaling_cpu_target: number;
   run_migrations: boolean;
   secret_env_keys: string[];
 }
@@ -817,7 +829,7 @@ export interface DeploymentEstimate {
 export type FullstackPresetValues = Pick<
   FullstackSettings,
   'cdn_enabled' | 'cpu' | 'memory_mb' | 'desired_count' | 'db_instance_class' | 'db_allocated_storage_gb' |
-  'db_multi_az' | 'db_backup_retention_days' | 'db_final_snapshot'
+  'db_multi_az' | 'db_backup_retention_days' | 'db_final_snapshot' | 'autoscaling_max_count'
 >;
 
 export interface DeploymentEstimateResponse {

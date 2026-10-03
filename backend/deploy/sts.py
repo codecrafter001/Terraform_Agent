@@ -106,6 +106,7 @@ _PLAN_READ_ACTIONS = [
     "elasticloadbalancing:Describe*", "codebuild:BatchGet*", "codebuild:List*",
     "codepipeline:Get*", "codepipeline:List*", "events:Describe*", "events:List*",
     "rds:Describe*", "rds:ListTagsForResource", "secretsmanager:DescribeSecret", "secretsmanager:GetResourcePolicy",
+    "elasticache:Describe*", "elasticache:List*", "application-autoscaling:Describe*",
 ]
 
 
@@ -143,7 +144,7 @@ def apply_session_policy(state_bucket: str, target_id: str, deployment_id: str) 
       security-group rules (always under a tag-checked group), and the RDS-managed
       database secret (create/tag/rotate/delete - never read)."""
     tag = "terraagent:deployment-id"
-    tagged_services = ["ec2:*", "cloudfront:*", "ecs:*", "apigateway:*"]
+    tagged_services = ["ec2:*", "cloudfront:*", "ecs:*", "apigateway:*", "application-autoscaling:*"]
     policy = jsonencode_policy({
         "Version": "2012-10-17",
         "Statement": [
@@ -157,7 +158,8 @@ def apply_session_policy(state_bucket: str, target_id: str, deployment_id: str) 
             {"Sid": "Read", "Effect": "Allow", "Resource": "*",
              "Action": ["ec2:Describe*", "ecs:Describe*", "ecs:List*", "ecs:DeregisterTaskDefinition",
                         "elasticloadbalancing:Describe*", "rds:Describe*", "cloudfront:Get*", "cloudfront:List*",
-                        "cloudfront:Describe*", "cloudfront:*OriginAccessControl", "kms:DescribeKey"]},
+                        "cloudfront:Describe*", "cloudfront:*OriginAccessControl", "kms:DescribeKey",
+                        "elasticache:Describe*", "application-autoscaling:Describe*"]},
             {"Sid": "Helpers", "Effect": "Allow", "Action": ["ec2:*SecurityGroup*", "iam:CreateServiceLinkedRole",
                                                               "secretsmanager:CreateSecret", "secretsmanager:TagResource",
                                                               "secretsmanager:RotateSecret", "secretsmanager:DeleteSecret",

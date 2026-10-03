@@ -50,17 +50,32 @@ def _container_vars(settings: Dict[str, Any], build: BuildResult) -> Dict[str, A
     }
 
 
+# Environment variables the stack itself sets when an add-on is on: never asked for as secrets.
+CACHE_ENV = {"REDIS_URL", "REDIS_HOST", "REDIS_PORT", "REDIS_TLS", "CACHE_URL", "VALKEY_URL"}
+UPLOADS_ENV = {"S3_BUCKET", "S3_BUCKET_NAME", "UPLOADS_BUCKET", "BUCKET_NAME", "S3_UPLOADS_BUCKET"}
+
+
+def _addon(setting: Any, detected: Any) -> bool:
+    """None follows detection; an explicit value overrides it."""
+    return bool(detected) if setting is None else bool(setting)
+
+
 def _fullstack_vars(settings: Dict[str, Any], profile: Dict[str, Any]) -> Dict[str, Any]:
     layout = profile.get("fullstack") or {}
     backend = layout.get("backend") or {}
     frontend = layout.get("frontend")
     db = layout.get("database")
     mode = settings.get("database") or ("rds" if db and db.get("rds_supported") else "none")
-    if mode == "rds" and not (db and db.get("rds_supported")):
-        raise ValueError("an RDS database needs a detected PostgreSQL or MySQL driver")
-    engine = (db or {}).get("engine") if mode == "rds" else None
+    if mode in ("rds", "aurora") and not (db and db.get("rds_supported")):
+        raise ValueError("an RDS or Aurora database needs a detected PostgreSQL or MySQL driver")
+    engine = (db or {}).get("engine") if mode in ("rds", "aurora") else None
+    cache = _addon(None if settings.get("cache") is None else settings.get("cache") == "valkey", layout.get("cache"))
+    uploads = _addon(settings.get("uploads_bucket"), layout.get("object_storage"))
+    worker = layout.get("worker") if _addon(settings.get("worker_enabled"), layout.get("worker")) else None
+    desired = int(settings.get("desired_count", 1))
     keys = settings.get("secret_env_keys")
-    secret_keys = sorted(set((layout.get("env_keys") or []) if keys is None else keys))
+    provided = (CACHE_ENV if cache else set()) | (UPLOADS_ENV if uploads else set())
+    secret_keys = sorted(set((layout.get("env_keys") or []) if keys is None else keys) - provided)
     if mode == "external" and "DATABASE_URL" not in secret_keys:
         secret_keys = sorted([*secret_keys, "DATABASE_URL"])
     committed_output = bool(frontend) and not frontend.get("build_required")
@@ -75,6 +90,15 @@ def _fullstack_vars(settings: Dict[str, Any], profile: Dict[str, Any]) -> Dict[s
         "api_strip_prefix": bool(frontend) and not backend.get("uses_api_prefix", False),
         "price_class": settings.get("price_class", "PriceClass_100"),
         "database_engine": engine,
+        "database_kind": "aurora" if mode == "aurora" else "rds",
+        "aurora_min_acu": float(settings.get("aurora_min_acu", 0.5)),
+        "aurora_max_acu": float(settings.get("aurora_max_acu", 4)),
+        "cache_enabled": cache,
+        "cache_max_gb": int(settings.get("cache_max_gb", 1)),
+        "uploads_bucket_enabled": uploads,
+        "worker_command": list(worker["command"]) if worker else [],
+        "autoscaling_max_count": max(desired, int(settings.get("autoscaling_max_count") or desired)),
+        "autoscaling_cpu_target": int(settings.get("autoscaling_cpu_target", 60)),
         "database_url_scheme": (db or {}).get("url_scheme") if engine else None,
         "db_instance_class": settings.get("db_instance_class", "db.t4g.micro"),
         "db_allocated_storage_gb": int(settings.get("db_allocated_storage_gb", 20)),

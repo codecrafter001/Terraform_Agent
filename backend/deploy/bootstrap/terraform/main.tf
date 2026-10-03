@@ -254,7 +254,10 @@ resource "aws_iam_role_policy" "plan_policy" {
           "rds:Describe*",
           "rds:ListTagsForResource",
           "secretsmanager:DescribeSecret",
-          "secretsmanager:GetResourcePolicy"
+          "secretsmanager:GetResourcePolicy",
+          "elasticache:Describe*",
+          "elasticache:List*",
+          "application-autoscaling:Describe*"
         ]
         Resource = "*"
       },
@@ -328,7 +331,8 @@ resource "aws_iam_role_policy" "apply_policy" {
           "elasticloadbalancing:*",
           "rds:*",
           "secretsmanager:*",
-          "cloudfront:*"
+          "cloudfront:*",
+          "elasticache:*"
         ]
         Resource = "arn:aws:*:*:*:*terraagent-*"
       },
@@ -344,7 +348,9 @@ resource "aws_iam_role_policy" "apply_policy" {
           "cloudfront:CreateDistribution",
           "cloudfront:CreateDistributionWithTags",
           "ecs:RegisterTaskDefinition",
-          "apigateway:POST"
+          "apigateway:POST",
+          "application-autoscaling:RegisterScalableTarget",
+          "application-autoscaling:TagResource"
         ]
         Resource = "*"
         Condition = {
@@ -378,7 +384,8 @@ resource "aws_iam_role_policy" "apply_policy" {
           "ec2:*",
           "cloudfront:*",
           "ecs:*",
-          "apigateway:*"
+          "apigateway:*",
+          "application-autoscaling:*"
         ]
         Resource = "*"
         Condition = {
@@ -402,7 +409,9 @@ resource "aws_iam_role_policy" "apply_policy" {
           "cloudfront:GetOriginAccessControl",
           "cloudfront:UpdateOriginAccessControl",
           "cloudfront:DeleteOriginAccessControl",
-          "kms:DescribeKey"
+          "kms:DescribeKey",
+          "elasticache:Describe*",
+          "application-autoscaling:Describe*"
         ]
         Resource = "*"
       },
@@ -420,7 +429,13 @@ resource "aws_iam_role_policy" "apply_policy" {
         Resource = "arn:aws:iam::*:role/aws-service-role/*"
         Condition = {
           StringEquals = {
-            "iam:AWSServiceName" = ["ecs.amazonaws.com", "elasticloadbalancing.amazonaws.com", "rds.amazonaws.com"]
+            "iam:AWSServiceName" = [
+              "ecs.amazonaws.com",
+              "elasticloadbalancing.amazonaws.com",
+              "rds.amazonaws.com",
+              "elasticache.amazonaws.com",
+              "ecs.application-autoscaling.amazonaws.com"
+            ]
           }
         }
       },

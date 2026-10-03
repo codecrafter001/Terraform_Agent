@@ -74,7 +74,7 @@ reaches TerraAgent, the plan or the state.
 | 1. Speed quick wins | #1–4, #7 | 1–2 days | Done (see below) |
 | 2. Fast code redeploy | #5 | 2–3 days | Done (see below) |
 | 3. Service selection UI | Presets, frontend/compute/DB choices, live estimate, #6 | 3–4 days | Done (see below) |
-| 4. New services | Aurora Serverless v2, cache, S3 uploads, worker, domain, autoscaling | 5–7 days | |
+| 4. New services | Aurora Serverless v2, cache, S3 uploads, worker, domain, autoscaling | 5–7 days | Done except custom domain (see below) |
 | 5. Hardening | #8, #9, CloudFormation bootstrap mirror, sandbox end-to-end run per service | 2–3 days | |
 
 ### Phase 1 as built
@@ -145,3 +145,34 @@ reaches TerraAgent, the plan or the state.
 - **Choices already covered elsewhere**: backend compute (ECS vs Lambda) is the target choice;
   database mode (RDS / external / none) and secrets came with the full-stack target. Overriding
   the detected frontend layout (e.g. forcing S3 hosting) is not offered yet.
+
+### Phase 4 as built
+
+- **Detection** (`deploy/fullstack.py`): `cache` (redis, ioredis, bull/bullmq, celery, django-redis...),
+  `object_storage` (multer-s3, @aws-sdk/client-s3, boto3, django-storages...) and `worker`
+  (fixed command forms only: `npm run worker|start:worker|worker:start|queue|jobs`,
+  `celery -A <module>:<app> worker`, `rq worker`).
+- **Settings**: add-ons are `None` = follow detection, or an explicit override; `database` gains
+  `aurora` (`aurora_min_acu` 0/0.5/1/2/4/8/16, `aurora_max_acu` 1-128); `autoscaling_max_count`
+  (empty = fixed count) and `autoscaling_cpu_target`. The Production preset scales 2 -> 4 tasks.
+  Variables an add-on provides (`REDIS_URL`, `S3_BUCKET`, ...) are dropped from the secrets.
+- **Template** (`fullstack_app`): Aurora Serverless v2 cluster + `db.serverless` instance
+  (PostgreSQL 16.6 / MySQL 3.08, `rds.force_ssl=0` like RDS, pauses after 5 idle minutes at
+  0 ACU; the services wait for the instance); ElastiCache Serverless for Valkey 8 in the private
+  subnets (TLS, `REDIS_URL=rediss://...`); a versioned private uploads bucket with a task-role
+  policy; a worker task definition and service from the same image (CodeBuild rolls it too,
+  and its revisions count as code-only updates); an autoscaling target + CPU target-tracking
+  policy that always exists (min = `desired_count`), with `ignore_changes = [desired_count]`
+  on the app service so applies don't undo scaling.
+- **Guardrails**: plan-policy allowlist (+6 types), `fullstack_app` limit 150 resources;
+  session policies gain `application-autoscaling:*` (tag-scoped) and read-only
+  ElastiCache/autoscaling describes (still under 2,048 characters); bootstrap apply role gains
+  namespaced `elasticache:*`, tag-scoped application autoscaling and the ElastiCache /
+  ECS-autoscaling service-linked roles; the plan role can describe both.
+- **Estimate**: Aurora at its minimum capacity + storage, Valkey's 100 MB minimum (~$6),
+  uploads, the worker task; notes for autoscaling headroom and Aurora pausing; the cache joins
+  the containers' critical path.
+- **Not done**: custom domain (Route 53 + ACM) - it needs write access to a customer-owned
+  hosted zone, which deserves its own scoping design (e.g. a session-policy condition on
+  `route53:ChangeResourceRecordSetsNormalizedRecordNames`). Aurora engine versions are pinned
+  and will need bumping as AWS retires them.

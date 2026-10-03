@@ -29,6 +29,8 @@ CODE_ONLY_CHANGES: Dict[str, frozenset] = {
     "aws_codebuild_project.builder": frozenset({"update"}),
     "aws_ecs_task_definition.app": frozenset({"update", "replace"}),
     "aws_ecs_service.app": frozenset({"update"}),
+    "aws_ecs_task_definition.worker[0]": frozenset({"update", "replace"}),
+    "aws_ecs_service.worker[0]": frozenset({"update"}),
 }
 
 # A code update may start from a deployed stack, or retry after the update itself

@@ -24,6 +24,10 @@ RDS_HOURLY = {  # single-AZ; PostgreSQL and MySQL are priced alike at these size
     "db.m7g.large": 0.168,
 }
 GP3_GB_MONTH = 0.115
+AURORA_ACU_HOUR = 0.12
+AURORA_GB_MONTH = 0.10
+VALKEY_SERVERLESS_MIN_MONTH = 0.084 * 0.1 * HOURS_PER_MONTH  # $0.084/GB-hour, 100 MB billed minimum
+S3_UPLOADS_MONTH = 1.0  # a few GB of objects and requests
 SECRET_MONTH = 0.40
 CLOUDFRONT_MONTH = 1.0  # small sites stay within the always-free 1 TB / 10M requests
 PIPELINE_LOGS_ECR_MONTH = 2.5  # CodeBuild minutes, CodePipeline, CloudWatch Logs, ECR storage
@@ -32,6 +36,8 @@ PIPELINE_LOGS_ECR_MONTH = 2.5  # CodeBuild minutes, CodePipeline, CloudWatch Log
 BASE_MINUTES = (3, 4)  # plan/apply overhead, VPC, IAM, S3, ECR, load balancer
 DB_MINUTES = (8, 12)
 DB_MULTI_AZ_MINUTES = (12, 18)
+AURORA_MINUTES = (12, 18)  # cluster, then its serverless instance
+CACHE_MINUTES = (5, 8)
 CDN_MINUTES = (4, 8)
 IMAGE_BUILD_MINUTES = (4, 7)
 FRONTEND_BUILD_MINUTES = (1, 3)
@@ -41,15 +47,15 @@ PRESETS: Dict[str, Dict[str, Any]] = {
     "dev": {
         "cdn_enabled": False, "cpu": 256, "memory_mb": 512, "desired_count": 1,
         "db_instance_class": "db.t4g.micro", "db_allocated_storage_gb": 20, "db_multi_az": False,
-        "db_backup_retention_days": 1, "db_final_snapshot": False,
+        "db_backup_retention_days": 1, "db_final_snapshot": False, "autoscaling_max_count": None,
     },
     "staging": {
         "cdn_enabled": True, "cpu": 256, "memory_mb": 512, "desired_count": 1,
         "db_instance_class": "db.t4g.micro", "db_allocated_storage_gb": 20, "db_multi_az": False,
-        "db_backup_retention_days": 3, "db_final_snapshot": False,
+        "db_backup_retention_days": 3, "db_final_snapshot": False, "autoscaling_max_count": None,
     },
     "production": {
-        "cdn_enabled": True, "cpu": 512, "memory_mb": 1024, "desired_count": 2,
+        "cdn_enabled": True, "cpu": 512, "memory_mb": 1024, "desired_count": 2, "autoscaling_max_count": 4,
         "db_instance_class": "db.t4g.small", "db_allocated_storage_gb": 20, "db_multi_az": False,
         "db_backup_retention_days": 7, "db_final_snapshot": True,
     },
@@ -57,7 +63,7 @@ PRESETS: Dict[str, Dict[str, Any]] = {
 PRESET_DESCRIPTIONS = {
     "dev": "Fastest and cheapest: no CloudFront (HTTP load-balancer URL), smallest sizes, 1-day backups.",
     "staging": "Like production at the smallest sizes: CloudFront HTTPS URL, 3-day backups.",
-    "production": "Two app tasks, a larger database, 7-day backups and a final snapshot on teardown.",
+    "production": "Two app tasks scaling to four, a larger database, 7-day backups and a final snapshot on teardown.",
 }
 
 
@@ -94,7 +100,14 @@ def estimate_fullstack(settings: Dict[str, Any], layout: Optional[Dict[str, Any]
     frontend = layout.get("frontend")
     db = layout.get("database")
     cdn = bool(settings.get("cdn_enabled", True) or frontend)
-    rds = settings.get("database", "rds") == "rds" and bool(db and db.get("rds_supported"))
+    mode = settings.get("database", "rds")
+    rds = mode == "rds" and bool(db and db.get("rds_supported"))
+    aurora = mode == "aurora" and bool(db and db.get("rds_supported"))
+    addon = (lambda value, detected: bool(detected) if value is None else bool(value))
+    cache = addon(None if settings.get("cache") is None else settings.get("cache") == "valkey", layout.get("cache"))
+    uploads = addon(settings.get("uploads_bucket"), layout.get("object_storage"))
+    worker = bool(layout.get("worker")) and addon(settings.get("worker_enabled"), layout.get("worker"))
+    max_tasks = max(int(settings.get("desired_count", 1)), int(settings.get("autoscaling_max_count") or 0))
     tasks = int(settings.get("desired_count", 1))
     vcpu = int(settings.get("cpu", 256)) / 1024
     gb = int(settings.get("memory_mb", 512)) / 1024
@@ -119,6 +132,19 @@ def estimate_fullstack(settings: Dict[str, Any], layout: Optional[Dict[str, Any]
                       "monthly_usd": factor * (RDS_HOURLY.get(db_class, RDS_HOURLY["db.t4g.micro"]) * HOURS_PER_MONTH
                                                + storage * GP3_GB_MONTH)})
         secrets += 1  # the RDS-managed password secret
+    if aurora:
+        min_acu = float(settings.get("aurora_min_acu", 0.5))
+        engine = "MySQL" if db and db.get("engine") == "mysql" else "PostgreSQL"
+        lines.append({"item": f"Aurora Serverless v2 {engine} ({min_acu:g}-{float(settings.get('aurora_max_acu', 4)):g} ACU, at minimum)",
+                      "monthly_usd": min_acu * AURORA_ACU_HOUR * HOURS_PER_MONTH + 20 * AURORA_GB_MONTH})
+        secrets += 1
+    if cache:
+        lines.append({"item": "Valkey cache (ElastiCache Serverless, minimum)", "monthly_usd": VALKEY_SERVERLESS_MIN_MONTH})
+    if uploads:
+        lines.append({"item": "S3 uploads bucket (light use)", "monthly_usd": S3_UPLOADS_MONTH})
+    if worker:
+        lines.append({"item": f"Background worker (1 x {vcpu:g} vCPU / {gb:g} GB) + public IPv4",
+                      "monthly_usd": (vcpu * FARGATE_VCPU_HOUR + gb * FARGATE_GB_HOUR) * HOURS_PER_MONTH + PUBLIC_IPV4_MONTH})
     if cdn:
         lines.append({"item": "CloudFront (light traffic)", "monthly_usd": CLOUDFRONT_MONTH})
     if secrets:
@@ -131,7 +157,9 @@ def estimate_fullstack(settings: Dict[str, Any], layout: Optional[Dict[str, Any]
     # CloudFront; the service starts once the database (if any) and the image exist; the
     # frontend is published once its distribution exists.
     image_ready = _add((1, 1), IMAGE_BUILD_MINUTES)
-    db_ready = (DB_MULTI_AZ_MINUTES if multi_az else DB_MINUTES) if rds else (0, 0)
+    db_ready = (DB_MULTI_AZ_MINUTES if multi_az else DB_MINUTES) if rds else AURORA_MINUTES if aurora else (0, 0)
+    if cache:  # the containers get REDIS_URL, so they wait for the cache too
+        db_ready = (max(db_ready[0], CACHE_MINUTES[0]), max(db_ready[1], CACHE_MINUTES[1]))
     service_path = _add((max(BASE_MINUTES[0], db_ready[0], image_ready[0]), max(BASE_MINUTES[1], db_ready[1], image_ready[1])),
                         SERVICE_HEALTHY_MINUTES)
     total = service_path
@@ -149,6 +177,11 @@ def estimate_fullstack(settings: Dict[str, Any], layout: Optional[Dict[str, Any]
         notes.append("CloudFront stays on: the separate frontend is served from a private S3 bucket through it.")
     if secrets:
         notes.append("The app starts once every secret has a value.")
+    if max_tasks > tasks:
+        notes.append(f"Autoscaling can add up to {max_tasks - tasks} more app task(s) under load; each costs about "
+                     f"${(vcpu * FARGATE_VCPU_HOUR + gb * FARGATE_GB_HOUR) * HOURS_PER_MONTH + PUBLIC_IPV4_MONTH:.0f}/month while running.")
+    if aurora and float(settings.get("aurora_min_acu", 0.5)) == 0:
+        notes.append("Aurora pauses after 5 idle minutes (no compute charge while paused); the first request after a pause waits ~15 s.")
     return {
         "monthly_usd": round(sum(line["monthly_usd"] for line in lines), 2),
         "lines": lines,

@@ -423,7 +423,7 @@ async def build_fullstack(source: ExtractedSource, profile: ProjectProfile, work
         raise BuildError("No server was found in this project, so it can't be deployed as a full-stack app.")
     backend = layout["backend"]
     db = layout.get("database")
-    with_db = bool(database_mode == "rds" and db and db.get("rds_supported"))
+    with_db = bool(database_mode in ("rds", "aurora") and db and db.get("rds_supported"))
     result = BuildResult(kind="fullstack_source", container_port=backend["port"])
     stage = os.path.join(workdir, ".build", "source")
     os.makedirs(stage, exist_ok=True)

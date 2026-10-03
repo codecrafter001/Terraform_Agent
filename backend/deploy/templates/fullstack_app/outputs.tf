@@ -40,7 +40,7 @@ output "frontend_bucket" {
 
 output "database_endpoint" {
   description = "Database host name (null without a database). The credentials are in database_secret_arn."
-  value       = local.db_enabled ? aws_db_instance.main[0].address : null
+  value       = local.db_address
 }
 
 output "database_secret_arn" {
@@ -56,4 +56,19 @@ output "secrets_to_fill" {
 output "vpc_id" {
   description = "The deployment's own VPC."
   value       = aws_vpc.main.id
+}
+
+output "cache_endpoint" {
+  description = "Valkey endpoint (null without a cache)."
+  value       = var.cache_enabled ? aws_elasticache_serverless_cache.main[0].endpoint[0].address : null
+}
+
+output "uploads_bucket" {
+  description = "S3 bucket for file uploads (null when disabled)."
+  value       = var.uploads_bucket_enabled ? aws_s3_bucket.uploads[0].bucket : null
+}
+
+output "worker_service_name" {
+  description = "ECS service running the background worker (null without one)."
+  value       = local.worker ? local.worker_name : null
 }

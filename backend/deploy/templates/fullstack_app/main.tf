@@ -29,9 +29,15 @@ locals {
   site_url    = local.cdn ? "https://${aws_cloudfront_distribution.app[0].domain_name}" : "http://${aws_lb.app.dns_name}"
   service_arn = "arn:${data.aws_partition.current.partition}:ecs:${var.region}:${data.aws_caller_identity.current.account_id}:service/${local.name}/${local.name}"
 
-  db_secret_arn    = local.db_enabled ? aws_db_instance.main[0].master_user_secret[0].secret_arn : null
-  env_secret_arns  = [for k in sort(var.secret_env_keys) : aws_secretsmanager_secret.env[k].arn]
-  readable_secrets = compact(concat(local.env_secret_arns, [local.db_secret_arn]))
+  rds                = local.db_enabled && var.database_kind == "rds"
+  aurora             = local.db_enabled && var.database_kind == "aurora"
+  worker             = length(var.worker_command) > 0
+  worker_name        = "${local.name}-worker"
+  db_address         = local.rds ? aws_db_instance.main[0].address : (local.aurora ? aws_rds_cluster.aurora[0].endpoint : null)
+  db_secret_arn      = local.rds ? aws_db_instance.main[0].master_user_secret[0].secret_arn : (local.aurora ? aws_rds_cluster.aurora[0].master_user_secret[0].secret_arn : null)
+  worker_service_arn = "arn:${data.aws_partition.current.partition}:ecs:${var.region}:${data.aws_caller_identity.current.account_id}:service/${local.name}/${local.worker_name}"
+  env_secret_arns    = [for k in sort(var.secret_env_keys) : aws_secretsmanager_secret.env[k].arn]
+  readable_secrets   = compact(concat(local.env_secret_arns, [local.db_secret_arn]))
 
   container_environment = concat(
     [
@@ -40,11 +46,22 @@ locals {
       { name = "NODE_ENV", value = "production" },
     ],
     local.db_enabled ? [
-      { name = "DB_HOST", value = aws_db_instance.main[0].address },
+      { name = "DB_HOST", value = local.db_address },
       { name = "DB_PORT", value = tostring(local.db_port) },
       { name = "DB_NAME", value = local.db_name },
       { name = "DB_URL_SCHEME", value = coalesce(var.database_url_scheme, var.database_engine == "postgres" ? "postgresql" : "mysql") },
       { name = "TERRAAGENT_RUN_MIGRATIONS", value = tostring(var.run_migrations) },
+    ] : [],
+    var.cache_enabled ? [
+      { name = "REDIS_URL", value = "rediss://${aws_elasticache_serverless_cache.main[0].endpoint[0].address}:${aws_elasticache_serverless_cache.main[0].endpoint[0].port}" },
+      { name = "REDIS_HOST", value = aws_elasticache_serverless_cache.main[0].endpoint[0].address },
+      { name = "REDIS_PORT", value = tostring(aws_elasticache_serverless_cache.main[0].endpoint[0].port) },
+      { name = "REDIS_TLS", value = "true" },
+    ] : [],
+    var.uploads_bucket_enabled ? [
+      { name = "S3_BUCKET", value = aws_s3_bucket.uploads[0].bucket },
+      { name = "UPLOADS_BUCKET", value = aws_s3_bucket.uploads[0].bucket },
+      { name = "AWS_REGION", value = var.region },
     ] : [],
   )
   container_secrets = concat(
@@ -306,7 +323,7 @@ resource "aws_db_subnet_group" "main" {
 # PostgreSQL 16 on RDS rejects non-TLS connections by default; most app drivers
 # don't trust the RDS CA out of the box, so TLS is optional inside the private VPC.
 resource "aws_db_parameter_group" "postgres" {
-  count  = var.database_engine == "postgres" ? 1 : 0
+  count  = local.rds && var.database_engine == "postgres" ? 1 : 0
   name   = local.name
   family = "postgres16"
 
@@ -317,7 +334,7 @@ resource "aws_db_parameter_group" "postgres" {
 }
 
 resource "aws_db_instance" "main" {
-  count                       = local.db_enabled ? 1 : 0
+  count                       = local.rds ? 1 : 0
   identifier                  = local.name
   engine                      = var.database_engine == "postgres" ? "postgres" : "mysql"
   engine_version              = var.database_engine == "postgres" ? "16" : "8.0"
@@ -341,6 +358,136 @@ resource "aws_db_instance" "main" {
   deletion_protection         = false
   skip_final_snapshot         = !var.db_final_snapshot
   final_snapshot_identifier   = "${local.name}-final"
+}
+
+# Aurora Serverless v2: capacity follows load between aurora_min_acu and
+# aurora_max_acu; with a minimum of 0 the cluster pauses after 5 idle minutes.
+resource "aws_rds_cluster_parameter_group" "aurora_postgres" {
+  count  = local.aurora && var.database_engine == "postgres" ? 1 : 0
+  name   = "${local.name}-aurora"
+  family = "aurora-postgresql16"
+
+  parameter {
+    name  = "rds.force_ssl"
+    value = "0"
+  }
+}
+
+resource "aws_rds_cluster" "aurora" {
+  count                           = local.aurora ? 1 : 0
+  cluster_identifier              = local.name
+  engine                          = var.database_engine == "postgres" ? "aurora-postgresql" : "aurora-mysql"
+  engine_mode                     = "provisioned"
+  engine_version                  = var.database_engine == "postgres" ? "16.6" : "8.0.mysql_aurora.3.08.0"
+  database_name                   = local.db_name
+  master_username                 = "app_admin"
+  manage_master_user_password     = true
+  db_subnet_group_name            = aws_db_subnet_group.main[0].name
+  db_cluster_parameter_group_name = var.database_engine == "postgres" ? aws_rds_cluster_parameter_group.aurora_postgres[0].name : null
+  vpc_security_group_ids          = [aws_security_group.db[0].id]
+  storage_encrypted               = true
+  backup_retention_period         = max(var.db_backup_retention_days, 1)
+  copy_tags_to_snapshot           = true
+  deletion_protection             = false
+  apply_immediately               = true
+  skip_final_snapshot             = !var.db_final_snapshot
+  final_snapshot_identifier       = "${local.name}-final"
+
+  serverlessv2_scaling_configuration {
+    min_capacity             = var.aurora_min_acu
+    max_capacity             = var.aurora_max_acu
+    seconds_until_auto_pause = var.aurora_min_acu == 0 ? 300 : null
+  }
+}
+
+resource "aws_rds_cluster_instance" "aurora" {
+  count                      = local.aurora ? 1 : 0
+  identifier                 = "${local.name}-1"
+  cluster_identifier         = aws_rds_cluster.aurora[0].id
+  instance_class             = "db.serverless"
+  engine                     = aws_rds_cluster.aurora[0].engine
+  engine_version             = aws_rds_cluster.aurora[0].engine_version
+  db_subnet_group_name       = aws_db_subnet_group.main[0].name
+  publicly_accessible        = false
+  auto_minor_version_upgrade = true
+  apply_immediately          = true
+}
+
+# --- Cache (optional): ElastiCache Serverless for Valkey (Redis-compatible, TLS) ---
+
+resource "aws_security_group" "cache" {
+  count       = var.cache_enabled ? 1 : 0
+  name        = "${local.name}-cache"
+  description = "Valkey from the application containers only"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    description     = "From the application containers"
+    from_port       = 6379
+    to_port         = 6380
+    protocol        = "tcp"
+    security_groups = [aws_security_group.task.id]
+  }
+}
+
+resource "aws_elasticache_serverless_cache" "main" {
+  count                = var.cache_enabled ? 1 : 0
+  engine               = "valkey"
+  name                 = local.name
+  major_engine_version = "8"
+  description          = "Cache for ${local.name}"
+  subnet_ids           = aws_subnet.private[*].id
+  security_group_ids   = [aws_security_group.cache[0].id]
+
+  cache_usage_limits {
+    data_storage {
+      maximum = var.cache_max_gb
+      unit    = "GB"
+    }
+  }
+}
+
+# --- File uploads (optional): a private bucket only the app's task role can use ----
+
+resource "aws_s3_bucket" "uploads" {
+  count         = var.uploads_bucket_enabled ? 1 : 0
+  bucket        = "${local.name}-uploads"
+  force_destroy = true
+}
+
+resource "aws_s3_bucket_ownership_controls" "uploads" {
+  count  = var.uploads_bucket_enabled ? 1 : 0
+  bucket = aws_s3_bucket.uploads[0].id
+  rule {
+    object_ownership = "BucketOwnerEnforced"
+  }
+}
+
+resource "aws_s3_bucket_public_access_block" "uploads" {
+  count                   = var.uploads_bucket_enabled ? 1 : 0
+  bucket                  = aws_s3_bucket.uploads[0].id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_versioning" "uploads" {
+  count  = var.uploads_bucket_enabled ? 1 : 0
+  bucket = aws_s3_bucket.uploads[0].id
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "uploads" {
+  count  = var.uploads_bucket_enabled ? 1 : 0
+  bucket = aws_s3_bucket.uploads[0].id
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
 }
 
 # --- Application secrets: created empty, filled in by the customer ---------------
@@ -403,12 +550,34 @@ resource "aws_iam_role_policy" "execution" {
   policy = data.aws_iam_policy_document.execution_policy.json
 }
 
-# The application's own role: no permissions unless the customer adds them.
+# The application's own role: only the uploads bucket (when enabled) unless the
+# customer adds more.
 resource "aws_iam_role" "task" {
   name                 = "${local.name}-task"
   path                 = "/terraagent/"
   assume_role_policy   = data.aws_iam_policy_document.ecs_assume.json
   permissions_boundary = local.boundary
+}
+
+data "aws_iam_policy_document" "task_uploads" {
+  count = var.uploads_bucket_enabled ? 1 : 0
+
+  statement {
+    actions   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
+    resources = ["${aws_s3_bucket.uploads[0].arn}/*"]
+  }
+
+  statement {
+    actions   = ["s3:ListBucket", "s3:GetBucketLocation"]
+    resources = [aws_s3_bucket.uploads[0].arn]
+  }
+}
+
+resource "aws_iam_role_policy" "task_uploads" {
+  count  = var.uploads_bucket_enabled ? 1 : 0
+  name   = "uploads"
+  role   = aws_iam_role.task.id
+  policy = data.aws_iam_policy_document.task_uploads[0].json
 }
 
 data "aws_iam_policy_document" "codebuild_assume" {
@@ -465,7 +634,7 @@ data "aws_iam_policy_document" "codebuild_policy" {
 
   statement {
     actions   = ["ecs:UpdateService", "ecs:DescribeServices"]
-    resources = [local.service_arn]
+    resources = [local.service_arn, local.worker_service_arn]
   }
 
   dynamic "statement" {
@@ -628,6 +797,11 @@ resource "aws_codebuild_project" "builder" {
     }
 
     environment_variable {
+      name  = "WORKER_SERVICE"
+      value = local.worker ? local.worker_name : ""
+    }
+
+    environment_variable {
       name  = "BACKEND_DIR"
       value = var.backend_dir
     }
@@ -762,6 +936,11 @@ resource "aws_codebuild_project" "builder" {
                 echo "Rolled $ECS_SERVICE onto $IMAGE_TAG"
               else
                 echo "$ECS_SERVICE doesn't exist yet; it starts directly on $IMAGE_TAG when Terraform creates it"
+              fi
+            - |
+              if [ -n "$WORKER_SERVICE" ] && aws ecs describe-services --cluster "$ECS_CLUSTER" --services "$WORKER_SERVICE" --query 'services[?status==`ACTIVE`].serviceName' --output text 2>/dev/null | grep -q .; then
+                aws ecs update-service --cluster "$ECS_CLUSTER" --service "$WORKER_SERVICE" --force-new-deployment >/dev/null
+                echo "Rolled $WORKER_SERVICE onto $IMAGE_TAG"
               fi
     BUILDSPEC
   }
@@ -1161,5 +1340,94 @@ resource "aws_ecs_service" "app" {
     container_port   = var.container_port
   }
 
-  depends_on = [aws_lb_listener.http, aws_iam_role_policy.execution]
+  # Autoscaling (below) owns the running count between desired_count and
+  # autoscaling_max_count; desired_count changes reach it through min_capacity.
+  lifecycle {
+    ignore_changes = [desired_count]
+  }
+
+  depends_on = [aws_lb_listener.http, aws_iam_role_policy.execution, aws_rds_cluster_instance.aurora]
+}
+
+# Always present: with autoscaling_max_count == desired_count it just holds the count.
+resource "aws_appautoscaling_target" "app" {
+  service_namespace  = "ecs"
+  resource_id        = "service/${aws_ecs_cluster.app.name}/${aws_ecs_service.app.name}"
+  scalable_dimension = "ecs:service:DesiredCount"
+  min_capacity       = var.desired_count
+  max_capacity       = var.autoscaling_max_count
+}
+
+resource "aws_appautoscaling_policy" "cpu" {
+  name               = "${local.name}-cpu"
+  policy_type        = "TargetTrackingScaling"
+  service_namespace  = aws_appautoscaling_target.app.service_namespace
+  resource_id        = aws_appautoscaling_target.app.resource_id
+  scalable_dimension = aws_appautoscaling_target.app.scalable_dimension
+
+  target_tracking_scaling_policy_configuration {
+    target_value       = var.autoscaling_cpu_target
+    scale_in_cooldown  = 120
+    scale_out_cooldown = 60
+
+    predefined_metric_specification {
+      predefined_metric_type = "ECSServiceAverageCPUUtilization"
+    }
+  }
+}
+
+# --- Background worker (optional): same image, the detected worker command --------
+
+resource "aws_ecs_task_definition" "worker" {
+  count                    = local.worker ? 1 : 0
+  family                   = local.worker_name
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = tostring(var.cpu)
+  memory                   = tostring(var.memory_mb)
+  execution_role_arn       = aws_iam_role.execution.arn
+  task_role_arn            = aws_iam_role.task.arn
+
+  container_definitions = jsonencode([
+    {
+      name        = "worker"
+      image       = "${aws_ecr_repository.app.repository_url}:${var.image_tag}"
+      essential   = true
+      command     = var.worker_command
+      environment = local.container_environment
+      secrets     = local.container_secrets
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          "awslogs-group"         = aws_cloudwatch_log_group.ecs.name
+          "awslogs-region"        = var.region
+          "awslogs-stream-prefix" = "worker"
+        }
+      }
+    }
+  ])
+
+  depends_on = [aws_iam_role_policy.execution, aws_cloudwatch_log_group.ecs]
+}
+
+resource "aws_ecs_service" "worker" {
+  count           = local.worker ? 1 : 0
+  name            = local.worker_name
+  cluster         = aws_ecs_cluster.app.id
+  task_definition = aws_ecs_task_definition.worker[0].arn
+  desired_count   = 1
+  launch_type     = "FARGATE"
+
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = false
+  }
+
+  network_configuration {
+    subnets          = aws_subnet.public[*].id
+    security_groups  = [aws_security_group.task.id]
+    assign_public_ip = true
+  }
+
+  depends_on = [aws_iam_role_policy.execution, aws_rds_cluster_instance.aurora]
 }

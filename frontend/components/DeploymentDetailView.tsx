@@ -14,6 +14,7 @@ import {
   GitPullRequest,
   Hammer,
   KeyRound,
+  Layers,
   Loader2,
   Lock,
   Rocket,
@@ -48,6 +49,7 @@ import { ApprovalCard, PlanCard } from "./DeploymentPlanApproval";
 import type {
   BuildHistoryItem,
   DeploymentDetail,
+  DeployEvidence,
   DeploymentEstimateResponse,
   DeploymentStatus,
   DeploymentTarget,
@@ -204,6 +206,14 @@ function ConfigureForm({ dep, onStarted }: { dep: DeploymentDetail; onStarted: (
     db_multi_az: dep.settings?.db_multi_az ?? false,
     db_backup_retention_days: dep.settings?.db_backup_retention_days ?? 7,
     db_final_snapshot: dep.settings?.db_final_snapshot ?? true,
+    aurora_min_acu: dep.settings?.aurora_min_acu ?? 0.5,
+    aurora_max_acu: dep.settings?.aurora_max_acu ?? 4,
+    cache: dep.settings?.cache ?? null,
+    cache_max_gb: dep.settings?.cache_max_gb ?? 1,
+    uploads_bucket: dep.settings?.uploads_bucket ?? null,
+    worker_enabled: dep.settings?.worker_enabled ?? null,
+    autoscaling_max_count: dep.settings?.autoscaling_max_count ?? null,
+    autoscaling_cpu_target: dep.settings?.autoscaling_cpu_target ?? 60,
     run_migrations: dep.settings?.run_migrations ?? true,
     secret_env_keys: dep.settings?.secret_env_keys ?? layout?.env_keys ?? [],
   });
@@ -486,13 +496,14 @@ function FullstackSettingsForm({
 
       <div className="space-y-2">
         <div className="field-label flex items-center gap-1.5"><Database className="w-3.5 h-3.5" /> Database</div>
-        <div className="grid sm:grid-cols-3 gap-2">
+        <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-2">
           {([
             ["rds", db?.rds_supported ? `New ${db.engine === "mysql" ? "MySQL" : "PostgreSQL"} on RDS` : "New database on RDS", "Private subnets; the password is created and kept by RDS."],
+            ["aurora", "Aurora Serverless v2", "Scales with load, and can pause when idle. Same engine as detected."],
             ["external", "Database I host", "An empty DATABASE_URL secret you fill with your own connection string."],
             ["none", "No database", "Nothing database-related is created."],
           ] as [FullstackSettings["database"], string, string][]).map(([mode, title, hint]) => {
-            const disabled = mode === "rds" && !db?.rds_supported;
+            const disabled = (mode === "rds" || mode === "aurora") && !db?.rds_supported;
             return (
               <button key={mode} type="button" disabled={disabled} onClick={() => set("database", mode)} aria-pressed={settings.database === mode}
                 className={`text-left rounded-xl border px-3 py-2.5 text-xs transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
@@ -504,8 +515,34 @@ function FullstackSettingsForm({
             );
           })}
         </div>
-        {settings.database === "rds" && (
+        {(settings.database === "rds" || settings.database === "aurora") && (
           <div className="grid sm:grid-cols-3 gap-4 pt-1">
+            {settings.database === "aurora" ? (
+              <>
+                <div className="space-y-1.5">
+                  <label htmlFor="fs_minacu" className="field-label">Minimum capacity (ACU)</label>
+                  <select id="fs_minacu" className="field-input" value={settings.aurora_min_acu}
+                    onChange={(e) => set("aurora_min_acu", Number(e.target.value))}>
+                    <option value={0}>0 · pause when idle</option>
+                    <option value={0.5}>0.5 (~1 GB RAM)</option>
+                    <option value={1}>1</option>
+                    <option value={2}>2</option>
+                    <option value={4}>4</option>
+                  </select>
+                </div>
+                <div className="space-y-1.5">
+                  <label htmlFor="fs_maxacu" className="field-label">Maximum capacity (ACU)</label>
+                  <input id="fs_maxacu" type="number" min={1} max={128} className="field-input" value={settings.aurora_max_acu}
+                    onChange={(e) => set("aurora_max_acu", Number(e.target.value))} />
+                </div>
+                <p className="text-2xs text-slate-500 sm:mt-6">
+                  {settings.aurora_min_acu === 0
+                    ? "Pauses after 5 idle minutes; the first request after a pause waits about 15 seconds."
+                    : "Always on at the minimum; grows to the maximum under load."}
+                </p>
+              </>
+            ) : (
+            <>
             <div className="space-y-1.5">
               <label htmlFor="fs_dbclass" className="field-label">Instance class</label>
               <select id="fs_dbclass" className="field-input" value={settings.db_instance_class}
@@ -526,6 +563,8 @@ function FullstackSettingsForm({
               <input type="checkbox" checked={settings.db_multi_az} onChange={(e) => set("db_multi_az", e.target.checked)} />
               Standby in a second zone (doubles DB cost)
             </label>
+            </>
+            )}
             <div className="space-y-1.5">
               <label htmlFor="fs_backups" className="field-label">Backup retention (days)</label>
               <input id="fs_backups" type="number" min={0} max={35} className="field-input" value={settings.db_backup_retention_days}
@@ -547,6 +586,8 @@ function FullstackSettingsForm({
           </div>
         )}
       </div>
+
+      <AddonsSection layout={layout} settings={settings} onChange={onChange} />
 
       <div className="space-y-2">
         <div className="field-label flex items-center gap-1.5"><KeyRound className="w-3.5 h-3.5" /> Secrets (environment variables)</div>
@@ -584,6 +625,85 @@ function FullstackSettingsForm({
           <ul className="list-disc pl-5 space-y-0.5">
             {layout.warnings.map((w) => <li key={w}>{w}</li>)}
           </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AddonsSection({
+  layout,
+  settings,
+  onChange,
+}: {
+  layout: FullstackLayout | null;
+  settings: FullstackSettings;
+  onChange: (s: FullstackSettings) => void;
+}) {
+  const cacheOn = settings.cache === null ? Boolean(layout?.cache) : settings.cache === "valkey";
+  const uploadsOn = settings.uploads_bucket ?? Boolean(layout?.object_storage);
+  const worker = layout?.worker ?? null;
+  const workerOn = Boolean(worker) && (settings.worker_enabled ?? true);
+  const scaling = settings.autoscaling_max_count !== null && settings.autoscaling_max_count > settings.desired_count;
+  const detected = (info?: { evidence: DeployEvidence[] } | null) =>
+    info ? `Detected: ${info.evidence[0]?.rule.split(".").pop()} in ${info.evidence[0]?.file}` : "Not detected in the code";
+  const row = "flex items-start gap-2 text-xs text-slate-700";
+
+  return (
+    <div className="space-y-3">
+      <div className="field-label flex items-center gap-1.5"><Layers className="w-3.5 h-3.5" /> Add-on services</div>
+      <div className="grid sm:grid-cols-2 gap-3">
+        <label className={row}>
+          <input type="checkbox" className="mt-0.5" checked={cacheOn}
+            onChange={(e) => onChange({ ...settings, cache: e.target.checked ? "valkey" : "none" })} />
+          <span>
+            Cache: Valkey (Redis-compatible), ElastiCache Serverless
+            <span className="block text-2xs text-slate-500">{detected(layout?.cache)} · the app gets REDIS_URL (TLS)</span>
+          </span>
+        </label>
+        <label className={row}>
+          <input type="checkbox" className="mt-0.5" checked={uploadsOn}
+            onChange={(e) => onChange({ ...settings, uploads_bucket: e.target.checked })} />
+          <span>
+            File uploads: private S3 bucket
+            <span className="block text-2xs text-slate-500">{detected(layout?.object_storage)} · the app gets S3_BUCKET</span>
+          </span>
+        </label>
+        <label className={`${row} ${worker ? "" : "opacity-50"}`}>
+          <input type="checkbox" className="mt-0.5" disabled={!worker} checked={workerOn}
+            onChange={(e) => onChange({ ...settings, worker_enabled: e.target.checked })} />
+          <span>
+            Background worker (second service, same image)
+            <span className="block text-2xs text-slate-500">
+              {worker ? <>Runs <code className="font-mono">{worker.command.join(" ")}</code></> : "No worker script, Celery or RQ app found"}
+            </span>
+          </span>
+        </label>
+        <label className={row}>
+          <input type="checkbox" className="mt-0.5" checked={scaling}
+            onChange={(e) => onChange({
+              ...settings,
+              autoscaling_max_count: e.target.checked ? Math.min(20, Math.max(settings.desired_count * 2, settings.desired_count + 1)) : null,
+            })} />
+          <span>
+            Scale app tasks automatically on CPU
+            <span className="block text-2xs text-slate-500">Between the task count above and a maximum you set</span>
+          </span>
+        </label>
+      </div>
+      {scaling && (
+        <div className="grid sm:grid-cols-3 gap-4">
+          <div className="space-y-1.5">
+            <label htmlFor="fs_maxtasks" className="field-label">Maximum tasks</label>
+            <input id="fs_maxtasks" type="number" min={settings.desired_count} max={20} className="field-input"
+              value={settings.autoscaling_max_count ?? settings.desired_count}
+              onChange={(e) => onChange({ ...settings, autoscaling_max_count: Number(e.target.value) })} />
+          </div>
+          <div className="space-y-1.5">
+            <label htmlFor="fs_cputarget" className="field-label">Target CPU (%)</label>
+            <input id="fs_cputarget" type="number" min={20} max={90} className="field-input" value={settings.autoscaling_cpu_target}
+              onChange={(e) => onChange({ ...settings, autoscaling_cpu_target: Number(e.target.value) })} />
+          </div>
         </div>
       )}
     </div>

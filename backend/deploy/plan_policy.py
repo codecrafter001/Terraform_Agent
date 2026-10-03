@@ -87,12 +87,20 @@ ALLOWED_TARGET_RESOURCES["fullstack_app"] = _NETWORK | _BUILD_PIPELINE | _CONTAI
     "aws_db_parameter_group",
     "aws_db_instance",
     "aws_secretsmanager_secret",
+    # Phase 4 add-ons
+    "aws_rds_cluster",
+    "aws_rds_cluster_instance",
+    "aws_rds_cluster_parameter_group",
+    "aws_elasticache_serverless_cache",
+    "aws_appautoscaling_target",
+    "aws_appautoscaling_policy",
 }
 
 MAX_RESOURCE_COUNT_DEFAULT = 50
-# A full stack is a VPC, build pipeline, service, CDN, database and one secret
-# per environment variable - more than 50 resources by construction.
-MAX_RESOURCE_COUNT_BY_TARGET: Dict[str, int] = {"fullstack_app": 120}
+# A full stack is a VPC, build pipeline, service, CDN, database, optional add-ons
+# (cache, uploads bucket, worker, autoscaling) and one secret per environment
+# variable - more than 50 resources by construction.
+MAX_RESOURCE_COUNT_BY_TARGET: Dict[str, int] = {"fullstack_app": 150}
 MAX_MONTHLY_COST_DEFAULT = 200.0
 
 

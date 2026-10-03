@@ -286,3 +286,85 @@ variable "db_final_snapshot" {
   type        = bool
   default     = true
 }
+
+variable "database_kind" {
+  description = "rds: a single RDS instance; aurora: Aurora Serverless v2 (database_engine picks PostgreSQL or MySQL)."
+  type        = string
+  default     = "rds"
+  validation {
+    condition     = contains(["rds", "aurora"], var.database_kind)
+    error_message = "database_kind must be rds or aurora."
+  }
+}
+
+variable "aurora_min_acu" {
+  description = "Aurora Serverless v2 minimum capacity (ACU); 0 pauses the database after 5 idle minutes."
+  type        = number
+  default     = 0.5
+  validation {
+    condition     = contains([0, 0.5, 1, 2, 4, 8, 16], var.aurora_min_acu)
+    error_message = "aurora_min_acu must be 0, 0.5, 1, 2, 4, 8 or 16."
+  }
+}
+
+variable "aurora_max_acu" {
+  description = "Aurora Serverless v2 maximum capacity (ACU)."
+  type        = number
+  default     = 4
+  validation {
+    condition     = var.aurora_max_acu >= 1 && var.aurora_max_acu <= 128
+    error_message = "aurora_max_acu must be between 1 and 128."
+  }
+}
+
+variable "cache_enabled" {
+  description = "Create an ElastiCache Serverless (Valkey) cache and pass REDIS_URL to the app."
+  type        = bool
+  default     = false
+}
+
+variable "cache_max_gb" {
+  description = "Upper limit for the cache's stored data, in GB."
+  type        = number
+  default     = 1
+  validation {
+    condition     = var.cache_max_gb >= 1 && var.cache_max_gb <= 100
+    error_message = "cache_max_gb must be between 1 and 100."
+  }
+}
+
+variable "uploads_bucket_enabled" {
+  description = "Create a private S3 bucket for file uploads that the app's task role can use."
+  type        = bool
+  default     = false
+}
+
+variable "worker_command" {
+  description = "Command of the background worker service (same image); empty for no worker."
+  type        = list(string)
+  default     = []
+  validation {
+    condition     = length(var.worker_command) <= 8 && alltrue([for t in var.worker_command : can(regex("^[A-Za-z0-9:_.=-]{1,200}$", t))])
+    error_message = "worker_command must be up to 8 plain tokens."
+  }
+}
+
+variable "autoscaling_max_count" {
+  description = "Most app tasks autoscaling may run (equal to desired_count: no scaling)."
+  type        = number
+  default     = 1
+  validation {
+    condition     = var.autoscaling_max_count >= 1 && var.autoscaling_max_count <= 20
+    error_message = "autoscaling_max_count must be between 1 and 20."
+  }
+}
+
+variable "autoscaling_cpu_target" {
+  description = "Average CPU (%) autoscaling keeps the app tasks at."
+  type        = number
+  default     = 60
+  validation {
+    condition     = var.autoscaling_cpu_target >= 20 && var.autoscaling_cpu_target <= 90
+    error_message = "autoscaling_cpu_target must be between 20 and 90."
+  }
+}
