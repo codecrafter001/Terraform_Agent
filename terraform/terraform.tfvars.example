@@ -1,0 +1,4 @@
+# Example Terraform Input Variables
+aws_region   = "us-east-1"
+environment  = "production"
+project_name = "Cloud-Modernization"
