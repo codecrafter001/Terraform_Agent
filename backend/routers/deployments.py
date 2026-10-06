@@ -76,6 +76,7 @@ _inline_tasks: Set["asyncio.Task[None]"] = set()
 _PREPARABLE = frozenset({DeployStatus.ANALYZED, DeployStatus.VERIFIED, DeployStatus.FAILED})
 _PLANNABLE = frozenset({
     DeployStatus.VERIFIED,
+    DeployStatus.FAILED_PARTIAL,  # retry after a part-way apply: a new plan from the real state
     DeployStatus.APPROVED,
     DeployStatus.REJECTED,
     DeployStatus.EXPIRED,
@@ -511,6 +512,17 @@ async def deploy_deployment(request: Request, deployment_id: str, body: DeployRe
             detail="Deploying to AWS is switched off on this TerraAgent server. Set TERRAAGENT_DEPLOY_ENABLED=true "
                    "in its environment and restart the API. Nothing was sent to AWS.",
         )
+
+    # Read-only: refuse here (nothing created, status unchanged) instead of failing mid-apply.
+    from deploy.pipeline import deploy_preflight_problem
+
+    try:
+        problem = await deploy_preflight_problem(dep)
+    except Exception as e:  # a check that can't run never blocks; apply reports real errors
+        logger.warning(f"[{deployment_id}] deploy pre-check skipped: {type(e).__name__}")
+        problem = None
+    if problem:
+        raise HTTPException(status_code=409, detail=problem)
 
     _dispatch("apply", deployment_id)
     return DeploymentAccepted(

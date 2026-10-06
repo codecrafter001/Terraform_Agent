@@ -145,3 +145,14 @@ def test_session_policies_fit_the_aws_limit():
     apply = apply_session_policy(*args)
     assert len(apply) <= MAX_SESSION_POLICY_CHARS
     assert "application-autoscaling:*" in apply
+
+
+def test_apply_session_can_read_back_its_log_groups():
+    """DescribeLogGroups is account-scoped, so only a Resource "*" read grants it; without
+    it every aws_cloudwatch_log_group was created, failed read-back and was tainted."""
+    import json
+
+    doc = json.loads(apply_session_policy("bucket", "target-0123456789ab", "dep-0123456789ab"))
+    read = next(s for s in doc["Statement"] if s["Sid"] == "Read")
+    assert read["Resource"] == "*" and "logs:DescribeLogGroups" in read["Action"]
+    assert not any(a.startswith("logs:") and not a.startswith(("logs:Describe", "logs:List")) for a in read["Action"])

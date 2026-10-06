@@ -160,7 +160,11 @@ def apply_session_policy(state_bucket: str, target_id: str, deployment_id: str) 
              "Action": ["ec2:Describe*", "ecs:Describe*", "ecs:List*", "ecs:DeregisterTaskDefinition",
                         "elasticloadbalancing:Describe*", "rds:Describe*", "cloudfront:Get*", "cloudfront:List*",
                         "cloudfront:Describe*", "cloudfront:*OriginAccessControl", "kms:DescribeKey",
-                        "elasticache:Describe*", "application-autoscaling:Describe*"]},
+                        "elasticache:Describe*", "application-autoscaling:Describe*",
+                        # DescribeLogGroups is account-scoped (log-group::log-stream:), so the
+                        # Named statement never matches it: terraform couldn't read back the log
+                        # groups it had just created, and they were tainted on every apply.
+                        "logs:DescribeLogGroups", "logs:ListTagsForResource", "logs:ListTagsLogGroup"]},
             {"Sid": "Helpers", "Effect": "Allow", "Action": ["ec2:*SecurityGroup*", "iam:CreateServiceLinkedRole",
                                                               "secretsmanager:CreateSecret", "secretsmanager:TagResource",
                                                               "secretsmanager:RotateSecret", "secretsmanager:DeleteSecret",

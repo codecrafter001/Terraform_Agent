@@ -12,6 +12,7 @@ import os
 from typing import Any, Dict, List
 
 from tools.sandbox_registry import create_sandbox, release_sandbox
+from tools.subprocess_exec import run_exec
 
 logger = logging.getLogger("terraagent.infracost_runner")
 
@@ -46,20 +47,14 @@ class InfracostRunner:
                 logger.warning("INFRACOST_API_KEY not set; skipping cost estimation.")
                 tool_skipped = True
             else:
-                process = await asyncio.create_subprocess_exec(
-                    "infracost", "breakdown",
-                    "--path", sandbox_dir,
-                    "--format", "json",
-                    "--no-color",
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE
+                returncode, stdout, stderr = await run_exec(
+                    ["infracost", "breakdown", "--path", sandbox_dir, "--format", "json", "--no-color"]
                 )
-                stdout, stderr = await process.communicate()
                 output_str = stdout.decode("utf-8", errors="replace").strip()
 
-                if process.returncode != 0:
+                if returncode != 0:
                     logger.warning(
-                        f"infracost breakdown exited {process.returncode}; skipping cost "
+                        f"infracost breakdown exited {returncode}; skipping cost "
                         f"estimation: {stderr.decode('utf-8', errors='replace').strip()}"
                     )
                     tool_skipped = True

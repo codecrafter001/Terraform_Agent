@@ -1,14 +1,16 @@
 package terraagent.deploy.plan
 
-default allow = false
+import rego.v1
+
+default allow := false
 
 # Allow if there are no critical violations
-allow {
+allow if {
     count(violations) == 0
 }
 
 # Rule: Disallow wildcard actions in IAM policies
-violations[sprintf("IAM policy at %v contains wildcard Action '*'", [res.address])] {
+violations contains sprintf("IAM policy at %v contains wildcard Action '*'", [res.address]) if {
     res := input.resource_changes[_]
     res.type == "aws_iam_role_policy"
     statement := res.change.after.policy.Statement[_]
@@ -17,7 +19,7 @@ violations[sprintf("IAM policy at %v contains wildcard Action '*'", [res.address
 }
 
 # Rule: Disallow unrestricted iam:* actions
-violations[sprintf("IAM policy at %v contains broad iam:* action", [res.address])] {
+violations contains sprintf("IAM policy at %v contains broad iam:* action", [res.address]) if {
     res := input.resource_changes[_]
     res.type == "aws_iam_role_policy"
     statement := res.change.after.policy.Statement[_]

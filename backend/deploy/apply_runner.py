@@ -101,6 +101,21 @@ async def _publish_log(deployment_id: str, message: str) -> None:
     await redis_service.publish_log(deployment_id, f"[APPLY] {scrubbed}", agent_name="deploy")
 
 
+_APPLY_ERROR_MAX_CHARS = 4000
+
+
+def _apply_failure_message(returncode: int, stderr_lines: List[str]) -> str:
+    """The exit code plus terraform's own "Error:" blocks - an apply once failed as just
+    "exit code 1" while the reason (a missing permissions boundary) sat only in the log."""
+    text = "\n".join(stderr_lines).strip()
+    start = text.find("Error:")
+    detail = text[start:] if start >= 0 else text[-_APPLY_ERROR_MAX_CHARS:]
+    if len(detail) > _APPLY_ERROR_MAX_CHARS:
+        detail = detail[:_APPLY_ERROR_MAX_CHARS] + "\n... (truncated - full output in the deployment log)"
+    message = f"Terraform apply failed with exit code {returncode}"
+    return f"{message}:\n{detail}" if detail else f"{message} and wrote nothing to stderr."
+
+
 def _scoped_aws_env(creds: Dict[str, str]) -> Dict[str, str]:
     env = os.environ.copy()
     env.pop("TF_LOG", None)
@@ -260,7 +275,9 @@ async def apply_approved(deployment_id: str, routing_key: Optional[str] = None) 
             stderr=asyncio.subprocess.PIPE,
         )
 
-        async def _stream_output(stream: Any) -> None:
+        stderr_lines: List[str] = []
+
+        async def _stream_output(stream: Any, keep: Optional[List[str]] = None) -> None:
             if not stream:
                 return
             while True:
@@ -270,12 +287,14 @@ async def apply_approved(deployment_id: str, routing_key: Optional[str] = None) 
                 decoded = line.decode("utf-8", errors="replace").rstrip()
                 if decoded:
                     await _publish_log(deployment_id, decoded)
+                    if keep is not None:
+                        keep.append(decoded)
 
         try:
             await asyncio.wait_for(
                 asyncio.gather(
                     _stream_output(proc.stdout),
-                    _stream_output(proc.stderr),
+                    _stream_output(proc.stderr, stderr_lines),
                 ),
                 timeout=TERRAAGENT_TF_APPLY_TIMEOUT,
             )
@@ -285,7 +304,7 @@ async def apply_approved(deployment_id: str, routing_key: Optional[str] = None) 
             raise TimeoutError(f"Terraform apply timed out after {TERRAAGENT_TF_APPLY_TIMEOUT} seconds")
 
         if proc.returncode != 0:
-            raise RuntimeError(f"Terraform apply failed with exit code {proc.returncode}")
+            raise RuntimeError(_apply_failure_message(proc.returncode, stderr_lines))
 
         await _publish_log(deployment_id, "Terraform execution completed successfully!")
 

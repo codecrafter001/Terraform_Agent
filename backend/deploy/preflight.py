@@ -56,3 +56,37 @@ def vpc_quota_problem(creds: Dict[str, str], region: str) -> Optional[str]:
         f"VPC, so it would fail part-way through. Delete an unused VPC, or request a higher 'VPCs per Region' quota "
         f"(Service Quotas -> Amazon VPC -> {VPC_QUOTA_CODE}), then run the plan again. Nothing was created."
     )
+
+
+# Targets whose templates create IAM roles, each with the workload permissions boundary.
+BOUNDARY_TARGETS = frozenset({"lambda_http", "ecs_service", "fullstack_app"})
+BOUNDARY_POLICY_NAME = "TerraAgentWorkloadBoundary"
+
+
+def boundary_arn_for(settings: Optional[Dict], account_id: str) -> str:
+    """The boundary the template will attach: the deployment's override, else the
+    account's TerraAgentWorkloadBoundary (same default as the templates' locals)."""
+    override = (settings or {}).get("permissions_boundary_arn")
+    return override or f"arn:aws:iam::{account_id}:policy/{BOUNDARY_POLICY_NAME}"
+
+
+def boundary_problem(creds: Dict[str, str], region: str, boundary_arn: str) -> Optional[str]:
+    """A user-facing message when the permissions boundary every created role needs
+    doesn't exist - otherwise apply creates part of the stack and then fails on
+    every IAM role. None when it exists or the check can't run."""
+    try:
+        _session(creds, region).client("iam", config=_CONFIG).get_policy(PolicyArn=boundary_arn)
+        return None
+    except ClientError as e:
+        if e.response.get("Error", {}).get("Code") != "NoSuchEntity":
+            logger.warning(f"Boundary pre-check skipped: GetPolicy failed: {e.response.get('Error', {}).get('Code')}")
+            return None
+    except BotoCoreError as e:
+        logger.warning(f"Boundary pre-check skipped: {type(e).__name__}")
+        return None
+    return (
+        f"The permissions boundary {boundary_arn} does not exist in this account. Every IAM role this "
+        f"deployment creates must use it, so the apply would stop part-way. Create it once from TerraAgent's "
+        f"bootstrap (deploy/bootstrap: CloudFormation stack or Terraform, see docs/aws/deploy-roles.md), "
+        f"then run the plan again. Nothing was created."
+    )

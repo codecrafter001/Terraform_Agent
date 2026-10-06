@@ -17,7 +17,13 @@ POLICIES = {
     "plan_policy": lambda cfn: cfn["Resources"]["TerraAgentDeployPlanRole"]["Properties"]["Policies"][0]["PolicyDocument"],
     "apply_policy": lambda cfn: cfn["Resources"]["TerraAgentDeployApplyRole"]["Properties"]["Policies"][0]["PolicyDocument"],
 }
-_STATEMENT = re.compile(r'Sid = "(\w+)", Effect = "(\w+)", Action = (\[[^\]]*\]|"[^"]*")')
+# python-hcl2 renders jsonencode() bodies as HCL (`Sid = "X"`) in older releases and as a
+# Python dict repr (`'Sid': 'X'`) from 8.x - accept both.
+_Q = "[\"']"
+_STATEMENT = re.compile(
+    rf"{_Q}?Sid{_Q}?\s*[=:]\s*{_Q}(\w+){_Q},\s*{_Q}?Effect{_Q}?\s*[=:]\s*{_Q}(\w+){_Q},\s*"
+    rf"{_Q}?Action{_Q}?\s*[=:]\s*(\[[^\]]*\]|{_Q}[^\"']*{_Q})"
+)
 
 Statements = Dict[str, Tuple[str, Set[str]]]
 
@@ -39,7 +45,7 @@ def _terraform() -> Dict[str, Statements]:
             for name, body in items.items():
                 name = name.strip('"')
                 if name in POLICIES:
-                    out[name] = {sid: (effect, set(re.findall(r'"([^"]+)"', actions)))
+                    out[name] = {sid: (effect, set(re.findall(r"[\"']([^\"']+)[\"']", actions)))
                                  for sid, effect, actions in _STATEMENT.findall(str(body["policy"]))}
     return out
 

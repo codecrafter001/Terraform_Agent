@@ -14,7 +14,7 @@ import io
 import logging
 import os
 import zipfile
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from deploy import code_update
 from deploy.analyzer import analyze
@@ -25,7 +25,7 @@ from deploy.decision_engine import blocked_by_secrets, decide
 from deploy.fullstack import detect as detect_fullstack
 from deploy.plan_bundle import create_plan_bundle, extract_plan_bundle
 from deploy.plan_policy import evaluate_plan_policy
-from deploy.preflight import VPC_TARGETS, vpc_quota_problem
+from deploy.preflight import BOUNDARY_TARGETS, VPC_TARGETS, boundary_arn_for, boundary_problem, vpc_quota_problem
 from deploy.renderer import render
 from deploy.secret_scan import scan_source
 from deploy.source_intake import ExtractedSource, IntakeError, extract_archive
@@ -37,6 +37,7 @@ from services.database import SessionLocal
 from services.redis_client import redis_service
 from tools.credential_scrubber import CredentialScrubber
 from tools.sandbox_registry import create_sandbox, release_sandbox
+from tools.subprocess_exec import describe_exception
 from tools.terraform_runner import TerraformRunner
 
 logger = logging.getLogger("terraagent.deploy")
@@ -50,6 +51,27 @@ async def _fail(deployment_id: str, message: str, **fields: Any) -> None:
     message = CredentialScrubber.scrub_text(message)
     await log(deployment_id, f"FAILED: {message}")
     transition(deployment_id, DeployStatus.FAILED, reason=message, error=message, **fields)
+
+
+_PLAN_ERROR_MAX_CHARS = 4000
+
+
+def plan_failure_message(plan_result: Dict[str, Any]) -> str:
+    """The failed step and Terraform's own error text, never a blank. Output starts
+    at the first "Error:" (the refresh lines before it are noise), capped in length."""
+    failed = next((c for c in plan_result.get("checks", []) if not c.get("passed")), None)
+    if failed is None:
+        return "Terraform plan failed: no step reported an error (no output was captured)."
+    step = failed.get("check_name") or "plan"
+    output = (failed.get("output") or "").strip()
+    if not output:
+        return f"Terraform plan failed at '{step}' with no output on stdout or stderr."
+    start = output.find("Error:")
+    if start > 0:
+        output = output[start:]
+    if len(output) > _PLAN_ERROR_MAX_CHARS:
+        output = output[:_PLAN_ERROR_MAX_CHARS] + "\n... (truncated)"
+    return f"Terraform plan failed at '{step}':\n{output}"
 
 
 def _extract(deployment: Dict[str, Any], dest: str) -> ExtractedSource:
@@ -102,7 +124,7 @@ async def run_analysis(deployment_id: str) -> None:
         await _fail(deployment_id, str(e))
     except Exception as e:
         logger.exception(f"[{deployment_id}] analysis crashed")
-        await _fail(deployment_id, f"Analysis failed unexpectedly: {e}")
+        await _fail(deployment_id, f"Analysis failed unexpectedly: {describe_exception(e)}")
     finally:
         release_sandbox(sandbox)
     if chain_build:
@@ -175,12 +197,32 @@ async def run_build_and_verify(deployment_id: str) -> None:
         await _fail(deployment_id, str(e))
     except Exception as e:
         logger.exception(f"[{deployment_id}] build/verify crashed")
-        await _fail(deployment_id, f"Build or verification failed unexpectedly: {e}")
+        await _fail(deployment_id, f"Build or verification failed unexpectedly: {describe_exception(e)}")
     finally:
         release_sandbox(src_dir)
         release_sandbox(workdir)
     if chain_plan:
         await run_plan(deployment_id)
+
+
+async def deploy_preflight_problem(deployment: Dict[str, Any]) -> Optional[str]:
+    """Read-only checks repeated when Deploy is clicked, for plans approved before a
+    check existed or an account changed since: today, the workload boundary."""
+    if deployment.get("target_type") not in BOUNDARY_TARGETS or not deployment.get("target_id"):
+        return None
+    session = SessionLocal()
+    try:
+        rec = session.get(AwsDeployTarget, deployment["target_id"])
+        if not rec:
+            return None
+        target = {"id": rec.id, "region": rec.region, "account_id": rec.account_id,
+                  "plan_role_arn": rec.plan_role_arn, "state_bucket": rec.state_bucket,
+                  "external_id": rec.external_id}
+    finally:
+        session.close()
+    creds = await asyncio.to_thread(plan_session, target, deployment["id"])
+    boundary = boundary_arn_for(deployment.get("settings"), target["account_id"])
+    return await asyncio.to_thread(boundary_problem, creds, deployment["region"], boundary)
 
 
 async def run_plan(deployment_id: str) -> None:
@@ -229,6 +271,15 @@ async def run_plan(deployment_id: str) -> None:
                 await _fail(deployment_id, problem)
                 return
 
+        # Every IAM role these templates create carries the workload boundary; without it
+        # apply fails on each role after the rest of the stack exists. Read-only (GetPolicy).
+        if deployment.get("target_type") in BOUNDARY_TARGETS:
+            boundary = boundary_arn_for(deployment.get("settings"), target_dict["account_id"])
+            problem = await asyncio.to_thread(boundary_problem, plan_creds, deployment["region"], boundary)
+            if problem:
+                await _fail(deployment_id, problem)
+                return
+
         # Built artifacts first (templates reference them by path), then the
         # rendered files from Postgres - the ones that were verified - on top.
         bundle_id = (deployment.get("build") or {}).get("bundle_artifact_id")
@@ -252,9 +303,7 @@ async def run_plan(deployment_id: str) -> None:
         )
 
         if not plan_result.get("passed"):
-            checks = plan_result.get("checks", [])
-            err_msg = next((c.get("output") for c in checks if not c.get("passed")), "Terraform plan failed.")
-            await _fail(deployment_id, f"Terraform plan failed: {err_msg}", plan=plan_result.get("plan_json"))
+            await _fail(deployment_id, plan_failure_message(plan_result), plan=plan_result.get("plan_json"))
             return
 
         # Create deterministic plan bundle & store artifacts
@@ -316,7 +365,7 @@ async def run_plan(deployment_id: str) -> None:
         )
     except Exception as e:
         logger.exception(f"[{deployment_id}] plan crashed")
-        await _fail(deployment_id, f"Planning failed unexpectedly: {e}")
+        await _fail(deployment_id, f"Planning failed unexpectedly: {describe_exception(e)}")
     finally:
         release_sandbox(workdir)
 

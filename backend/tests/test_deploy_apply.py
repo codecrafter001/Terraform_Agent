@@ -307,3 +307,15 @@ async def test_apply_approved_success_flow(monkeypatch):
         assert dep["status"] == DeployStatus.DEPLOYED.value
         assert dep["applied_at"] is not None
         assert dep["outputs"]["website_url"] == "https://d123.cloudfront.net"
+
+
+def test_apply_failure_message_carries_terraform_errors():
+    from deploy.apply_runner import _apply_failure_message
+
+    lines = ["aws_vpc.main: Creating...",
+             "Error: creating IAM Role (x-exec): NoSuchEntity: Scope ARN: "
+             "arn:aws:iam::1:policy/TerraAgentWorkloadBoundary does not exist or is not attachable."]
+    msg = _apply_failure_message(1, lines)
+    assert msg.startswith("Terraform apply failed with exit code 1:\nError: creating IAM Role")
+    assert "TerraAgentWorkloadBoundary" in msg
+    assert _apply_failure_message(1, []) == "Terraform apply failed with exit code 1 and wrote nothing to stderr."

@@ -8,6 +8,16 @@ from dotenv import load_dotenv
 env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
 load_dotenv(env_path)
 
+from tools.terraform_runner import ensure_plugin_cache_dir  # noqa: E402
+
+ensure_plugin_cache_dir()
+
+import sys
+import asyncio
+
+if sys.platform == 'win32':
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
 from fastapi import FastAPI, Request, status
 
 from fastapi.middleware.cors import CORSMiddleware

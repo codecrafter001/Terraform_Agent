@@ -73,3 +73,48 @@ def test_only_read_operations_are_called(monkeypatch):
     session = _Session(vpcs=5, quota=5)
     _check(monkeypatch, session)
     assert session.calls == ["describe_vpcs", "get_service_quota"]
+
+
+# --- Workload permissions boundary ------------------------------------------------
+
+class _IamSession:
+    def __init__(self, error_code=None):
+        self.error_code, self.calls = error_code, []
+
+    def client(self, name, config=None):
+        session = self
+
+        class _Iam:
+            def get_policy(self, PolicyArn):
+                session.calls.append(("get_policy", PolicyArn))
+                if session.error_code:
+                    raise ClientError({"Error": {"Code": session.error_code, "Message": "x"}}, "GetPolicy")
+                return {"Policy": {"Arn": PolicyArn}}
+
+        return _Iam()
+
+
+def _boundary(monkeypatch, session):
+    monkeypatch.setattr(preflight, "_session", lambda creds, region: session)
+    return preflight.boundary_problem(CREDS, "us-east-1", "arn:aws:iam::123456789012:policy/TerraAgentWorkloadBoundary")
+
+
+def test_missing_boundary_is_reported_before_anything_is_created(monkeypatch):
+    session = _IamSession(error_code="NoSuchEntity")
+    problem = _boundary(monkeypatch, session)
+    assert "TerraAgentWorkloadBoundary does not exist" in problem and "Nothing was created" in problem
+    assert session.calls == [("get_policy", "arn:aws:iam::123456789012:policy/TerraAgentWorkloadBoundary")]
+
+
+def test_existing_boundary_passes(monkeypatch):
+    assert _boundary(monkeypatch, _IamSession()) is None
+
+
+def test_boundary_check_that_cannot_run_never_blocks(monkeypatch):
+    assert _boundary(monkeypatch, _IamSession(error_code="AccessDenied")) is None
+
+
+def test_boundary_arn_matches_the_templates_default():
+    assert preflight.boundary_arn_for({}, "123456789012") == "arn:aws:iam::123456789012:policy/TerraAgentWorkloadBoundary"
+    custom = "arn:aws:iam::123456789012:policy/Custom"
+    assert preflight.boundary_arn_for({"permissions_boundary_arn": custom}, "123456789012") == custom

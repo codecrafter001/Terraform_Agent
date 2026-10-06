@@ -212,3 +212,17 @@ async def test_api_rollback_rejects_pre_deploy_status():
     with pytest.raises(HTTPException) as exc:
         await api.rollback_deployment(_request(), dep_id, RollbackRequest())
     assert exc.value.status_code == 409
+
+
+def test_container_targets_offer_plan_again_not_rollback():
+    """ECS/full-stack keep no switchable releases: a "rollback" only re-planned the same code."""
+    base = {"status": "FAILED_PARTIAL", "rendered": {"main.tf": ""}, "target_id": "t-1"}
+    assert not _can_rollback({**base, "target_type": "ecs_service"})
+    assert not _can_rollback({**base, "target_type": "fullstack_app"})
+    assert _can_rollback({**base, "target_type": "lambda_http"})
+
+
+def test_a_partial_failure_can_be_planned_again():
+    from routers.deployments import _can_plan
+
+    assert _can_plan({"status": "FAILED_PARTIAL", "rendered": {"main.tf": ""}})

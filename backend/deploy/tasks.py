@@ -4,6 +4,11 @@ credentials, tokens or source content ever travel through the broker."""
 
 import asyncio
 import logging
+import sys
+
+if sys.platform == 'win32':
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
 
 from services.celery_app import celery_app
 

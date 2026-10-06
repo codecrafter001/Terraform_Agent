@@ -1534,10 +1534,10 @@ export default function DeploymentDetailView({ id }: { id: string }) {
         <span className="text-xs text-slate-500">{dep.region} · {dep.environment}</span>
       </div>
       <StageTracker status={dep.status} />
-      {dep.status === "FAILED" && dep.error && (
+      {(dep.status === "FAILED" || dep.status === "FAILED_PARTIAL") && dep.error && (
         <div className="p-4 rounded-2xl bg-rose-50 border border-rose-200 text-xs text-rose-900 flex gap-2 whitespace-pre-wrap">
           <XCircle className="w-4 h-4 shrink-0 mt-0.5" />
-          <span>{dep.error}</span>
+          <span className="min-w-0 break-words">{dep.error}</span>
         </div>
       )}
       {dep.status === "NEEDS_RECONCILIATION" && <ReconciliationAlert error={dep.error} />}

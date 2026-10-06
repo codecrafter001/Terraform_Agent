@@ -1,6 +1,11 @@
 """Celery task queue configuration and task dispatcher."""
 
 import asyncio
+import sys
+
+if sys.platform == 'win32':
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
 from typing import Optional
 import logging
 import os
@@ -20,6 +25,10 @@ ZIP_EXPIRY_SECONDS = int(os.getenv("ZIP_EXPIRY_HOURS", "24")) * 3600
 # checkov/trivy subprocesses, possibly through 2 repair cycles) - only meant to
 # catch a worker that died and will never report back, not a slow-but-alive one.
 MAX_JOB_RUNTIME_SECONDS = int(os.getenv("MAX_JOB_RUNTIME_SECONDS", "1800"))
+
+from tools.terraform_runner import ensure_plugin_cache_dir  # noqa: E402
+
+ensure_plugin_cache_dir()
 
 celery_app = Celery(
     "terraagent",

@@ -31,6 +31,7 @@ from deploy.config import BUILD_TIMEOUT_SECONDS, MAX_LAMBDA_ZIP_BYTES, MAX_STATI
 from deploy.dockerfiles import DockerfileError, generate as generate_container
 from deploy.source_intake import ExtractedSource
 from tools.credential_scrubber import CredentialScrubber
+from tools.subprocess_exec import run_exec
 
 PYPI_INDEX = "https://pypi.org/simple"
 NPM_REGISTRY = "https://registry.npmjs.org/"
@@ -183,21 +184,17 @@ def _build_env(home: str) -> Dict[str, str]:
 
 async def run_build_command(cmd: List[str], cwd: str, home: str, log: List[str]) -> None:
     check_build_argv(cmd)
-    process = await asyncio.create_subprocess_exec(
-        *cmd, cwd=cwd, env=_build_env(home),
-        stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-    )
     try:
-        out, _ = await asyncio.wait_for(process.communicate(), timeout=BUILD_TIMEOUT_SECONDS)
+        returncode, out, _ = await run_exec(
+            cmd, cwd=cwd, env=_build_env(home), timeout=BUILD_TIMEOUT_SECONDS, merge_stderr=True,
+        )
     except asyncio.TimeoutError:
-        process.kill()
-        await process.wait()
         raise BuildError(f"Dependency install timed out after {int(BUILD_TIMEOUT_SECONDS)}s")
     lines = out.decode("utf-8", errors="replace").splitlines()
     log.extend(lines[-100:])
-    if process.returncode != 0:
+    if returncode != 0:
         tail = "\n".join(lines[-15:])
-        raise BuildError(f"Dependency install failed (exit {process.returncode}):\n{CredentialScrubber.scrub_text(tail)}")
+        raise BuildError(f"Dependency install failed (exit {returncode}):\n{CredentialScrubber.scrub_text(tail)}")
 
 
 # --- Targets --------------------------------------------------------------
