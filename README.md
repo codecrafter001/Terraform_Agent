@@ -3,7 +3,8 @@
 - **AWS Region:** `us-east-1`
 - **Total Discovered Resources:** 20
 - **Primary AWS Services:** 
-  - **Networking & Content Delivery:** Amazon VPC, Subnets, Route
+  - Compute (EC2)
+  - Networking & Content Delivery (V
 
 ## Pending Human Approval
 
