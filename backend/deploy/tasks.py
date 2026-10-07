@@ -65,6 +65,7 @@ def sweep_task() -> dict:
     before apply changes AWS), sweep APPLYING deployments past lease to NEEDS_RECONCILIATION,
     expire approvals past 24h, and delete expired artifacts."""
     from datetime import datetime, timedelta
+
     from deploy.artifacts import get_artifact_store
     from deploy.config import MAX_STAGE_RUNTIME_SECONDS
     from deploy.store import (

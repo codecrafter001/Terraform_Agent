@@ -14,8 +14,8 @@ import time
 import uuid
 from typing import Any, Dict, Optional
 
-from cryptography.fernet import Fernet
 import redis
+from cryptography.fernet import Fernet
 
 logger = logging.getLogger(__name__)
 

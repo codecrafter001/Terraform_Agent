@@ -1,3 +1,4 @@
+# ruff: noqa: E402
 """LangGraph StateGraph: four agents with a repair loop and a risk gate.
 
     infrastructure -> iac_engineering -> verification --PASS/INCOMPLETE/NEEDS_APPROVAL--> delivery -> END
@@ -40,6 +41,10 @@ from langgraph.types import interrupt
 
 logger = logging.getLogger("terraagent.graph")
 
+from tools.infra_model import build_infra_model
+from tools.resource_classifier import allowed_human_choices, apply_human_decisions
+from tools.scores import migration_safety, security_posture
+
 from .adoption_planning_agent import adoption_planning_agent_node
 from .classification_agent import classification_agent_node
 from .cloud_discovery import cloud_discovery_node
@@ -56,9 +61,6 @@ from .resource_explorer_step import resource_explorer_node
 from .terraform_composer import terraform_composer_node
 from .validation_agent import validation_agent_node
 from .validation_repair import repair_validation_node
-from tools.infra_model import build_infra_model
-from tools.resource_classifier import allowed_human_choices, apply_human_decisions
-from tools.scores import migration_safety, security_posture
 
 # Previously hardcoded as `attempts < 2` in should_repair - same default.
 MAX_REPAIR_ITERATIONS = int(os.getenv("TERRAAGENT_MAX_REPAIR_ITERATIONS", "2"))

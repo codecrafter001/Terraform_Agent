@@ -3,8 +3,8 @@ import logging
 import os
 from typing import Any, Dict, Optional
 
-from dotenv import load_dotenv
 import httpx
+from dotenv import load_dotenv
 
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), ".env"))
 load_dotenv()

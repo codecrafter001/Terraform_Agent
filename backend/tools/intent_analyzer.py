@@ -1,6 +1,5 @@
 """Intent Analyzer tool for processing DevOps natural-language requests into structured intent."""
 
-import json
 import logging
 import os
 import re
@@ -97,7 +96,11 @@ def parse_deterministic_intent(
     suggested_filters: List[str] = list(resource_filters or [])
 
     # Pattern: EC2 instance type change (e.g. "increase EC2 web server from t2.micro to t2.medium")
-    ec2_match = re.search(r'(?:increase|scale|change|resize|modify|update)?\s*(?:ec2\s+)?([a-zA-Z0-9_\-\s]+?)\s+(?:from\s+)?([trmc][0-9][a-z]?\.[a-z0-9]+)\s+to\s+([trmc][0-9][a-z]?\.[a-z0-9]+)', text, re.IGNORECASE)
+    ec2_match = re.search(
+        r'(?:increase|scale|change|resize|modify|update)?\s*(?:ec2\s+)?([a-zA-Z0-9_\-\s]+?)\s+(?:from\s+)?([trmc][0-9][a-z]?\.[a-z0-9]+)\s+to\s+([trmc][0-9][a-z]?\.[a-z0-9]+)',
+        text,
+        re.IGNORECASE
+    )
     if ec2_match:
         name = ec2_match.group(1).strip()
         # Clean prefix noise

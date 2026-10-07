@@ -127,9 +127,15 @@ def _handle_api_error(resp: httpx.Response, action_desc: str) -> GitHubPullReque
             f"for a private repository the token can't see."
         )
     elif status in (405, 409):
-        return GitHubPullRequestError(f"{prefix} ({status} Conflict) - {raw_msg}. PR may have merge conflicts, not be mergeable, or be blocked by branch protection rules.")
+        return GitHubPullRequestError(
+            f"{prefix} ({status} Conflict) - {raw_msg}. "
+            "PR may have merge conflicts, not be mergeable, or be blocked by branch protection rules."
+        )
     elif status == 422:
-        return GitHubPullRequestError(f"{prefix} (422 Unprocessable) - {raw_msg}. Branch or changes may already exist or contain invalid parameters.")
+        return GitHubPullRequestError(
+            f"{prefix} (422 Unprocessable) - {raw_msg}. "
+            "Branch or changes may already exist or contain invalid parameters."
+        )
     return GitHubPullRequestError(f"{prefix} - {raw_msg}")
 
 

@@ -5,7 +5,6 @@ conftest_runner.py - a missing binary or missing INFRACOST_API_KEY must never
 silently read as "$0/month"; it's reported as unestimated, not as free.
 """
 
-import asyncio
 import json
 import logging
 import os

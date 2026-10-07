@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
 
+# ruff: noqa: E402
 # Load .env configuration
 env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
 load_dotenv(env_path)
@@ -12,14 +13,13 @@ from tools.terraform_runner import ensure_plugin_cache_dir  # noqa: E402
 
 ensure_plugin_cache_dir()
 
-import sys
 import asyncio
+import sys
 
 if sys.platform == 'win32':
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 from fastapi import FastAPI, Request, status
-
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from slowapi import _rate_limit_exceeded_handler
@@ -31,8 +31,8 @@ from routers.download import router as download_router
 from routers.jobs import router as jobs_router
 from routers.metrics import setup_metrics
 from routers.organizations import router as organizations_router
-from routers.settings import router as settings_router
 from routers.scan import router as scan_router
+from routers.settings import router as settings_router
 from services.auth import warn_if_unset as warn_if_api_key_unset
 from services.database import init_db
 from services.rate_limiter import limiter

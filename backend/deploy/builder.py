@@ -28,7 +28,8 @@ from typing import Any, Dict, List, Optional
 
 from deploy.analyzer import ProjectProfile
 from deploy.config import BUILD_TIMEOUT_SECONDS, MAX_LAMBDA_ZIP_BYTES, MAX_STATIC_FILES
-from deploy.dockerfiles import DockerfileError, generate as generate_container
+from deploy.dockerfiles import DockerfileError
+from deploy.dockerfiles import generate as generate_container
 from deploy.source_intake import ExtractedSource
 from tools.credential_scrubber import CredentialScrubber
 from tools.subprocess_exec import run_exec

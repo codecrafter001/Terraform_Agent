@@ -1,5 +1,5 @@
-import sqlite3
 import json
+import sqlite3
 
 db = sqlite3.connect('sqlite.db')
 cur = db.cursor()

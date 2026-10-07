@@ -30,7 +30,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from services.redis_client import redis_service
 from tools.aws_live_fetch import SUPPORTED_RESOURCE_TYPES, build_session, fetch_live_resource
-
 from tools.naming import unique_clean_name
 
 _TIER_RANK: Dict[str, int] = {"safe_auto": 0, "behavior_changing": 1, "destructive": 2}
@@ -255,7 +254,7 @@ async def drift_reconciliation_agent_node(state: Dict[str, Any]) -> Dict[str, An
     }
 
     resources_by_id = {r["id"]: r for r in (state.get("resources") or []) if r.get("id")}
-    
+
     # Adopted resources are those planned for import or data_source
     adopted_ids = [
         rid for rid, res in resources_by_id.items()

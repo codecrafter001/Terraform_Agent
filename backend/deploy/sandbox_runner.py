@@ -10,21 +10,16 @@ Executes an end-to-end validation suite against a sandbox environment covering:
 Results are recorded to the database and audit trail so they appear on the Terraform Runs page.
 """
 
-import asyncio
-import json
 import logging
 import os
-import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-from deploy.config import MAX_STAGE_RUNTIME_SECONDS
 from deploy.store import (
     DeployStatus,
     create_deployment,
     get_deployment,
-    list_deployments,
     transition,
 )
 from models.orm import AwsDeployTarget

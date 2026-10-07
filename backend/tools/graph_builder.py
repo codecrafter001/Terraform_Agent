@@ -1,7 +1,7 @@
 """Graph builder using NetworkX for DAG dependencies & D3 visualization."""
 
 import os
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional
 
 import networkx as nx
 

@@ -5,11 +5,11 @@ generates per-target ExternalIds for confused-deputy protection, and provides
 a verification endpoint to test AssumeRole and bucket connectivity.
 """
 
-from datetime import datetime
 import logging
 import secrets
-from typing import List, Optional
 import uuid
+from datetime import datetime
+from typing import List, Optional
 
 import boto3
 from fastapi import APIRouter, Depends, HTTPException, Request, status

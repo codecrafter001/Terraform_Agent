@@ -9,19 +9,19 @@ remains gated until Phase 4.
 """
 
 import asyncio
-from datetime import datetime
 import json
 import logging
 import os
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Set
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
 from sse_starlette.sse import EventSourceResponse
 
 from deploy import code_update
-from deploy.estimates import PRESET_DESCRIPTIONS, PRESETS, estimate_fullstack, preset_for_environment
 from deploy.artifacts import get_artifact_store
 from deploy.config import MAX_UPLOAD_BYTES, SOURCE_RETENTION_DAYS
+from deploy.estimates import PRESET_DESCRIPTIONS, PRESETS, estimate_fullstack, preset_for_environment
 from deploy.source_intake import IntakeError, download_github_archive, is_zip
 from deploy.store import (
     DeployStatus,
@@ -41,12 +41,12 @@ from models.deployment import (
     ApprovalRequest,
     BuildHistoryItem,
     CreatePullRequestRequest,
-    DeployRequest,
-    FullstackSettings,
     DeploymentAccepted,
     DeploymentDetail,
     DeploymentEventResponse,
     DeploymentSummary,
+    DeployRequest,
+    FullstackSettings,
     GitHubSourceRequest,
     GitHubUpdateRequest,
     MergePullRequestRequest,
@@ -95,10 +95,16 @@ def _dispatch(stage: str, deployment_id: str) -> None:
         run = pipeline.run_build_and_verify
     elif stage == "apply":
         task = tasks.apply_task
-        run = lambda dep_id: asyncio.to_thread(tasks.apply_task, dep_id)
+
+        async def run_apply(dep_id):
+            return await asyncio.to_thread(tasks.apply_task, dep_id)
+        run = run_apply
     elif stage == "destroy_plan":
         task = tasks.plan_destroy_task
-        run = lambda dep_id: asyncio.to_thread(tasks.plan_destroy_task, dep_id)
+
+        async def run_destroy_plan(dep_id):
+            return await asyncio.to_thread(tasks.plan_destroy_task, dep_id)
+        run = run_destroy_plan
     else:
         task = tasks.plan_task
         run = pipeline.run_plan
@@ -747,7 +753,7 @@ async def plan_destroy_deployment(request: Request, deployment_id: str) -> Deplo
             detail=f"Cannot plan destroy from status '{dep['status']}'; deployment must be in DEPLOYED, FAILED_PARTIAL, or NEEDS_RECONCILIATION.",
         )
 
-    user = current_user(request) or "api"
+    current_user(request)
     _dispatch("destroy_plan", deployment_id)
     return DeploymentAccepted(
         deployment_id=deployment_id,

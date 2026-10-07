@@ -103,7 +103,8 @@ def estimate_fullstack(settings: Dict[str, Any], layout: Optional[Dict[str, Any]
     mode = settings.get("database", "rds")
     rds = mode == "rds" and bool(db and db.get("rds_supported"))
     aurora = mode == "aurora" and bool(db and db.get("rds_supported"))
-    addon = (lambda value, detected: bool(detected) if value is None else bool(value))
+    def addon(value, detected):
+        return bool(detected) if value is None else bool(value)
     cache = addon(None if settings.get("cache") is None else settings.get("cache") == "valkey", layout.get("cache"))
     uploads = addon(settings.get("uploads_bucket"), layout.get("object_storage"))
     worker = bool(layout.get("worker")) and addon(settings.get("worker_enabled"), layout.get("worker"))

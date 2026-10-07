@@ -21,7 +21,7 @@ Architecture:
 
 import json
 import logging
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from models.manifest import GenerationManifest, UnresolvedAttribute
 from tools.hcl_render import escape_template, hcl_bool, hcl_str, route_lines, security_group_rules, tags_block

@@ -1,7 +1,8 @@
 """Pydantic model for generation_manifest.json produced by the Terraform/OpenTofu engine."""
 
 from datetime import datetime
-from typing import Any, Dict, List, Literal, Optional
+from typing import Dict, List, Literal, Optional
+
 from pydantic import BaseModel, Field
 
 

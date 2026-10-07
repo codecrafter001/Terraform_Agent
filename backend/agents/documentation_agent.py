@@ -8,8 +8,8 @@ from typing import Any, Dict, List
 
 from services.ollama_client import ollama_client
 from services.redis_client import redis_service
-from tools.scores import migration_safety, security_posture
 from tools.naming import unique_clean_name
+from tools.scores import migration_safety, security_posture
 from tools.zip_builder import ZipBuilder
 
 logger = logging.getLogger(__name__)
@@ -456,12 +456,14 @@ Verify that Terraform reports: `No changes. Your infrastructure matches the conf
 - `terraform/`: Modular Terraform configuration (`{'`, `'.join(sorted(tf_files.keys()))}`).
 - `inventory.json` / `inventory.csv`: Complete raw metadata of all discovered cloud assets.
 - `dependency_graph.json`: Full topological relationship DAG.
-- `infra_model.json`: Canonical Infra Model - one record per resource with import ID, dependencies, stack, adoption decision (manage / reference / exclude / review) and evidence.
+- `infra_model.json`: Canonical Infra Model - one record per resource with import ID, dependencies,
+  stack, adoption decision (manage / reference / exclude / review) and evidence.
 - `dependency_graph.html`: Standalone interactive D3 visualization - open directly in a browser, no server needed.
 - `reports/`: Granular validation, static security analysis, Infracost cost, and pending-approval reports.
 - `migration/import_plan.md`: The raw, ordered `terraform import` commands.
 - `migration/migration_checklist.md`: Step-by-step non-destructive resource adoption procedure.
-- `hardening/` (only when there are fixes): the optional Hardening proposal - changed files to apply on top of `terraform/` in a separate PR, and `changes.json` explaining each change. Never part of the adoption.
+- `hardening/` (only when there are fixes): the optional Hardening proposal - changed files to apply
+  on top of `terraform/` in a separate PR, and `changes.json` explaining each change. Never part of the adoption.
 - `reports/scores.json`: Migration Safety (will adopting change anything?) and Security Posture (what's wrong today?), kept separate.
 
 {pending_approval_section}

@@ -176,7 +176,8 @@ def _frontend(root: str, paths: List[str], sizes: Dict[str, int], prefix: str,
         except json.JSONDecodeError:
             pkg = {}
     p = analyze(base, sub_paths, sub_sizes)
-    rel = (lambda f: f"{prefix}/{f}" if prefix else f)
+    def rel(f):
+        return f"{prefix}/{f}" if prefix else f
     framework = p["framework"]
     has_build = bool(isinstance(pkg.get("scripts"), dict) and pkg["scripts"].get("build"))
     if _is_server(p) and framework not in CLIENT_FRAMEWORKS:
@@ -219,7 +220,8 @@ def _database(root: str, backend: BackendInfo, paths: List[str]) -> Optional[Dat
     p = backend["profile"]
     deps = {d.lower() for d in p["dependencies"]}
     prefix = backend["dir"]
-    rel = (lambda f: f"{prefix}/{f}" if prefix else f)
+    def rel(f):
+        return f"{prefix}/{f}" if prefix else f
     manifest = rel(p["dependency_manifest"] or "package.json")
     found: Optional[str] = None
     scheme: Optional[str] = None
@@ -393,7 +395,8 @@ def _worker(root: str, backend: BackendInfo, paths: List[str]) -> Optional[Worke
     """The background worker command, as one of a few fixed forms - never a command
     string taken from the project."""
     prefix = backend["dir"]
-    rel = (lambda f: f"{prefix}/{f}" if prefix else f)
+    def rel(f):
+        return f"{prefix}/{f}" if prefix else f
     tree = _Tree(root, paths, {})
     if backend["runtime"] == "node":
         try:
@@ -433,7 +436,8 @@ def _migration(root: str, backend: BackendInfo, paths: List[str]) -> Optional[Mi
     """The schema command to run before the server starts, as one of a few fixed
     forms - never a command string taken from the project."""
     prefix = backend["dir"]
-    rel = (lambda f: f"{prefix}/{f}" if prefix else f)
+    def rel(f):
+        return f"{prefix}/{f}" if prefix else f
     tree = _Tree(root, paths, {})
     if backend["runtime"] == "node":
         try:

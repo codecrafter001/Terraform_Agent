@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Literal, Optional
@@ -9,7 +10,6 @@ from typing import Any, Dict, List, Literal, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sse_starlette.sse import EventSourceResponse
 
-import logging
 from models.job import JobDecisionResponse, JobProgress, JobResults, PullRequestResponse
 from models.scan import (
     ApprovalActionRequest,
@@ -28,7 +28,10 @@ from models.scan import (
 from services.auth import require_api_key
 from services.celery_app import run_scan_task
 from services.database import (
-    create_job_record, mark_job_complete, mark_job_failed, set_github_pr, set_hardening_pr, set_wave_pr,
+    create_job_record,
+    set_github_pr,
+    set_hardening_pr,
+    set_wave_pr,
 )
 from services.rate_limiter import limiter
 from services.redis_client import redis_service

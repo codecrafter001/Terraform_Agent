@@ -6,11 +6,10 @@ import sys
 if sys.platform == 'win32':
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
-from typing import Optional
 import logging
 import os
 import time
-from datetime import datetime
+from typing import Optional
 
 from celery import Celery
 from celery.schedules import crontab
