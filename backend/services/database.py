@@ -312,6 +312,7 @@ def archive_job_record(job_id: str) -> bool:
 
 def get_app_settings() -> Dict[str, Any]:
     import json
+
     from models.orm import AppSetting
     session = SessionLocal()
     try:
@@ -322,6 +323,7 @@ def get_app_settings() -> Dict[str, Any]:
 
 def set_app_settings(values: Dict[str, Any]) -> None:
     import json
+
     from models.orm import AppSetting
     session = SessionLocal()
     try:

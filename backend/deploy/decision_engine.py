@@ -11,13 +11,14 @@ from typing import Dict, List, Literal, Optional, TypedDict
 from deploy.analyzer import ProjectProfile
 from deploy.config import MAX_LAMBDA_ZIP_BYTES
 
-DECISION_RULES_VERSION = 2
+DECISION_RULES_VERSION = 3
 
-TargetType = Literal["static_site", "lambda_http", "ecs_service"]
+TargetType = Literal["static_site", "lambda_http", "ecs_service", "fullstack_app"]
 TARGETS: Dict[str, str] = {
     "static_site": "Static site: S3 + CloudFront",
     "lambda_http": "Function: AWS Lambda + HTTPS function URL",
     "ecs_service": "Container: ECS Fargate + load balancer",
+    "fullstack_app": "Full stack: CloudFront + S3 frontend + ECS Fargate backend + RDS database",
 }
 
 
@@ -95,6 +96,22 @@ def decide(profile: ProjectProfile) -> Decision:
             eligible.append("ecs_service")
         reasons.append(_reason("server.container_detected", "ecs_service", "A server entrypoint was found; eligible for ECS Fargate container deployment."))
 
+    layout = profile.get("fullstack")
+    rich_fullstack = False
+    if layout:
+        eligible.append("fullstack_app")
+        backend = layout["backend"]
+        where = f"{backend['dir']}/" if backend["dir"] else "the project root"
+        parts = [f"{backend['runtime']} backend in {where}"]
+        if layout.get("frontend"):
+            fe = layout["frontend"]
+            parts.append(f"{fe['framework'] or 'static'} frontend in {fe['dir'] + '/' if fe['dir'] else 'the project root'}")
+        db = layout.get("database")
+        if db:
+            parts.append(f"{db['engine']} database" + ("" if db["rds_supported"] else " (not provisioned on AWS)"))
+        rich_fullstack = bool(layout.get("frontend") or (db and db["rds_supported"]) or backend["dir"])
+        reasons.append(_reason("fullstack.detected", "fullstack_app", "Full-stack app: " + ", ".join(parts) + "."))
+
     if profile["build_required"]:
         reasons.append(_reason(
             "build.unsafe_in_v1", "static_site",
@@ -104,8 +121,13 @@ def decide(profile: ProjectProfile) -> Decision:
     if not eligible and not any(r["target"] for r in reasons):
         reasons.append(_reason("unknown.project_type", None, "Couldn't recognise a static site, Lambda function, or container in this project."))
 
-    # Order of preference: a detected handler means Lambda, container server means ECS, otherwise static site.
-    recommended = next((t for t in ("lambda_http", "ecs_service", "static_site") if t in eligible), None)
+    # Order of preference: a detected handler means Lambda; a frontend, database or backend
+    # sub-folder means the full stack; a plain container server means ECS; otherwise static site.
+    if rich_fullstack:
+        order = ("lambda_http", "fullstack_app", "ecs_service", "static_site")
+    else:
+        order = ("lambda_http", "ecs_service", "fullstack_app", "static_site")
+    recommended = next((t for t in order if t in eligible), None)
     return {
         "rules_version": DECISION_RULES_VERSION,
         "eligible": eligible,

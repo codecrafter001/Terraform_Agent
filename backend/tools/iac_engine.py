@@ -4,15 +4,11 @@ Provides an extensible engine hierarchy that enforces centralized safety boundar
 and guarantees drop-in parity between HashiCorp Terraform and Linux Foundation OpenTofu.
 """
 
-from abc import ABC, abstractmethod
-import asyncio
 import logging
 import os
-import shutil
-import time
+from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, Tuple
 
-from tools.sandbox_registry import create_sandbox, release_sandbox
 from tools.terraform_runner import TerraformRunner
 
 logger = logging.getLogger("terraagent.iac_engine")

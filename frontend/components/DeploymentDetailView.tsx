@@ -1,16 +1,20 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { LucideIcon } from "lucide-react";
 import {
   AlertTriangle,
   CheckCircle2,
   Circle,
+  Clock,
+  Database,
   ExternalLink,
   FileCode2,
   GitMerge,
   GitPullRequest,
   Hammer,
+  KeyRound,
+  Layers,
   Loader2,
   Lock,
   Rocket,
@@ -19,11 +23,15 @@ import {
   ShieldCheck,
   Terminal,
   Trash2,
+  Upload,
+  Wallet,
   XCircle,
+  Zap,
 } from "lucide-react";
 import {
   createDeploymentPullRequest,
   deployDeployment,
+  estimateDeployment,
   fetchDeployment,
   fetchDeploymentArtifacts,
   fetchDeploymentLogs,
@@ -33,15 +41,22 @@ import {
   planDestroyDeployment,
   prepareDeployment,
   rollbackDeployment,
+  updateDeploymentFromGithub,
+  updateDeploymentSource,
 } from "@/lib/api";
 import { IN_PROGRESS_STATUSES, TARGET_LABELS } from "@/lib/deployments";
 import { ApprovalCard, PlanCard } from "./DeploymentPlanApproval";
 import type {
   BuildHistoryItem,
   DeploymentDetail,
+  DeployEvidence,
+  DeploymentEstimateResponse,
   DeploymentStatus,
   DeploymentTarget,
   EcsSettings,
+  FullstackLayout,
+  FullstackPreset,
+  FullstackSettings,
   LambdaSettings,
   PrepareDeploymentPayload,
   StaticSiteSettings,
@@ -55,6 +70,7 @@ const POSITIVE_REASONS = new Set([
   "static.output_present",
   "container.dockerfile_detected",
   "server.container_detected",
+  "fullstack.detected",
 ]);
 
 const STAGES: {
@@ -174,6 +190,33 @@ function ConfigureForm({ dep, onStarted }: { dep: DeploymentDetail; onStarted: (
     desired_count: dep.settings?.desired_count ?? 1,
     certificate_arn: dep.settings?.certificate_arn ?? "",
   });
+  const layout = dep.profile?.fullstack ?? null;
+  const [fullstackSettings, setFullstackSettings] = useState<FullstackSettings>({
+    preset: dep.settings?.preset ?? null,
+    cdn_enabled: dep.settings?.cdn_enabled ?? true,
+    container_port: dep.settings?.container_port ?? layout?.backend.port ?? 8080,
+    cpu: dep.settings?.cpu ?? 256,
+    memory_mb: dep.settings?.memory_mb ?? 512,
+    desired_count: dep.settings?.desired_count ?? 1,
+    health_check_path: dep.settings?.health_check_path ?? "/",
+    price_class: (dep.settings?.price_class as FullstackSettings["price_class"]) ?? "PriceClass_100",
+    database: dep.settings?.database ?? (layout?.database?.rds_supported ? "rds" : "none"),
+    db_instance_class: dep.settings?.db_instance_class ?? "db.t4g.micro",
+    db_allocated_storage_gb: dep.settings?.db_allocated_storage_gb ?? 20,
+    db_multi_az: dep.settings?.db_multi_az ?? false,
+    db_backup_retention_days: dep.settings?.db_backup_retention_days ?? 7,
+    db_final_snapshot: dep.settings?.db_final_snapshot ?? true,
+    aurora_min_acu: dep.settings?.aurora_min_acu ?? 0.5,
+    aurora_max_acu: dep.settings?.aurora_max_acu ?? 4,
+    cache: dep.settings?.cache ?? null,
+    cache_max_gb: dep.settings?.cache_max_gb ?? 1,
+    uploads_bucket: dep.settings?.uploads_bucket ?? null,
+    worker_enabled: dep.settings?.worker_enabled ?? null,
+    autoscaling_max_count: dep.settings?.autoscaling_max_count ?? null,
+    autoscaling_cpu_target: dep.settings?.autoscaling_cpu_target ?? 60,
+    run_migrations: dep.settings?.run_migrations ?? true,
+    secret_env_keys: dep.settings?.secret_env_keys ?? layout?.env_keys ?? [],
+  });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -187,6 +230,8 @@ function ConfigureForm({ dep, onStarted }: { dep: DeploymentDetail; onStarted: (
       payload = { target, settings: staticSettings };
     } else if (target === "lambda_http") {
       payload = { target, settings: lambdaSettings };
+    } else if (target === "fullstack_app") {
+      payload = { target, settings: fullstackSettings };
     } else {
       payload = {
         target: "ecs_service",
@@ -261,6 +306,9 @@ function ConfigureForm({ dep, onStarted }: { dep: DeploymentDetail; onStarted: (
             Public URL (unchecked: callers must sign with IAM)
           </label>
         </div>
+      ) : target === "fullstack_app" ? (
+        <FullstackSettingsForm depId={dep.id} applySuggestedPreset={!dep.settings} layout={layout}
+          settings={fullstackSettings} onChange={setFullstackSettings} />
       ) : (
         <div className="space-y-4">
           <div className="grid sm:grid-cols-4 gap-4">
@@ -313,6 +361,388 @@ function ConfigureForm({ dep, onStarted }: { dep: DeploymentDetail; onStarted: (
   );
 }
 
+const ENV_KEY_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
+
+const PRESET_TITLES: Record<FullstackPreset, string> = { dev: "Dev", staging: "Staging", production: "Production" };
+
+function FullstackSettingsForm({
+  depId,
+  applySuggestedPreset,
+  layout,
+  settings,
+  onChange,
+}: {
+  depId: string;
+  applySuggestedPreset: boolean;
+  layout: FullstackLayout | null;
+  settings: FullstackSettings;
+  onChange: (s: FullstackSettings) => void;
+}) {
+  const [newKey, setNewKey] = useState("");
+  const [estimate, setEstimate] = useState<DeploymentEstimateResponse | null>(null);
+  const [estimateError, setEstimateError] = useState<string | null>(null);
+  const presetApplied = useRef(!applySuggestedPreset);
+  const settingsKey = JSON.stringify(settings);
+
+  // Live estimate (backend/deploy/estimates.py), debounced while the user edits.
+  useEffect(() => {
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      estimateDeployment(depId, JSON.parse(settingsKey) as FullstackSettings)
+        .then((res) => {
+          if (cancelled) return;
+          setEstimate(res);
+          setEstimateError(null);
+          // A deployment that was never configured starts from the preset for its environment.
+          if (!presetApplied.current) {
+            presetApplied.current = true;
+            const current = JSON.parse(settingsKey) as FullstackSettings;
+            onChange({ ...current, ...res.presets[res.suggested_preset], preset: res.suggested_preset });
+          }
+        })
+        .catch((e) => !cancelled && setEstimateError(e instanceof Error ? e.message : "Estimate unavailable"));
+    }, 350);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [depId, settingsKey, onChange]);
+
+  const applyPreset = (name: FullstackPreset) => {
+    if (!estimate) return;
+    onChange({ ...settings, ...estimate.presets[name], preset: name });
+  };
+  const hasFrontend = Boolean(layout?.frontend);
+  const db = layout?.database ?? null;
+  const detectedKeys = layout?.env_keys ?? [];
+  const allKeys = Array.from(new Set([...detectedKeys, ...settings.secret_env_keys])).sort();
+  const set = <K extends keyof FullstackSettings>(key: K, value: FullstackSettings[K]) => onChange({ ...settings, [key]: value });
+  const toggleKey = (key: string) =>
+    set(
+      "secret_env_keys",
+      settings.secret_env_keys.includes(key)
+        ? settings.secret_env_keys.filter((k) => k !== key)
+        : [...settings.secret_env_keys, key].sort(),
+    );
+  const addKey = () => {
+    const key = newKey.trim().toUpperCase();
+    if (!ENV_KEY_PATTERN.test(key) || key.startsWith("AWS_")) return;
+    if (!settings.secret_env_keys.includes(key)) set("secret_env_keys", [...settings.secret_env_keys, key].sort());
+    setNewKey("");
+  };
+  const newKeyValid = ENV_KEY_PATTERN.test(newKey.trim().toUpperCase()) && !newKey.trim().toUpperCase().startsWith("AWS_");
+
+  return (
+    <div className="space-y-5">
+      <div className="space-y-2">
+        <div className="field-label flex items-center gap-1.5"><Zap className="w-3.5 h-3.5" /> Preset</div>
+        <div className="grid sm:grid-cols-3 gap-2">
+          {(["dev", "staging", "production"] as FullstackPreset[]).map((name) => (
+            <button key={name} type="button" disabled={!estimate} onClick={() => applyPreset(name)} aria-pressed={settings.preset === name}
+              className={`text-left rounded-xl border px-3 py-2.5 text-xs transition-colors disabled:opacity-60 ${
+                settings.preset === name ? "border-brand-600 bg-brand-50 text-brand-800" : "border-slate-200 hover:bg-slate-50"
+              }`}>
+              <div className="font-semibold">{PRESET_TITLES[name]}</div>
+              <div className="text-2xs text-slate-500 mt-0.5">{estimate?.preset_descriptions[name] ?? "Loading…"}</div>
+            </button>
+          ))}
+        </div>
+        <p className="text-2xs text-slate-500">A preset fills in the settings below; anything you change afterwards is kept.</p>
+      </div>
+
+      <label className={`flex items-start gap-2 text-xs ${hasFrontend ? "text-slate-400" : "text-slate-700"}`}>
+        <input type="checkbox" className="mt-0.5" disabled={hasFrontend} checked={settings.cdn_enabled || hasFrontend}
+          onChange={(e) => onChange({ ...settings, cdn_enabled: e.target.checked })} />
+        <span>
+          CloudFront in front of the app (HTTPS URL, caching)
+          <span className="block text-2xs text-slate-500">
+            {hasFrontend
+              ? "Always on here: the separate frontend is served from a private S3 bucket through CloudFront."
+              : "Off: the app is served over plain HTTP from the load balancer URL, and the first deploy is 4–8 minutes faster."}
+          </span>
+        </span>
+      </label>
+
+      <div className="grid sm:grid-cols-4 gap-4">
+        <div className="space-y-1.5">
+          <label htmlFor="fs_port" className="field-label">Backend port</label>
+          <input id="fs_port" type="number" min={1} max={65535} className="field-input" value={settings.container_port ?? ""}
+            onChange={(e) => set("container_port", Number(e.target.value))} />
+        </div>
+        <div className="space-y-1.5">
+          <label htmlFor="fs_cpu" className="field-label">CPU units</label>
+          <select id="fs_cpu" className="field-input" value={settings.cpu} onChange={(e) => set("cpu", Number(e.target.value))}>
+            <option value={256}>256 (0.25 vCPU)</option>
+            <option value={512}>512 (0.5 vCPU)</option>
+            <option value={1024}>1024 (1 vCPU)</option>
+            <option value={2048}>2048 (2 vCPU)</option>
+          </select>
+        </div>
+        <div className="space-y-1.5">
+          <label htmlFor="fs_mem" className="field-label">Memory (MB)</label>
+          <select id="fs_mem" className="field-input" value={settings.memory_mb} onChange={(e) => set("memory_mb", Number(e.target.value))}>
+            <option value={512}>512 MB</option>
+            <option value={1024}>1024 MB (1 GB)</option>
+            <option value={2048}>2048 MB (2 GB)</option>
+            <option value={4096}>4096 MB (4 GB)</option>
+          </select>
+        </div>
+        <div className="space-y-1.5">
+          <label htmlFor="fs_health" className="field-label">Health check path</label>
+          <input id="fs_health" type="text" className="field-input" value={settings.health_check_path}
+            onChange={(e) => set("health_check_path", e.target.value)} />
+        </div>
+      </div>
+
+      <div className="space-y-2">
+        <div className="field-label flex items-center gap-1.5"><Database className="w-3.5 h-3.5" /> Database</div>
+        <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-2">
+          {([
+            ["rds", db?.rds_supported ? `New ${db.engine === "mysql" ? "MySQL" : "PostgreSQL"} on RDS` : "New database on RDS", "Private subnets; the password is created and kept by RDS."],
+            ["aurora", "Aurora Serverless v2", "Scales with load, and can pause when idle. Same engine as detected."],
+            ["external", "Database I host", "An empty DATABASE_URL secret you fill with your own connection string."],
+            ["none", "No database", "Nothing database-related is created."],
+          ] as [FullstackSettings["database"], string, string][]).map(([mode, title, hint]) => {
+            const disabled = (mode === "rds" || mode === "aurora") && !db?.rds_supported;
+            return (
+              <button key={mode} type="button" disabled={disabled} onClick={() => set("database", mode)} aria-pressed={settings.database === mode}
+                className={`text-left rounded-xl border px-3 py-2.5 text-xs transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+                  settings.database === mode ? "border-brand-600 bg-brand-50 text-brand-800" : "border-slate-200 hover:bg-slate-50"
+                }`}>
+                <div className="font-semibold">{title}</div>
+                <div className="text-2xs text-slate-500 mt-0.5">{disabled ? "No PostgreSQL or MySQL driver was found in the backend." : hint}</div>
+              </button>
+            );
+          })}
+        </div>
+        {(settings.database === "rds" || settings.database === "aurora") && (
+          <div className="grid sm:grid-cols-3 gap-4 pt-1">
+            {settings.database === "aurora" ? (
+              <>
+                <div className="space-y-1.5">
+                  <label htmlFor="fs_minacu" className="field-label">Minimum capacity (ACU)</label>
+                  <select id="fs_minacu" className="field-input" value={settings.aurora_min_acu}
+                    onChange={(e) => set("aurora_min_acu", Number(e.target.value))}>
+                    <option value={0}>0 · pause when idle</option>
+                    <option value={0.5}>0.5 (~1 GB RAM)</option>
+                    <option value={1}>1</option>
+                    <option value={2}>2</option>
+                    <option value={4}>4</option>
+                  </select>
+                </div>
+                <div className="space-y-1.5">
+                  <label htmlFor="fs_maxacu" className="field-label">Maximum capacity (ACU)</label>
+                  <input id="fs_maxacu" type="number" min={1} max={128} className="field-input" value={settings.aurora_max_acu}
+                    onChange={(e) => set("aurora_max_acu", Number(e.target.value))} />
+                </div>
+                <p className="text-2xs text-slate-500 sm:mt-6">
+                  {settings.aurora_min_acu === 0
+                    ? "Pauses after 5 idle minutes; the first request after a pause waits about 15 seconds."
+                    : "Always on at the minimum; grows to the maximum under load."}
+                </p>
+              </>
+            ) : (
+            <>
+            <div className="space-y-1.5">
+              <label htmlFor="fs_dbclass" className="field-label">Instance class</label>
+              <select id="fs_dbclass" className="field-input" value={settings.db_instance_class}
+                onChange={(e) => set("db_instance_class", e.target.value as FullstackSettings["db_instance_class"])}>
+                <option value="db.t4g.micro">db.t4g.micro (2 vCPU burst, 1 GB)</option>
+                <option value="db.t4g.small">db.t4g.small (2 GB)</option>
+                <option value="db.t4g.medium">db.t4g.medium (4 GB)</option>
+                <option value="db.t4g.large">db.t4g.large (8 GB)</option>
+                <option value="db.m7g.large">db.m7g.large (8 GB, steady)</option>
+              </select>
+            </div>
+            <div className="space-y-1.5">
+              <label htmlFor="fs_dbsize" className="field-label">Storage (GB)</label>
+              <input id="fs_dbsize" type="number" min={20} max={500} className="field-input" value={settings.db_allocated_storage_gb}
+                onChange={(e) => set("db_allocated_storage_gb", Number(e.target.value))} />
+            </div>
+            <label className="flex items-center gap-2 text-xs text-slate-700 sm:mt-6">
+              <input type="checkbox" checked={settings.db_multi_az} onChange={(e) => set("db_multi_az", e.target.checked)} />
+              Standby in a second zone (doubles DB cost)
+            </label>
+            </>
+            )}
+            <div className="space-y-1.5">
+              <label htmlFor="fs_backups" className="field-label">Backup retention (days)</label>
+              <input id="fs_backups" type="number" min={0} max={35} className="field-input" value={settings.db_backup_retention_days}
+                onChange={(e) => set("db_backup_retention_days", Number(e.target.value))} />
+            </div>
+            <label className="flex items-center gap-2 text-xs text-slate-700 sm:mt-6 sm:col-span-2">
+              <input type="checkbox" checked={settings.db_final_snapshot} onChange={(e) => set("db_final_snapshot", e.target.checked)} />
+              Keep a final snapshot when this deployment is torn down
+            </label>
+            {layout?.migration && (
+              <label className="flex items-start gap-2 text-xs text-slate-700 sm:col-span-3">
+                <input type="checkbox" className="mt-0.5" checked={settings.run_migrations} onChange={(e) => set("run_migrations", e.target.checked)} />
+                <span>
+                  Create/update tables on start with <code className="font-mono">{layout.migration.command.join(" ")}</code>
+                  <span className="block text-2xs text-slate-500">Found in {layout.migration.evidence[0]?.file}. A failure is logged and the app still starts.</span>
+                </span>
+              </label>
+            )}
+          </div>
+        )}
+      </div>
+
+      <AddonsSection layout={layout} settings={settings} onChange={onChange} />
+
+      <div className="space-y-2">
+        <div className="field-label flex items-center gap-1.5"><KeyRound className="w-3.5 h-3.5" /> Secrets (environment variables)</div>
+        <p className="text-2xs text-slate-500">
+          Each checked name becomes an <strong>empty</strong> AWS Secrets Manager secret. You paste the values in the AWS console after
+          deploying; TerraAgent never sees them. The app starts once every checked secret has a value, so untick any it doesn&apos;t need.
+        </p>
+        {allKeys.length > 0 ? (
+          <div className="flex flex-wrap gap-2">
+            {allKeys.map((key) => (
+              <label key={key} className={`flex items-center gap-1.5 rounded-lg border px-2 py-1 text-2xs font-mono cursor-pointer ${
+                settings.secret_env_keys.includes(key) ? "border-brand-300 bg-brand-50 text-brand-800" : "border-slate-200 text-slate-500"
+              }`}>
+                <input type="checkbox" checked={settings.secret_env_keys.includes(key)} onChange={() => toggleKey(key)} />
+                {key}
+                {!detectedKeys.includes(key) && <span className="text-slate-400 font-sans">(added)</span>}
+              </label>
+            ))}
+          </div>
+        ) : (
+          <p className="text-2xs text-slate-500">No environment variables were found in the backend code.</p>
+        )}
+        <div className="flex gap-2 max-w-sm">
+          <input type="text" placeholder="ADD_ANOTHER_KEY" className="field-input text-xs font-mono" value={newKey}
+            onChange={(e) => setNewKey(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addKey(); } }} />
+          <button type="button" className="btn-secondary text-xs" onClick={addKey} disabled={!newKeyValid}>Add</button>
+        </div>
+      </div>
+
+      <EstimatePanel estimate={estimate?.estimate ?? null} error={estimateError} />
+
+      {layout && layout.warnings.length > 0 && (
+        <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-900 space-y-1">
+          <div className="font-semibold flex items-center gap-1.5"><AlertTriangle className="w-4 h-4" /> Before you deploy</div>
+          <ul className="list-disc pl-5 space-y-0.5">
+            {layout.warnings.map((w) => <li key={w}>{w}</li>)}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AddonsSection({
+  layout,
+  settings,
+  onChange,
+}: {
+  layout: FullstackLayout | null;
+  settings: FullstackSettings;
+  onChange: (s: FullstackSettings) => void;
+}) {
+  const cacheOn = settings.cache === null ? Boolean(layout?.cache) : settings.cache === "valkey";
+  const uploadsOn = settings.uploads_bucket ?? Boolean(layout?.object_storage);
+  const worker = layout?.worker ?? null;
+  const workerOn = Boolean(worker) && (settings.worker_enabled ?? true);
+  const scaling = settings.autoscaling_max_count !== null && settings.autoscaling_max_count > settings.desired_count;
+  const detected = (info?: { evidence: DeployEvidence[] } | null) =>
+    info ? `Detected: ${info.evidence[0]?.rule.split(".").pop()} in ${info.evidence[0]?.file}` : "Not detected in the code";
+  const row = "flex items-start gap-2 text-xs text-slate-700";
+
+  return (
+    <div className="space-y-3">
+      <div className="field-label flex items-center gap-1.5"><Layers className="w-3.5 h-3.5" /> Add-on services</div>
+      <div className="grid sm:grid-cols-2 gap-3">
+        <label className={row}>
+          <input type="checkbox" className="mt-0.5" checked={cacheOn}
+            onChange={(e) => onChange({ ...settings, cache: e.target.checked ? "valkey" : "none" })} />
+          <span>
+            Cache: Valkey (Redis-compatible), ElastiCache Serverless
+            <span className="block text-2xs text-slate-500">{detected(layout?.cache)} · the app gets REDIS_URL (TLS)</span>
+          </span>
+        </label>
+        <label className={row}>
+          <input type="checkbox" className="mt-0.5" checked={uploadsOn}
+            onChange={(e) => onChange({ ...settings, uploads_bucket: e.target.checked })} />
+          <span>
+            File uploads: private S3 bucket
+            <span className="block text-2xs text-slate-500">{detected(layout?.object_storage)} · the app gets S3_BUCKET</span>
+          </span>
+        </label>
+        <label className={`${row} ${worker ? "" : "opacity-50"}`}>
+          <input type="checkbox" className="mt-0.5" disabled={!worker} checked={workerOn}
+            onChange={(e) => onChange({ ...settings, worker_enabled: e.target.checked })} />
+          <span>
+            Background worker (second service, same image)
+            <span className="block text-2xs text-slate-500">
+              {worker ? <>Runs <code className="font-mono">{worker.command.join(" ")}</code></> : "No worker script, Celery or RQ app found"}
+            </span>
+          </span>
+        </label>
+        <label className={row}>
+          <input type="checkbox" className="mt-0.5" checked={scaling}
+            onChange={(e) => onChange({
+              ...settings,
+              autoscaling_max_count: e.target.checked ? Math.min(20, Math.max(settings.desired_count * 2, settings.desired_count + 1)) : null,
+            })} />
+          <span>
+            Scale app tasks automatically on CPU
+            <span className="block text-2xs text-slate-500">Between the task count above and a maximum you set</span>
+          </span>
+        </label>
+      </div>
+      {scaling && (
+        <div className="grid sm:grid-cols-3 gap-4">
+          <div className="space-y-1.5">
+            <label htmlFor="fs_maxtasks" className="field-label">Maximum tasks</label>
+            <input id="fs_maxtasks" type="number" min={settings.desired_count} max={20} className="field-input"
+              value={settings.autoscaling_max_count ?? settings.desired_count}
+              onChange={(e) => onChange({ ...settings, autoscaling_max_count: Number(e.target.value) })} />
+          </div>
+          <div className="space-y-1.5">
+            <label htmlFor="fs_cputarget" className="field-label">Target CPU (%)</label>
+            <input id="fs_cputarget" type="number" min={20} max={90} className="field-input" value={settings.autoscaling_cpu_target}
+              onChange={(e) => onChange({ ...settings, autoscaling_cpu_target: Number(e.target.value) })} />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function EstimatePanel({ estimate, error }: { estimate: DeploymentEstimateResponse["estimate"] | null; error: string | null }) {
+  if (error) return <p className="text-2xs text-slate-500">Estimate unavailable: {error}</p>;
+  if (!estimate) return <p className="text-2xs text-slate-500">Estimating cost and time…</p>;
+  return (
+    <div className="rounded-xl border border-slate-200 bg-slate-50/60 p-4 space-y-3">
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <div className="text-2xs text-slate-500 flex items-center gap-1"><Wallet className="w-3.5 h-3.5" /> Estimated cost</div>
+          <div className="text-lg font-bold text-slate-900">${estimate.monthly_usd.toFixed(0)}<span className="text-xs font-medium text-slate-500"> / month</span></div>
+        </div>
+        <div>
+          <div className="text-2xs text-slate-500 flex items-center gap-1"><Clock className="w-3.5 h-3.5" /> First deploy</div>
+          <div className="text-lg font-bold text-slate-900">{estimate.minutes_low}–{estimate.minutes_high}<span className="text-xs font-medium text-slate-500"> min</span></div>
+        </div>
+      </div>
+      <details className="text-xs">
+        <summary className="cursor-pointer text-slate-500">Breakdown</summary>
+        <ul className="mt-2 space-y-1">
+          {estimate.lines.map((line) => (
+            <li key={line.item} className="flex justify-between gap-4">
+              <span className="text-slate-600">{line.item}</span>
+              <span className="font-mono text-slate-900">${line.monthly_usd.toFixed(2)}</span>
+            </li>
+          ))}
+        </ul>
+      </details>
+      <ul className="text-2xs text-slate-500 list-disc pl-4 space-y-0.5">
+        {estimate.notes.map((n) => <li key={n}>{n}</li>)}
+      </ul>
+    </div>
+  );
+}
+
 function AnalysisCard({ dep }: { dep: DeploymentDetail }) {
   const p = dep.profile;
   const intake = dep.intake;
@@ -353,6 +783,22 @@ function AnalysisCard({ dep }: { dep: DeploymentDetail }) {
           {p.static_output_dir !== null && <Row label="Static site">{p.static_output_dir || "project root"}</Row>}
           {p.dependencies.length > 0 && <Row label="Dependencies">{`${p.dependencies.length} (${p.dependency_manifest})`}</Row>}
           {p.server_entrypoint && <Row label="Server">{p.listens_on_port ? `listens on ${p.listens_on_port}` : "yes"}</Row>}
+          {p.fullstack && (
+            <>
+              <Row label="Backend">{`${p.fullstack.backend.framework ?? p.fullstack.backend.runtime} in ${p.fullstack.backend.dir || "project root"}`}</Row>
+              <Row label="Frontend">
+                {p.fullstack.frontend
+                  ? `${p.fullstack.frontend.framework ?? "static"} in ${p.fullstack.frontend.dir || "project root"}`
+                  : "served by the backend"}
+              </Row>
+              <Row label="Database">
+                {p.fullstack.database
+                  ? `${p.fullstack.database.engine}${p.fullstack.database.rds_supported ? "" : " (not provisioned on AWS)"}`
+                  : "none detected"}
+              </Row>
+              {p.fullstack.env_keys.length > 0 && <Row label="Env variables">{p.fullstack.env_keys.join(", ")}</Row>}
+            </>
+          )}
           {Object.keys(p.evidence).length > 0 && (
             <details className="text-xs py-1.5">
               <summary className="cursor-pointer text-slate-500">Evidence</summary>
@@ -898,6 +1344,129 @@ function OutputsCard({ outputs }: { outputs: Record<string, unknown> }) {
   );
 }
 
+/** DEPLOYED -> new source: same stack, target and settings; stops at approval. */
+function UpdateCodeCard({ dep, onStarted }: { dep: DeploymentDetail; onStarted: () => void }) {
+  const [file, setFile] = useState<File | null>(null);
+  const [ref, setRef] = useState("");
+  const [token, setToken] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const fromGithub = dep.source_kind === "github";
+
+  const start = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      if (fromGithub) {
+        await updateDeploymentFromGithub(dep.id, { ref: ref.trim() || undefined, github_token: token.trim() || undefined });
+      } else if (file) {
+        await updateDeploymentSource(dep.id, file);
+      }
+      onStarted();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not start the code update");
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="card p-5 space-y-4">
+      <SectionHeading
+        icon={Upload}
+        title="Deploy a new version"
+        description="Same AWS stack, target and settings. TerraAgent analyzes, builds, verifies and plans it on its own, then waits for your approval."
+      />
+      {fromGithub ? (
+        <div className="grid sm:grid-cols-2 gap-4">
+          <div className="space-y-1.5">
+            <label htmlFor="upd_ref" className="field-label">Branch, tag or commit</label>
+            <input id="upd_ref" type="text" className="field-input font-mono text-xs" placeholder={dep.source_name.split("@")[1] || "default branch"}
+              value={ref} onChange={(e) => setRef(e.target.value)} />
+          </div>
+          <div className="space-y-1.5">
+            <label htmlFor="upd_token" className="field-label">GitHub token (private repos only)</label>
+            <input id="upd_token" type="password" autoComplete="off" className="field-input text-xs" value={token}
+              onChange={(e) => setToken(e.target.value)} />
+            <p className="text-2xs text-slate-500">Used once for the download, never stored.</p>
+          </div>
+        </div>
+      ) : (
+        <div className="space-y-1.5">
+          <label htmlFor="upd_zip" className="field-label">New version (.zip)</label>
+          <input id="upd_zip" type="file" accept=".zip,application/zip" className="field-input text-xs"
+            onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
+        </div>
+      )}
+      <p className="text-2xs text-slate-500">
+        A code-only change usually takes 5–7 minutes from approval to live, with no downtime. If the new version needs
+        different infrastructure, the plan shows it before anything changes.
+      </p>
+      {error && <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-800">{error}</div>}
+      <button type="button" className="btn-primary" onClick={start} disabled={busy || (!fromGithub && !file)}>
+        {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
+        {fromGithub ? "Pull latest and plan" : "Upload and plan"}
+      </button>
+    </div>
+  );
+}
+
+function CodeUpdateBanner({ dep }: { dep: DeploymentDetail }) {
+  const update = dep.code_update;
+  if (!update) return null;
+  return (
+    <div className="p-3 rounded-xl bg-indigo-50 border border-indigo-200 text-xs text-indigo-900 flex items-start gap-2">
+      <Upload className="w-4 h-4 shrink-0 mt-0.5" />
+      <div>
+        <div className="font-semibold">Updating the deployed app to {dep.source_name}</div>
+        <div>
+          The live app keeps running the previous version
+          {update.previous_image_tag ? <> (<code className="font-mono">{update.previous_image_tag}</code>)</> : null} until
+          you approve and deploy this plan.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// backend/deploy/templates/fullstack_app/outputs.tf::secrets_to_fill (names only, never values)
+function SecretsToFillCard({ outputs, region }: { outputs: Record<string, unknown>; region: string }) {
+  const raw = outputs.secrets_to_fill;
+  if (!raw || typeof raw !== "object") return null;
+  const secrets = Object.entries(raw as Record<string, string>);
+  if (secrets.length === 0) return null;
+  const service = typeof outputs.service_name === "string" ? outputs.service_name : null;
+  const cluster = typeof outputs.cluster_name === "string" ? outputs.cluster_name : null;
+  return (
+    <div className="card p-5 space-y-3 border-amber-200 bg-amber-50/40">
+      <SectionHeading icon={KeyRound} title="Fill in your secrets"
+        description="The app starts once each of these has a value. TerraAgent created them empty and never reads them." />
+      <ol className="list-decimal pl-5 text-xs text-slate-700 space-y-1">
+        <li>Open each secret below in the AWS console and choose <strong>Retrieve secret value → Set secret value</strong> (plaintext).</li>
+        <li>
+          Then restart the app: ECS console → cluster <code className="font-mono">{cluster ?? "…"}</code> → service{" "}
+          <code className="font-mono">{service ?? "…"}</code> → <strong>Update service → Force new deployment</strong>.
+        </li>
+      </ol>
+      <div className="space-y-1.5">
+        {secrets.map(([env, name]) => (
+          <div key={env} className="flex justify-between items-center gap-4 py-1.5 border-b border-amber-100 last:border-0 text-xs">
+            <span className="font-mono font-semibold text-slate-800">{env}</span>
+            <a
+              href={`https://${region}.console.aws.amazon.com/secretsmanager/secret?name=${encodeURIComponent(name)}&region=${region}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-indigo-600 hover:text-indigo-800 font-mono flex items-center gap-1 break-all"
+            >
+              {name}
+              <ExternalLink className="w-3 h-3 shrink-0" />
+            </a>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function ReconciliationAlert({ error }: { error?: string | null }) {
   return (
     <div className="p-4 rounded-2xl bg-amber-50 border border-amber-200 text-xs text-amber-900 space-y-2">
@@ -965,10 +1534,10 @@ export default function DeploymentDetailView({ id }: { id: string }) {
         <span className="text-xs text-slate-500">{dep.region} · {dep.environment}</span>
       </div>
       <StageTracker status={dep.status} />
-      {dep.status === "FAILED" && dep.error && (
+      {(dep.status === "FAILED" || dep.status === "FAILED_PARTIAL") && dep.error && (
         <div className="p-4 rounded-2xl bg-rose-50 border border-rose-200 text-xs text-rose-900 flex gap-2 whitespace-pre-wrap">
           <XCircle className="w-4 h-4 shrink-0 mt-0.5" />
-          <span>{dep.error}</span>
+          <span className="min-w-0 break-words">{dep.error}</span>
         </div>
       )}
       {dep.status === "NEEDS_RECONCILIATION" && <ReconciliationAlert error={dep.error} />}
@@ -976,6 +1545,9 @@ export default function DeploymentDetailView({ id }: { id: string }) {
       {dep.can_destroy && <TeardownCard dep={dep} onStarted={reload} />}
       {/* Active Step Actions (Prominently placed at top for fast execution) */}
       {dep.outputs && Object.keys(dep.outputs).length > 0 && <OutputsCard outputs={dep.outputs} />}
+      {dep.outputs && <SecretsToFillCard outputs={dep.outputs} region={dep.region} />}
+      {dep.can_update_code && <UpdateCodeCard dep={dep} onStarted={reload} />}
+      {dep.code_update?.active && <CodeUpdateBanner dep={dep} />}
       {dep.pr && <PullRequestStatusCard dep={dep} onStarted={reload} />}
       {dep.can_deploy && (
         <div className="grid lg:grid-cols-2 gap-5 items-start">

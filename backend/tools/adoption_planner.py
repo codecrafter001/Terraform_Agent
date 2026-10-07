@@ -265,7 +265,7 @@ def build_adoption_plan(
     total_deps = dependency_graph.get("edge_count", len(dependency_graph.get("links", [])))
     high_conf_deps = dependency_graph.get(
         "high_confidence_edge_count",
-        sum(1 for l in dependency_graph.get("links", []) if l.get("confidence", 1.0) >= confidence_threshold)
+        sum(1 for link in dependency_graph.get("links", []) if link.get("confidence", 1.0) >= confidence_threshold)
     )
 
     plan = AdoptionPlan(

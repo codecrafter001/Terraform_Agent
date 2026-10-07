@@ -25,15 +25,15 @@ def setup_db():
 # ---------------------------------------------------------------------------
 
 def test_check_apply_argv_valid():
-    cmd = ["terraform", "apply", "-input=false", "-lock-timeout=5m", "-no-color", "tfplan"]
+    cmd = ["terraform", "apply", "-input=false", "-lock-timeout=5m", "-parallelism=20", "-no-color", "tfplan"]
     assert check_apply_argv(cmd) == "apply"
 
-    cmd_tofu = ["tofu", "apply", "-input=false", "-lock-timeout=5m", "-no-color", "tfplan"]
+    cmd_tofu = ["tofu", "apply", "-input=false", "-lock-timeout=5m", "-parallelism=20", "-no-color", "tfplan"]
     assert check_apply_argv(cmd_tofu) == "apply"
 
 
 def test_check_apply_argv_destroy_plan_kind():
-    cmd = ["terraform", "apply", "-input=false", "-lock-timeout=5m", "-no-color", "tfplan.destroy"]
+    cmd = ["terraform", "apply", "-input=false", "-lock-timeout=5m", "-parallelism=20", "-no-color", "tfplan.destroy"]
     assert check_apply_argv(cmd, plan_kind="destroy") == "apply"
 
 
@@ -43,7 +43,7 @@ def test_check_apply_argv_rejects_empty():
 
 
 def test_check_apply_argv_rejects_invalid_binary():
-    cmd = ["bash", "apply", "-input=false", "-lock-timeout=5m", "-no-color", "tfplan"]
+    cmd = ["bash", "apply", "-input=false", "-lock-timeout=5m", "-parallelism=20", "-no-color", "tfplan"]
     with pytest.raises(ValueError, match="Safety Violation: only terraform/tofu allowed"):
         check_apply_argv(cmd)
 
@@ -60,13 +60,13 @@ def test_check_apply_argv_rejects_invalid_binary():
     "import",
 ])
 def test_check_apply_argv_rejects_forbidden_flags(forbidden_flag):
-    cmd = ["terraform", "apply", "-input=false", "-lock-timeout=5m", "-no-color", "tfplan", forbidden_flag]
+    cmd = ["terraform", "apply", "-input=false", "-lock-timeout=5m", "-parallelism=20", "-no-color", "tfplan", forbidden_flag]
     with pytest.raises(ValueError, match="Safety Violation"):
         check_apply_argv(cmd)
 
 
 def test_check_apply_argv_rejects_extra_arguments():
-    cmd = ["terraform", "apply", "-input=false", "-lock-timeout=5m", "-no-color", "tfplan", "-parallelism=10"]
+    cmd = ["terraform", "apply", "-input=false", "-lock-timeout=5m", "-parallelism=20", "-no-color", "tfplan", "-parallelism=10"]
     with pytest.raises(ValueError, match="Safety Violation"):
         check_apply_argv(cmd)
 
@@ -307,3 +307,15 @@ async def test_apply_approved_success_flow(monkeypatch):
         assert dep["status"] == DeployStatus.DEPLOYED.value
         assert dep["applied_at"] is not None
         assert dep["outputs"]["website_url"] == "https://d123.cloudfront.net"
+
+
+def test_apply_failure_message_carries_terraform_errors():
+    from deploy.apply_runner import _apply_failure_message
+
+    lines = ["aws_vpc.main: Creating...",
+             "Error: creating IAM Role (x-exec): NoSuchEntity: Scope ARN: "
+             "arn:aws:iam::1:policy/TerraAgentWorkloadBoundary does not exist or is not attachable."]
+    msg = _apply_failure_message(1, lines)
+    assert msg.startswith("Terraform apply failed with exit code 1:\nError: creating IAM Role")
+    assert "TerraAgentWorkloadBoundary" in msg
+    assert _apply_failure_message(1, []) == "Terraform apply failed with exit code 1 and wrote nothing to stderr."

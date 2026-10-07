@@ -12,8 +12,8 @@ import boto3
 from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
 
-from tools.cloud_discovery_interface import CloudDiscoveryInterface
 from tools.aws_scanner_services import ExtraServiceScans
+from tools.cloud_discovery_interface import CloudDiscoveryInterface
 
 logger = logging.getLogger("terraagent.aws_scanner")
 

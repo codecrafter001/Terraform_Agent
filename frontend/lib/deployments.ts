@@ -5,6 +5,7 @@ export const TARGET_LABELS: Record<DeploymentTarget, string> = {
   static_site: "Static site · S3 + CloudFront",
   lambda_http: "Function · Lambda + HTTPS URL",
   ecs_service: "Container · ECS Fargate + ALB",
+  fullstack_app: "Full stack · CloudFront + ECS + RDS",
 };
 
 // backend/deploy/config.py::MAX_UPLOAD_BYTES default

@@ -107,7 +107,10 @@ export function ApprovalCard({ dep, onDecided }: { dep: DeploymentDetail; onDeci
 
   const summary = dep.plan_summary;
   const policy = dep.plan_policy;
-  const destructive = Boolean(dep.is_destructive || summary?.is_destructive || policy?.is_destructive);
+  // A code-only update replaces the task definition, which ECS keeps as a new revision; the
+  // backend doesn't count that as destructive (deploy/code_update.py), so neither do we.
+  const codeOnly = Boolean(summary?.code_only);
+  const destructive = !codeOnly && Boolean(dep.is_destructive || summary?.is_destructive || policy?.is_destructive);
   const policyFailed = policy ? !policy.passed : false;
   const hash = dep.plan_bundle_sha256 ?? "";
   const canApprove = confirm && (!destructive || ackDestructive) && !policyFailed && Boolean(hash);
@@ -136,6 +139,16 @@ export function ApprovalCard({ dep, onDecided }: { dep: DeploymentDetail; onDeci
   return (
     <div className="card p-5 space-y-4 border-amber-200 bg-amber-50/30">
       <SectionHeading icon={ShieldCheck} title="Review and approve the plan" description="This is exactly what will be created or changed in your AWS account." />
+
+      {codeOnly && (
+        <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-900 space-y-0.5">
+          <div className="font-semibold flex items-center gap-1.5"><CheckCircle2 className="w-4 h-4" /> Code-only update</div>
+          <div>
+            Only the new source, its image tag and a new task revision change; no infrastructure is added or removed.
+            After you deploy, the app rolls to the new version in about 5–7 minutes with no downtime.
+          </div>
+        </div>
+      )}
 
       {summary && (
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">

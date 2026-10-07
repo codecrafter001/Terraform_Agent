@@ -9,7 +9,7 @@ upload can ever become Terraform syntax. No LLM is involved.
 import json
 import os
 import re
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from deploy.builder import BuildResult
 
@@ -33,8 +33,87 @@ def template_files(target: str) -> Dict[str, str]:
     return files
 
 
+def _container_vars(settings: Dict[str, Any], build: BuildResult) -> Dict[str, Any]:
+    """Variables shared by the ecs_service and fullstack_app templates."""
+    if not build.package_file or not build.image_tag:
+        raise ValueError("container targets need a packaged source.zip")
+    return {
+        "source_file": build.package_file,
+        "image_tag": str(settings.get("image_tag") or build.image_tag),
+        "container_port": int(settings.get("container_port") or build.container_port or 8080),
+        "cpu": int(settings.get("cpu", 256)),
+        "memory_mb": int(settings.get("memory_mb", 512)),
+        "desired_count": int(settings.get("desired_count", 1)),
+        "health_check_path": str(settings.get("health_check_path") or "/"),
+        "log_retention_days": int(settings.get("log_retention_days", 30)),
+        "permissions_boundary_arn": settings.get("permissions_boundary_arn") or None,
+    }
+
+
+# Environment variables the stack itself sets when an add-on is on: never asked for as secrets.
+CACHE_ENV = {"REDIS_URL", "REDIS_HOST", "REDIS_PORT", "REDIS_TLS", "CACHE_URL", "VALKEY_URL"}
+UPLOADS_ENV = {"S3_BUCKET", "S3_BUCKET_NAME", "UPLOADS_BUCKET", "BUCKET_NAME", "S3_UPLOADS_BUCKET"}
+
+
+def _addon(setting: Any, detected: Any) -> bool:
+    """None follows detection; an explicit value overrides it."""
+    return bool(detected) if setting is None else bool(setting)
+
+
+def _fullstack_vars(settings: Dict[str, Any], profile: Dict[str, Any]) -> Dict[str, Any]:
+    layout = profile.get("fullstack") or {}
+    backend = layout.get("backend") or {}
+    frontend = layout.get("frontend")
+    db = layout.get("database")
+    mode = settings.get("database") or ("rds" if db and db.get("rds_supported") else "none")
+    if mode in ("rds", "aurora") and not (db and db.get("rds_supported")):
+        raise ValueError("an RDS or Aurora database needs a detected PostgreSQL or MySQL driver")
+    engine = (db or {}).get("engine") if mode in ("rds", "aurora") else None
+    cache = _addon(None if settings.get("cache") is None else settings.get("cache") == "valkey", layout.get("cache"))
+    uploads = _addon(settings.get("uploads_bucket"), layout.get("object_storage"))
+    worker = layout.get("worker") if _addon(settings.get("worker_enabled"), layout.get("worker")) else None
+    desired = int(settings.get("desired_count", 1))
+    keys = settings.get("secret_env_keys")
+    provided = (CACHE_ENV if cache else set()) | (UPLOADS_ENV if uploads else set())
+    secret_keys = sorted(set((layout.get("env_keys") or []) if keys is None else keys) - provided)
+    if mode == "external" and "DATABASE_URL" not in secret_keys:
+        secret_keys = sorted([*secret_keys, "DATABASE_URL"])
+    committed_output = bool(frontend) and not frontend.get("build_required")
+    return {
+        "backend_dir": backend.get("dir") or "",
+        "frontend_enabled": bool(frontend),
+        "frontend_dir": (frontend or {}).get("dir") or "",
+        "frontend_build": bool((frontend or {}).get("build_required")),
+        "frontend_output": (frontend.get("static_output_dir") or ".") if committed_output else "",
+        "frontend_api_env": list((frontend or {}).get("api_url_env") or []),
+        "frontend_api_suffix": "" if (frontend or {}).get("appends_api_prefix") else "/api",
+        "api_strip_prefix": bool(frontend) and not backend.get("uses_api_prefix", False),
+        "price_class": settings.get("price_class", "PriceClass_100"),
+        "database_engine": engine,
+        "database_kind": "aurora" if mode == "aurora" else "rds",
+        "aurora_min_acu": float(settings.get("aurora_min_acu", 0.5)),
+        "aurora_max_acu": float(settings.get("aurora_max_acu", 4)),
+        "cache_enabled": cache,
+        "cache_max_gb": int(settings.get("cache_max_gb", 1)),
+        "uploads_bucket_enabled": uploads,
+        "worker_command": list(worker["command"]) if worker else [],
+        "autoscaling_max_count": max(desired, int(settings.get("autoscaling_max_count") or desired)),
+        "autoscaling_cpu_target": int(settings.get("autoscaling_cpu_target", 60)),
+        "database_url_scheme": (db or {}).get("url_scheme") if engine else None,
+        "db_instance_class": settings.get("db_instance_class", "db.t4g.micro"),
+        "db_allocated_storage_gb": int(settings.get("db_allocated_storage_gb", 20)),
+        "db_multi_az": bool(settings.get("db_multi_az", False)),
+        "db_backup_retention_days": int(settings.get("db_backup_retention_days", 7)),
+        "db_final_snapshot": bool(settings.get("db_final_snapshot", True)),
+        # The template keeps CloudFront on regardless when there is a separate frontend.
+        "cdn_enabled": bool(settings.get("cdn_enabled", True)),
+        "run_migrations": bool(engine and layout.get("migration") and settings.get("run_migrations", True)),
+        "secret_env_keys": secret_keys,
+    }
+
+
 def tfvars(target: str, deployment_id: str, region: str, environment: str,
-           settings: Dict[str, Any], build: BuildResult) -> Dict[str, Any]:
+           settings: Dict[str, Any], build: BuildResult, profile: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     if not _DEPLOYMENT_ID.match(deployment_id):
         raise ValueError("invalid deployment id")
     common = {"deployment_id": deployment_id, "region": region, "environment": environment}
@@ -62,26 +141,27 @@ def tfvars(target: str, deployment_id: str, region: str, environment: str,
     if target == "ecs_service":
         return {
             **common,
-            "container_port": int(settings.get("container_port") or build.container_port or 8080),
-            "cpu": int(settings.get("cpu", 256)),
-            "memory_mb": int(settings.get("memory_mb", 512)),
-            "desired_count": int(settings.get("desired_count", 1)),
-            "image_tag": str(settings.get("image_tag", "latest")),
-            "certificate_arn": settings.get("certificate_arn"),
-            "log_retention_days": int(settings.get("log_retention_days", 30)),
-            "permissions_boundary_arn": settings.get("permissions_boundary_arn"),
+            **_container_vars(settings, build),
+            "certificate_arn": settings.get("certificate_arn") or None,
+        }
+    if target == "fullstack_app":
+        return {
+            **common,
+            **_container_vars(settings, build),
+            **_fullstack_vars(settings, profile or {}),
         }
     raise ValueError(f"Unknown deployment target '{target}'")
 
 
 def render(target: str, deployment_id: str, region: str, environment: str,
-           settings: Dict[str, Any], build: BuildResult, workdir: str) -> Dict[str, str]:
+           settings: Dict[str, Any], build: BuildResult, workdir: str,
+           profile: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
     """Write the project into `workdir` (next to the builder's site/ or
     artifacts/ output) and return its text files: the .tf files plus
     terraform.tfvars.json."""
     files = template_files(target)
     files[TFVARS_FILENAME] = json.dumps(
-        tfvars(target, deployment_id, region, environment, settings, build), indent=2, sort_keys=True
+        tfvars(target, deployment_id, region, environment, settings, build, profile), indent=2, sort_keys=True
     ) + "\n"
     for name, content in files.items():
         with open(os.path.join(workdir, name), "w", encoding="utf-8", newline="\n") as f:

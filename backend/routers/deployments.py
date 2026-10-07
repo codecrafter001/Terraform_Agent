@@ -9,20 +9,24 @@ remains gated until Phase 4.
 """
 
 import asyncio
-from datetime import datetime
 import json
 import logging
+import os
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Set
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
 from sse_starlette.sse import EventSourceResponse
 
+from deploy import code_update
 from deploy.artifacts import get_artifact_store
 from deploy.config import MAX_UPLOAD_BYTES, SOURCE_RETENTION_DAYS
+from deploy.estimates import PRESET_DESCRIPTIONS, PRESETS, estimate_fullstack, preset_for_environment
 from deploy.source_intake import IntakeError, download_github_archive, is_zip
 from deploy.store import (
     DeployStatus,
     InvalidTransition,
+    can_destroy,
     create_deployment,
     delete_artifact_record,
     get_deployment,
@@ -37,12 +41,14 @@ from models.deployment import (
     ApprovalRequest,
     BuildHistoryItem,
     CreatePullRequestRequest,
-    DeployRequest,
     DeploymentAccepted,
     DeploymentDetail,
     DeploymentEventResponse,
     DeploymentSummary,
+    DeployRequest,
+    FullstackSettings,
     GitHubSourceRequest,
+    GitHubUpdateRequest,
     MergePullRequestRequest,
     PlanRequest,
     PrepareRequest,
@@ -70,6 +76,7 @@ _inline_tasks: Set["asyncio.Task[None]"] = set()
 _PREPARABLE = frozenset({DeployStatus.ANALYZED, DeployStatus.VERIFIED, DeployStatus.FAILED})
 _PLANNABLE = frozenset({
     DeployStatus.VERIFIED,
+    DeployStatus.FAILED_PARTIAL,  # retry after a part-way apply: a new plan from the real state
     DeployStatus.APPROVED,
     DeployStatus.REJECTED,
     DeployStatus.EXPIRED,
@@ -88,10 +95,16 @@ def _dispatch(stage: str, deployment_id: str) -> None:
         run = pipeline.run_build_and_verify
     elif stage == "apply":
         task = tasks.apply_task
-        run = lambda dep_id: asyncio.to_thread(tasks.apply_task, dep_id)
+
+        async def run_apply(dep_id):
+            return await asyncio.to_thread(tasks.apply_task, dep_id)
+        run = run_apply
     elif stage == "destroy_plan":
         task = tasks.plan_destroy_task
-        run = lambda dep_id: asyncio.to_thread(tasks.plan_destroy_task, dep_id)
+
+        async def run_destroy_plan(dep_id):
+            return await asyncio.to_thread(tasks.plan_destroy_task, dep_id)
+        run = run_destroy_plan
     else:
         task = tasks.plan_task
         run = pipeline.run_plan
@@ -166,11 +179,7 @@ def _can_rollback(dep: Dict[str, Any]) -> bool:
 
 
 def _can_destroy(dep: Dict[str, Any]) -> bool:
-    return DeployStatus(dep["status"]) in {
-        DeployStatus.DEPLOYED,
-        DeployStatus.FAILED_PARTIAL,
-        DeployStatus.NEEDS_RECONCILIATION,
-    } and bool(dep.get("target_id"))
+    return can_destroy(dep) and bool(dep.get("target_id"))
 
 
 
@@ -221,6 +230,82 @@ async def github_source(request: Request, body: GitHubSourceRequest) -> Deployme
                               message="Repository downloaded; analysis started")
 
 
+@router.post("/{deployment_id}/estimate")
+@limiter.limit("240/hour")
+async def estimate_deployment(request: Request, deployment_id: str, body: FullstackSettings) -> Dict[str, Any]:
+    """Monthly cost and first-deploy time for full-stack settings, plus the presets.
+    Pure arithmetic on the analysed layout: nothing is built and AWS isn't called."""
+    dep = get_deployment(deployment_id, tenant_id=current_tenant(request))
+    if not dep:
+        raise HTTPException(status_code=404, detail="Deployment not found")
+    layout = (dep.get("profile") or {}).get("fullstack")
+    return {
+        "estimate": estimate_fullstack(body.model_dump(), layout),
+        "presets": PRESETS,
+        "preset_descriptions": PRESET_DESCRIPTIONS,
+        "suggested_preset": preset_for_environment(dep.get("environment")),
+    }
+
+
+def _start_code_update(request: Request, deployment_id: str, data: bytes, source_name: str) -> DeploymentAccepted:
+    tenant = current_tenant(request)
+    dep = get_deployment(deployment_id, tenant_id=tenant)
+    if not dep:
+        raise HTTPException(status_code=404, detail="Deployment not found")
+    if not code_update.can_update_code(dep):
+        raise HTTPException(status_code=409, detail=f"New code can be deployed only to a deployed app (this one is {dep['status']})")
+    stored = get_artifact_store().put_bytes(data)
+    user = current_user(request) or "api"
+    try:
+        code_update.start(dep, stored, source_name, actor=user)
+    except InvalidTransition:
+        raise HTTPException(status_code=409, detail="The deployment changed state; reload and try again")
+    record_artifact(deployment_id, "source", stored, sensitive=True, retention_days=SOURCE_RETENTION_DAYS)
+    _dispatch("analyze", deployment_id)
+    return DeploymentAccepted(
+        deployment_id=deployment_id, status=DeployStatus.SOURCE_RECEIVED.value,
+        message="New code received: analyze, build, verify and plan run automatically, then the plan waits for approval",
+    )
+
+
+@router.post("/{deployment_id}/update-source", response_model=DeploymentAccepted, status_code=status.HTTP_202_ACCEPTED)
+@limiter.limit("30/hour")
+async def update_source(request: Request, deployment_id: str,
+                        file: UploadFile = File(..., description="A .zip of the new version")) -> DeploymentAccepted:
+    """Deploy new code to an already-deployed app: same stack, target and settings."""
+    data = await file.read(MAX_UPLOAD_BYTES + 1)
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail=f"The upload is larger than {MAX_UPLOAD_BYTES // (1024 * 1024)} MB")
+    if not is_zip(data):
+        raise HTTPException(status_code=422, detail="The upload is not a ZIP archive")
+    name = (file.filename or "upload.zip").replace("\\", "/").rsplit("/", 1)[-1][:200]
+    return _start_code_update(request, deployment_id, data, name)
+
+
+@router.post("/{deployment_id}/update-source/github", response_model=DeploymentAccepted, status_code=status.HTTP_202_ACCEPTED)
+@limiter.limit("30/hour")
+async def update_source_github(request: Request, deployment_id: str, body: GitHubUpdateRequest) -> DeploymentAccepted:
+    """Re-download the GitHub repository a deployed app came from and deploy it."""
+    dep = get_deployment(deployment_id, tenant_id=current_tenant(request))
+    if not dep:
+        raise HTTPException(status_code=404, detail="Deployment not found")
+    if dep.get("source_kind") != "github":
+        raise HTTPException(status_code=422, detail="This deployment wasn't created from GitHub; upload a ZIP instead")
+    repo, _, deployed_ref = dep["source_name"].partition("@")
+    ref = body.ref or deployed_ref or None
+    token = body.github_token.get_secret_value() if body.github_token else None
+    try:
+        data = await download_github_archive(repo, ref, token)
+    except IntakeError as e:
+        raise HTTPException(status_code=422, detail=CredentialScrubber.scrub_text(str(e)))
+    except Exception as e:
+        logger.warning(f"GitHub download failed for {repo}: {CredentialScrubber.scrub_text(str(e))}")
+        raise HTTPException(status_code=502, detail="Could not download the repository from GitHub; try again")
+    if not is_zip(data):
+        raise HTTPException(status_code=502, detail="GitHub did not return a ZIP archive")
+    return _start_code_update(request, deployment_id, data, f"{repo}@{ref}" if ref else repo)
+
+
 @router.get("", response_model=List[DeploymentSummary])
 async def get_deployments(limit: int = 50, request: Request = None) -> List[DeploymentSummary]:
     tenant = current_tenant(request)
@@ -244,8 +329,12 @@ async def get_deployment_detail(deployment_id: str, request: Request = None) -> 
     dep = get_deployment(deployment_id, tenant_id=tenant)
     if not dep:
         raise HTTPException(status_code=404, detail="Deployment not found")
+    update = dep.get("code_update")
     return DeploymentDetail(
-        **{k: v for k, v in dep.items() if k != "rendered"},
+        **{k: v for k, v in dep.items() if k not in ("rendered", "code_update")},
+        # The previous release's full verification is kept server-side for reuse only.
+        code_update={k: v for k, v in update.items() if k != "previous_verification"} if update else None,
+        can_update_code=code_update.can_update_code(dep),
         rendered_files=sorted((dep.get("rendered") or {}).keys()),
         events=[DeploymentEventResponse(**e) for e in list_events(deployment_id, tenant_id=tenant)],
         can_prepare=_can_prepare(dep),
@@ -420,6 +509,26 @@ async def deploy_deployment(request: Request, deployment_id: str, body: DeployRe
         raise HTTPException(status_code=422, detail="Explicit confirmation (confirm: true) is required to deploy.")
 
     user = require_authenticated_user(request)
+
+    # apply_approved re-checks this (it is the real gate), but its refusal happens in the
+    # background where the caller never sees it; refuse here so the UI gets the reason.
+    if os.environ.get("TERRAAGENT_DEPLOY_ENABLED", "").lower() != "true":
+        raise HTTPException(
+            status_code=409,
+            detail="Deploying to AWS is switched off on this TerraAgent server. Set TERRAAGENT_DEPLOY_ENABLED=true "
+                   "in its environment and restart the API. Nothing was sent to AWS.",
+        )
+
+    # Read-only: refuse here (nothing created, status unchanged) instead of failing mid-apply.
+    from deploy.pipeline import deploy_preflight_problem
+
+    try:
+        problem = await deploy_preflight_problem(dep)
+    except Exception as e:  # a check that can't run never blocks; apply reports real errors
+        logger.warning(f"[{deployment_id}] deploy pre-check skipped: {type(e).__name__}")
+        problem = None
+    if problem:
+        raise HTTPException(status_code=409, detail=problem)
 
     _dispatch("apply", deployment_id)
     return DeploymentAccepted(
@@ -644,7 +753,7 @@ async def plan_destroy_deployment(request: Request, deployment_id: str) -> Deplo
             detail=f"Cannot plan destroy from status '{dep['status']}'; deployment must be in DEPLOYED, FAILED_PARTIAL, or NEEDS_RECONCILIATION.",
         )
 
-    user = current_user(request) or "api"
+    current_user(request)
     _dispatch("destroy_plan", deployment_id)
     return DeploymentAccepted(
         deployment_id=deployment_id,

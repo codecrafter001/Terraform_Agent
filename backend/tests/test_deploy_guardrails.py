@@ -47,9 +47,10 @@ def test_deploy_never_uses_boto_or_spawns_terraform_itself():
     for path in _py_files(DEPLOY):
         modules = set(_imports(path))
         basename = os.path.basename(path)
-        # S3ArtifactStore in artifacts.py uses boto3 for encrypted S3 artifact storage (Phase 6 D6)
+        # S3ArtifactStore in artifacts.py uses boto3 for encrypted S3 artifact storage (Phase 6 D6);
+        # preflight.py uses it for read-only pre-plan checks (asserted below).
         disallowed = {m for m in modules if m.split(".")[0] in ("boto3", "botocore", "subprocess")}
-        if basename == "artifacts.py":
+        if basename in ("artifacts.py", "preflight.py"):
             disallowed = {m for m in disallowed if m.split(".")[0] == "subprocess"}
         assert not disallowed, path
         source = open(path, encoding="utf-8").read()
@@ -60,6 +61,18 @@ def test_deploy_never_uses_boto_or_spawns_terraform_itself():
                 assert "check_build_argv(cmd)" in source
             elif basename == "apply_runner.py":
                 assert "check_apply_argv(apply_cmd" in source
+
+
+def test_preflight_only_reads_from_aws():
+    """deploy/preflight.py is the one deploy module that calls AWS APIs itself: only
+    read operations (describe_*/get_*, plus the client/paginator plumbing)."""
+    tree = ast.parse(open(os.path.join(DEPLOY, "preflight.py"), encoding="utf-8").read())
+    plumbing = {"client", "Session", "paginate", "get", "getLogger", "warning", "Config"}
+    calls = {node.func.attr for node in ast.walk(tree)
+             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)}
+    assert calls, "no attribute calls found - the check isn't looking at anything"
+    writes = {c for c in calls if c not in plumbing and not c.startswith(("describe_", "get_"))}
+    assert not writes, f"preflight.py calls non-read operations: {writes}"
 
 
 def test_deploy_has_no_apply_destroy_or_import_strings():

@@ -7,6 +7,7 @@ import os
 from typing import Any, Dict, List, Optional
 
 from tools.sandbox_registry import create_sandbox, release_sandbox
+from tools.subprocess_exec import run_exec
 
 # Fail closed: a scanner that hangs must count as a failed scan, never a clean one.
 SCANNER_TIMEOUT_SECONDS = float(os.getenv("TERRAAGENT_SCANNER_TIMEOUT", "300"))
@@ -30,24 +31,15 @@ class TrivyRunner:
                 with open(file_path, "w", encoding="utf-8") as f:
                     f.write(content)
 
-            process = await asyncio.create_subprocess_exec(
-                "trivy",
-                "config",
-                sandbox_dir,
-                "--format", "json",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
+            cmd = ["trivy", "config", sandbox_dir, "--format", "json"]
             try:
-                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=SCANNER_TIMEOUT_SECONDS)
+                returncode, stdout, stderr = await run_exec(cmd, timeout=SCANNER_TIMEOUT_SECONDS)
             except asyncio.TimeoutError:
-                process.kill()
-                await process.wait()
                 raise TimeoutError("trivy timed out after " + str(int(SCANNER_TIMEOUT_SECONDS)) + "s")
             output_str = stdout.decode("utf-8", errors="replace").strip()
-            if not output_str and process.returncode:
+            if not output_str and returncode:
                 err_text = stderr.decode("utf-8", errors="replace").strip()[:200]
-                tool_error = f"exited {process.returncode} with no output" + (f": {err_text}" if err_text else "")
+                tool_error = f"exited {returncode} with no output" + (f": {err_text}" if err_text else "")
 
             if output_str:
                 try:

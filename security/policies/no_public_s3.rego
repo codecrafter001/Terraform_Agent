@@ -1,5 +1,7 @@
 package main
 
+import rego.v1
+
 # Deny S3 buckets with public-read or public-read-write ACLs
 deny contains msg if {
     resource := input.resource.aws_s3_bucket[_][_]

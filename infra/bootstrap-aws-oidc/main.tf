@@ -32,7 +32,7 @@ locals {
 resource "random_string" "bucket_suffix" {
   length  = 6
   special = false
-  upper   = false
+  upper   = false   
 }
 
 resource "aws_s3_bucket" "tf_state" {

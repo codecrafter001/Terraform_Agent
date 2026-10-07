@@ -10,16 +10,15 @@ Hard safety rules & invariants:
 """
 
 import asyncio
-from datetime import datetime, timezone
 import json
-
 import logging
 import os
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from deploy.artifacts import get_artifact_store
 from deploy.plan_bundle import create_plan_bundle, extract_plan_bundle
-from deploy.store import DeployStatus, get_deployment, transition
+from deploy.store import DESTROYABLE, DESTROYABLE_IF_APPLIED, DeployStatus, can_destroy, get_deployment, transition
 from deploy.sts import apply_session, plan_session
 from models.orm import AwsDeployTarget, Deployment
 from services.database import SessionLocal
@@ -31,7 +30,9 @@ from tools.terraform_runner import ALLOWED_BINARIES, TerraformRunner
 logger = logging.getLogger("terraagent.deploy.apply")
 
 TERRAAGENT_TF_APPLY_TIMEOUT = float(os.getenv("TERRAAGENT_TF_APPLY_TIMEOUT", "2400"))
-APPLY_ARGV_COMMON = ["apply", "-input=false", "-lock-timeout=5m", "-no-color"]
+# -parallelism=20: independent resources (RDS, CloudFront, the build pipeline) are created
+# concurrently instead of Terraform's default 10 at a time.
+APPLY_ARGV_COMMON = ["apply", "-input=false", "-lock-timeout=5m", "-parallelism=20", "-no-color"]
 DESTROY_PLAN_ARGV = ["plan", "-destroy", "-out=tfplan.destroy", "-input=false", "-lock=false"]
 FORBIDDEN_APPLY_FLAGS = frozenset({"auto-approve", "target", "replace", "var", "var-file", "destroy", "import"})
 
@@ -61,7 +62,7 @@ def check_apply_argv(cmd: List[str], plan_kind: str = "apply") -> str:
     """Strict argv validation for apply subprocess execution.
 
     Only allows:
-    [binary, "apply", "-input=false", "-lock-timeout=5m", "-no-color", "tfplan"]
+    [binary, "apply", "-input=false", "-lock-timeout=5m", "-parallelism=20", "-no-color", "tfplan"]
     (or "tfplan.destroy" if plan_kind == "destroy").
     """
     if not cmd:
@@ -97,6 +98,21 @@ def check_apply_argv(cmd: List[str], plan_kind: str = "apply") -> str:
 async def _publish_log(deployment_id: str, message: str) -> None:
     scrubbed = CredentialScrubber.scrub_text(message)
     await redis_service.publish_log(deployment_id, f"[APPLY] {scrubbed}", agent_name="deploy")
+
+
+_APPLY_ERROR_MAX_CHARS = 4000
+
+
+def _apply_failure_message(returncode: int, stderr_lines: List[str]) -> str:
+    """The exit code plus terraform's own "Error:" blocks - an apply once failed as just
+    "exit code 1" while the reason (a missing permissions boundary) sat only in the log."""
+    text = "\n".join(stderr_lines).strip()
+    start = text.find("Error:")
+    detail = text[start:] if start >= 0 else text[-_APPLY_ERROR_MAX_CHARS:]
+    if len(detail) > _APPLY_ERROR_MAX_CHARS:
+        detail = detail[:_APPLY_ERROR_MAX_CHARS] + "\n... (truncated - full output in the deployment log)"
+    message = f"Terraform apply failed with exit code {returncode}"
+    return f"{message}:\n{detail}" if detail else f"{message} and wrote nothing to stderr."
 
 
 def _scoped_aws_env(creds: Dict[str, str]) -> Dict[str, str]:
@@ -258,7 +274,9 @@ async def apply_approved(deployment_id: str, routing_key: Optional[str] = None) 
             stderr=asyncio.subprocess.PIPE,
         )
 
-        async def _stream_output(stream: Any) -> None:
+        stderr_lines: List[str] = []
+
+        async def _stream_output(stream: Any, keep: Optional[List[str]] = None) -> None:
             if not stream:
                 return
             while True:
@@ -268,12 +286,14 @@ async def apply_approved(deployment_id: str, routing_key: Optional[str] = None) 
                 decoded = line.decode("utf-8", errors="replace").rstrip()
                 if decoded:
                     await _publish_log(deployment_id, decoded)
+                    if keep is not None:
+                        keep.append(decoded)
 
         try:
             await asyncio.wait_for(
                 asyncio.gather(
                     _stream_output(proc.stdout),
-                    _stream_output(proc.stderr),
+                    _stream_output(proc.stderr, stderr_lines),
                 ),
                 timeout=TERRAAGENT_TF_APPLY_TIMEOUT,
             )
@@ -283,7 +303,7 @@ async def apply_approved(deployment_id: str, routing_key: Optional[str] = None) 
             raise TimeoutError(f"Terraform apply timed out after {TERRAAGENT_TF_APPLY_TIMEOUT} seconds")
 
         if proc.returncode != 0:
-            raise RuntimeError(f"Terraform apply failed with exit code {proc.returncode}")
+            raise RuntimeError(_apply_failure_message(proc.returncode, stderr_lines))
 
         await _publish_log(deployment_id, "Terraform execution completed successfully!")
 
@@ -322,6 +342,7 @@ async def apply_approved(deployment_id: str, routing_key: Optional[str] = None) 
                 applied_at=applied_at,
                 completed_at=applied_at,
                 outputs=outputs,
+                code_update=None,  # a code update (deploy/code_update.py) is complete once applied
             )
             await _publish_log(deployment_id, f"Deployment finished: DEPLOYED. Outputs: {json.dumps(outputs)}")
 
@@ -366,15 +387,12 @@ async def plan_destroy(deployment_id: str, actor: str = "operator") -> Dict[str,
     if not dep:
         return {"success": False, "error": f"Deployment '{deployment_id}' not found"}
 
-    allowed_from = frozenset({
-        DeployStatus.DEPLOYED,
-        DeployStatus.FAILED_PARTIAL,
-        DeployStatus.NEEDS_RECONCILIATION,
-    })
-    if DeployStatus(dep["status"]) not in allowed_from:
+    allowed_from = DESTROYABLE | DESTROYABLE_IF_APPLIED
+    if not can_destroy(dep):
         return {
             "success": False,
-            "error": f"Cannot plan destroy from status '{dep['status']}'; must be in DEPLOYED, FAILED_PARTIAL, or NEEDS_RECONCILIATION."
+            "error": f"Cannot plan destroy from status '{dep['status']}'; the deployment must have been applied "
+                     "(DEPLOYED, FAILED_PARTIAL, NEEDS_RECONCILIATION, or a failed/rejected/expired update of a deployed stack)."
         }
 
     target_id = dep.get("target_id")

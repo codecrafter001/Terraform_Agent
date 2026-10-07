@@ -107,6 +107,7 @@ class Deployment(Base):
     # Phase 4 additions (Apply, Outputs, GitOps PR)
     applied_at = Column(String, nullable=True)
     outputs_json = Column(Text, nullable=True)  # JSON outputs from terraform show -json
+    code_update_json = Column(Text, nullable=True)  # deploy/code_update.py: in-flight code update of a deployed stack
     pr_json = Column(Text, nullable=True)  # GitOps PR details (Phase 4B)
     # Phase 6 additions (Tenancy and ownership)
     owner = Column(String, nullable=True, index=True)

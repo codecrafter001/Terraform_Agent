@@ -10,6 +10,7 @@ the verdict INCOMPLETE, never PASS; a template that doesn't validate is FAIL
 (that is a TerraAgent bug, not the user's).
 """
 
+import asyncio
 from typing import Any, Dict, List
 
 from agents.policy_agent import policy_agent_node
@@ -37,18 +38,21 @@ async def verify(deployment_id: str, files: Dict[str, str], binary: str = "terra
     """`files`: the rendered .tf files plus terraform.tfvars.json."""
     tf_only = {name: content for name, content in files.items() if name.endswith(".tf")}
 
-    validation = await TerraformRunner.validate_hcl(files, binary)
+    # Independent of each other: terraform validate, the scanners (which already run
+    # concurrently among themselves) and the cost estimate all start at once.
+    validation, policy, cost = await asyncio.gather(
+        TerraformRunner.validate_hcl(files, binary),
+        policy_agent_node({"job_id": deployment_id, "terraform_files": tf_only}),
+        InfracostRunner.estimate_cost(files),
+    )
     checks = _checks(validation)
     system_failure = any(c["check_name"] == "system" for c in checks)
 
-    policy = await policy_agent_node({"job_id": deployment_id, "terraform_files": tf_only})
     security = dict(policy["security_results"])
     findings = list(security.get("findings") or [])
     security["findings"] = findings[:_MAX_FINDINGS]
     security["findings_truncated"] = len(findings) > _MAX_FINDINGS
     posture = security_posture(security)
-
-    cost = await InfracostRunner.estimate_cost(files)
 
     incomplete_reasons: List[str] = []
     if system_failure:

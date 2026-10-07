@@ -13,8 +13,8 @@ from typing import Any, Dict, Optional
 from deploy.artifacts import get_artifact_store
 from deploy.renderer import TFVARS_FILENAME
 from deploy.store import (
-    DeployStatus,
     DeploymentNotFound,
+    DeployStatus,
     get_deployment,
     list_deployment_build_artifacts,
     transition,
@@ -24,8 +24,13 @@ from deploy.store import (
 logger = logging.getLogger("terraagent.deploy.rollback")
 
 
+# Only these targets keep switchable releases (CloudFront origin path, Lambda alias); for
+# container targets a "rollback" re-planned the same code - use Plan again or a code update.
+ROLLBACK_TARGETS = frozenset({"static_site", "lambda_http"})
+
+
 def _can_rollback(dep: Dict[str, Any]) -> bool:
-    return DeployStatus(dep.get("status", "")) in (
+    return dep.get("target_type") in ROLLBACK_TARGETS and DeployStatus(dep.get("status", "")) in (
         DeployStatus.DEPLOYED,
         DeployStatus.MERGED,
         DeployStatus.FAILED_PARTIAL,

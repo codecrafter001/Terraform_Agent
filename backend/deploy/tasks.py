@@ -4,6 +4,11 @@ credentials, tokens or source content ever travel through the broker."""
 
 import asyncio
 import logging
+import sys
+
+if sys.platform == 'win32':
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
 
 from services.celery_app import celery_app
 
@@ -60,6 +65,7 @@ def sweep_task() -> dict:
     before apply changes AWS), sweep APPLYING deployments past lease to NEEDS_RECONCILIATION,
     expire approvals past 24h, and delete expired artifacts."""
     from datetime import datetime, timedelta
+
     from deploy.artifacts import get_artifact_store
     from deploy.config import MAX_STAGE_RUNTIME_SECONDS
     from deploy.store import (

@@ -2,6 +2,7 @@
 
 import re
 from typing import Any, Dict, Optional
+
 from pydantic import BaseModel, Field, field_validator
 
 _REGION = re.compile(r"^[a-z]{2}(-gov)?-[a-z]+-\d$")

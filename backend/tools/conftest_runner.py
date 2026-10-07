@@ -7,13 +7,15 @@ import os
 from typing import Any, Dict, List, Optional
 
 from tools.sandbox_registry import create_sandbox, release_sandbox
+from tools.security_paths import security_path
+from tools.subprocess_exec import run_exec
 
 # Fail closed: a scanner that hangs must count as a failed scan, never a clean one.
 SCANNER_TIMEOUT_SECONDS = float(os.getenv("TERRAAGENT_SCANNER_TIMEOUT", "300"))
 
 logger = logging.getLogger("terraagent.conftest_runner")
 
-POLICY_DIR = os.getenv("CONFTEST_POLICY_DIR", "/app/security/policies")
+POLICY_DIR = os.getenv("CONFTEST_POLICY_DIR") or security_path("policies")
 
 
 class ConftestRunner:
@@ -33,24 +35,15 @@ class ConftestRunner:
                 with open(file_path, "w", encoding="utf-8") as f:
                     f.write(content)
 
-            process = await asyncio.create_subprocess_exec(
-                "conftest", "test", sandbox_dir,
-                "--policy", POLICY_DIR,
-                "--parser", "hcl2",
-                "--output", "json",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
+            cmd = ["conftest", "test", sandbox_dir, "--policy", POLICY_DIR, "--parser", "hcl2", "--output", "json"]
             try:
-                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=SCANNER_TIMEOUT_SECONDS)
+                returncode, stdout, stderr = await run_exec(cmd, timeout=SCANNER_TIMEOUT_SECONDS)
             except asyncio.TimeoutError:
-                process.kill()
-                await process.wait()
                 raise TimeoutError("conftest timed out after " + str(int(SCANNER_TIMEOUT_SECONDS)) + "s")
             output_str = stdout.decode("utf-8", errors="replace").strip()
-            if not output_str and process.returncode:
+            if not output_str and returncode:
                 err_text = stderr.decode("utf-8", errors="replace").strip()[:200]
-                tool_error = f"exited {process.returncode} with no output" + (f": {err_text}" if err_text else "")
+                tool_error = f"exited {returncode} with no output" + (f": {err_text}" if err_text else "")
 
             if output_str:
                 try:

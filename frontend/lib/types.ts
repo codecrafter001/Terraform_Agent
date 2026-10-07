@@ -612,7 +612,7 @@ export type DeploymentStatus =
   | 'EXPIRED'
   | 'FAILED';
 
-export type DeploymentTarget = 'static_site' | 'lambda_http' | 'ecs_service';
+export type DeploymentTarget = 'static_site' | 'lambda_http' | 'ecs_service' | 'fullstack_app';
 
 export interface AwsDeployTarget {
   id: string;
@@ -671,6 +671,38 @@ export interface ProjectProfile {
   source_bytes: number;
   has_dockerfile: boolean;
   evidence: Record<string, DeployEvidence[]>;
+  warnings: string[];
+  fullstack?: FullstackLayout | null;
+}
+
+// backend/deploy/fullstack.py::FullstackLayout
+export interface FullstackLayout {
+  backend: {
+    dir: string;
+    runtime: string;
+    framework: string | null;
+    port: number;
+    has_dockerfile: boolean;
+    uses_api_prefix: boolean;
+  };
+  frontend: {
+    dir: string;
+    framework: string | null;
+    build_required: boolean;
+    static_output_dir: string | null;
+    api_url_env: string[];
+  } | null;
+  database: {
+    engine: 'postgres' | 'mysql' | 'mongodb' | 'sqlite';
+    url_scheme: string | null;
+    rds_supported: boolean;
+    evidence: DeployEvidence[];
+  } | null;
+  migration: { command: string[]; evidence: DeployEvidence[] } | null;
+  cache?: { evidence: DeployEvidence[] } | null;
+  object_storage?: { evidence: DeployEvidence[] } | null;
+  worker?: { command: string[]; evidence: DeployEvidence[] } | null;
+  env_keys: string[];
   warnings: string[];
 }
 
@@ -749,13 +781,69 @@ export interface EcsSettings {
   memory_mb?: number;
   desired_count?: number;
   image_tag?: string;
+  health_check_path?: string;
   certificate_arn?: string | null;
+}
+
+// backend/models/deployment.py::FullstackSettings
+export type FullstackDatabaseMode = 'rds' | 'aurora' | 'external' | 'none';
+export type FullstackPreset = 'dev' | 'staging' | 'production';
+export interface FullstackSettings {
+  preset?: FullstackPreset | null;
+  cdn_enabled: boolean;
+  container_port?: number;
+  cpu: number;
+  memory_mb: number;
+  desired_count: number;
+  health_check_path: string;
+  price_class: 'PriceClass_100' | 'PriceClass_200' | 'PriceClass_All';
+  database: FullstackDatabaseMode;
+  db_instance_class: 'db.t4g.micro' | 'db.t4g.small' | 'db.t4g.medium' | 'db.t4g.large' | 'db.m7g.large';
+  db_allocated_storage_gb: number;
+  db_multi_az: boolean;
+  db_backup_retention_days: number;
+  db_final_snapshot: boolean;
+  aurora_min_acu: number;
+  aurora_max_acu: number;
+  // Add-ons: null follows what the analyzer detected.
+  cache: 'valkey' | 'none' | null;
+  cache_max_gb: number;
+  uploads_bucket: boolean | null;
+  worker_enabled: boolean | null;
+  autoscaling_max_count: number | null;
+  autoscaling_cpu_target: number;
+  run_migrations: boolean;
+  secret_env_keys: string[];
+}
+
+// backend/deploy/estimates.py::Estimate and POST /deployments/{id}/estimate
+export interface DeploymentEstimate {
+  monthly_usd: number;
+  lines: { item: string; monthly_usd: number }[];
+  minutes_low: number;
+  minutes_high: number;
+  cdn: boolean;
+  notes: string[];
+}
+
+export type FullstackPresetValues = Pick<
+  FullstackSettings,
+  'cdn_enabled' | 'cpu' | 'memory_mb' | 'desired_count' | 'db_instance_class' | 'db_allocated_storage_gb' |
+  'db_multi_az' | 'db_backup_retention_days' | 'db_final_snapshot' | 'autoscaling_max_count'
+>;
+
+export interface DeploymentEstimateResponse {
+  estimate: DeploymentEstimate;
+  presets: Record<FullstackPreset, FullstackPresetValues>;
+  preset_descriptions: Record<FullstackPreset, string>;
+  suggested_preset: FullstackPreset;
 }
 
 export type PrepareDeploymentPayload =
   | { target: 'static_site'; settings: StaticSiteSettings }
   | { target: 'lambda_http'; settings: LambdaSettings }
-  | { target: 'ecs_service'; settings: EcsSettings };
+  | { target: 'ecs_service'; settings: EcsSettings }
+  | { target: 'fullstack_app'; settings: FullstackSettings };
 
 export interface PlanResourceChange {
   address: string;
@@ -773,6 +861,8 @@ export interface PlanSummary {
   };
   changes: PlanResourceChange[];
   is_destructive: boolean;
+  // backend/deploy/code_update.py::is_code_only - only the new source, image and task revision change
+  code_only?: boolean;
 }
 
 export interface PlanPolicyResult {
@@ -878,7 +968,7 @@ export interface DeploymentDetail extends DeploymentSummary {
   intake: DeploymentIntake | null;
   profile: ProjectProfile | null;
   decision: DeploymentDecision | null;
-  settings: Partial<StaticSiteSettings & LambdaSettings & EcsSettings> | null;
+  settings: Partial<StaticSiteSettings & LambdaSettings & EcsSettings & FullstackSettings> | null;
   build: DeploymentBuild | null;
   verification: DeploymentVerification | null;
   plan?: Record<string, unknown> | null;
@@ -897,6 +987,15 @@ export interface DeploymentDetail extends DeploymentSummary {
   can_merge_pr?: boolean;
   can_rollback?: boolean;
   can_destroy?: boolean;
+  can_update_code?: boolean;
+  // backend/deploy/code_update.py: present while new code is being rolled out to this deployment
+  code_update?: {
+    active: boolean;
+    started_at: string;
+    requested_by: string | null;
+    previous_source_sha256: string | null;
+    previous_image_tag: string | null;
+  } | null;
 }
 
 export interface DeploymentAccepted {

@@ -28,8 +28,11 @@ from typing import Any, Dict, List, Optional
 
 from deploy.analyzer import ProjectProfile
 from deploy.config import BUILD_TIMEOUT_SECONDS, MAX_LAMBDA_ZIP_BYTES, MAX_STATIC_FILES
+from deploy.dockerfiles import DockerfileError
+from deploy.dockerfiles import generate as generate_container
 from deploy.source_intake import ExtractedSource
 from tools.credential_scrubber import CredentialScrubber
+from tools.subprocess_exec import run_exec
 
 PYPI_INDEX = "https://pypi.org/simple"
 NPM_REGISTRY = "https://registry.npmjs.org/"
@@ -75,6 +78,9 @@ class BuildResult:
     package_file: Optional[str] = None  # relative to the workdir
     package_sha256_b64: Optional[str] = None
     package_bytes: int = 0
+    image_tag: Optional[str] = None  # container targets: content-addressed tag of source.zip
+    generated_files: List[str] = field(default_factory=list)  # files TerraAgent added to source.zip
+    start_command: List[str] = field(default_factory=list)
     log: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
 
@@ -84,6 +90,8 @@ class BuildResult:
             "container_port": self.container_port,
             "file_count": len(self.site_files), "package_bytes": self.package_bytes,
             "package_sha256_b64": self.package_sha256_b64, "warnings": self.warnings,
+            "image_tag": self.image_tag, "generated_files": self.generated_files,
+            "start_command": self.start_command,
             "log": [CredentialScrubber.scrub_text(line) for line in self.log[-200:]],
         }
 
@@ -177,21 +185,17 @@ def _build_env(home: str) -> Dict[str, str]:
 
 async def run_build_command(cmd: List[str], cwd: str, home: str, log: List[str]) -> None:
     check_build_argv(cmd)
-    process = await asyncio.create_subprocess_exec(
-        *cmd, cwd=cwd, env=_build_env(home),
-        stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-    )
     try:
-        out, _ = await asyncio.wait_for(process.communicate(), timeout=BUILD_TIMEOUT_SECONDS)
+        returncode, out, _ = await run_exec(
+            cmd, cwd=cwd, env=_build_env(home), timeout=BUILD_TIMEOUT_SECONDS, merge_stderr=True,
+        )
     except asyncio.TimeoutError:
-        process.kill()
-        await process.wait()
         raise BuildError(f"Dependency install timed out after {int(BUILD_TIMEOUT_SECONDS)}s")
     lines = out.decode("utf-8", errors="replace").splitlines()
     log.extend(lines[-100:])
-    if process.returncode != 0:
+    if returncode != 0:
         tail = "\n".join(lines[-15:])
-        raise BuildError(f"Dependency install failed (exit {process.returncode}):\n{CredentialScrubber.scrub_text(tail)}")
+        raise BuildError(f"Dependency install failed (exit {returncode}):\n{CredentialScrubber.scrub_text(tail)}")
 
 
 # --- Targets --------------------------------------------------------------
@@ -338,38 +342,112 @@ async def build_lambda(source: ExtractedSource, profile: ProjectProfile, workdir
     return result
 
 
-async def build_container(source: ExtractedSource, profile: ProjectProfile, workdir: str) -> BuildResult:
-    """Packages the source tree into a source zip for CodeBuild container deployment.
-    Docker builds run exclusively inside the customer's AWS account via CodeBuild.
-    """
-    port = profile.get("listens_on_port") or 8080
-    result = BuildResult(kind="container_source", container_port=port)
-    stage = os.path.join(workdir, ".build", "source")
-    os.makedirs(stage, exist_ok=True)
-
+def _stage_source(source: ExtractedSource, stage: str) -> None:
     for f in source.files:
         dst = os.path.join(stage, *f.path.split("/"))
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         shutil.copyfile(os.path.join(source.root, *f.path.split("/")), dst)
 
+
+def _add_container_recipe(stage: str, app_dir: str, profile: ProjectProfile, port: int, with_db: bool,
+                          result: BuildResult, migrate: Optional[List[str]] = None) -> None:
+    """Writes a vetted Dockerfile (+ DATABASE_URL entrypoint) into `app_dir`
+    of the staged source when the project has no Dockerfile of its own."""
+    if profile.get("has_dockerfile"):
+        result.log.append(f"Using the project's own Dockerfile in {app_dir or 'the project root'}")
+        if with_db:
+            result.warnings.append(
+                "The project has its own Dockerfile, so DATABASE_URL isn't assembled for it: the container gets "
+                "DB_HOST, DB_PORT, DB_NAME, DB_USER and DB_PASSWORD instead."
+            )
+        return
+    app_root = os.path.join(stage, *app_dir.split("/")) if app_dir else stage
+    paths = sorted(
+        os.path.relpath(os.path.join(d, n), app_root).replace(os.sep, "/")
+        for d, _, names in os.walk(app_root) for n in names
+    )
+    try:
+        recipe = generate_container(app_root, paths, profile, port, with_db=with_db, migrate=migrate)
+    except DockerfileError as e:
+        raise BuildError(str(e)) from e
+    for rel, content in recipe.files.items():
+        with open(os.path.join(app_root, rel), "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(content)
+        result.generated_files.append(f"{app_dir}/{rel}" if app_dir else rel)
+    result.start_command = recipe.command
+    result.warnings.extend(recipe.warnings)
+    result.log.append(f"No Dockerfile found: generated one from TerraAgent's {profile['runtime']} template "
+                      f"(start command: {' '.join(recipe.command)})")
+
+
+async def _package_source(stage: str, workdir: str, result: BuildResult) -> None:
     os.makedirs(os.path.join(workdir, "artifacts"), exist_ok=True)
     zip_path = os.path.join(workdir, "artifacts", "source.zip")
     await asyncio.to_thread(_write_zip, stage, zip_path)
     size = os.path.getsize(zip_path)
     with open(zip_path, "rb") as fh:
-        result.package_sha256_b64 = base64.b64encode(hashlib.sha256(fh.read()).digest()).decode("ascii")
+        digest = hashlib.sha256(fh.read()).digest()
+    result.package_sha256_b64 = base64.b64encode(digest).decode("ascii")
+    result.image_tag = "src-" + digest.hex()[:16]
     result.package_file = "artifacts/source.zip"
     result.package_bytes = size
+
+
+async def build_container(source: ExtractedSource, profile: ProjectProfile, workdir: str) -> BuildResult:
+    """Packages the source tree into a source zip for CodeBuild container deployment,
+    adding a vetted Dockerfile if the project has none. Docker builds run exclusively
+    inside the customer's AWS account via CodeBuild.
+    """
+    port = profile.get("listens_on_port") or 8080
+    result = BuildResult(kind="container_source", container_port=port)
+    stage = os.path.join(workdir, ".build", "source")
+    os.makedirs(stage, exist_ok=True)
+    _stage_source(source, stage)
+    _add_container_recipe(stage, "", profile, port, with_db=False, result=result)
+    await _package_source(stage, workdir, result)
     shutil.rmtree(os.path.join(workdir, ".build"), ignore_errors=True)
-    result.log.append(f"Packaged source.zip ({size} bytes) for CodeBuild container build (port {port})")
+    result.log.append(f"Packaged source.zip ({result.package_bytes} bytes) for CodeBuild container build (port {port})")
     return result
 
 
-async def build(source: ExtractedSource, profile: ProjectProfile, target: str, workdir: str) -> BuildResult:
+async def build_fullstack(source: ExtractedSource, profile: ProjectProfile, workdir: str,
+                          database_mode: str = "rds") -> BuildResult:
+    """Packages the whole project for CodeBuild: the backend image is built from
+    its folder (with a vetted Dockerfile if needed) and the frontend, if any, is
+    built and uploaded to S3 by the same pipeline - all inside the customer's
+    account. No project code runs here."""
+    layout = profile.get("fullstack")
+    if not layout:
+        raise BuildError("No server was found in this project, so it can't be deployed as a full-stack app.")
+    backend = layout["backend"]
+    db = layout.get("database")
+    with_db = bool(database_mode in ("rds", "aurora") and db and db.get("rds_supported"))
+    result = BuildResult(kind="fullstack_source", container_port=backend["port"])
+    stage = os.path.join(workdir, ".build", "source")
+    os.makedirs(stage, exist_ok=True)
+    _stage_source(source, stage)
+    migration = layout.get("migration") if with_db else None
+    _add_container_recipe(stage, backend["dir"], backend["profile"], backend["port"], with_db=with_db, result=result,
+                          migrate=(migration or {}).get("command"))
+    result.warnings.extend(layout.get("warnings") or [])
+    await _package_source(stage, workdir, result)
+    shutil.rmtree(os.path.join(workdir, ".build"), ignore_errors=True)
+    fe = layout.get("frontend")
+    result.log.append(
+        f"Packaged source.zip ({result.package_bytes} bytes): backend in {backend['dir'] or 'the project root'}"
+        + (f", frontend in {fe['dir'] or 'the project root'}" if fe else ", no separate frontend")
+    )
+    return result
+
+
+async def build(source: ExtractedSource, profile: ProjectProfile, target: str, workdir: str,
+                settings: Optional[Dict[str, Any]] = None) -> BuildResult:
     if target == "static_site":
         return await asyncio.to_thread(build_static_site, source, profile, workdir)
     if target == "lambda_http":
         return await build_lambda(source, profile, workdir)
     if target == "ecs_service":
         return await build_container(source, profile, workdir)
+    if target == "fullstack_app":
+        return await build_fullstack(source, profile, workdir, database_mode=(settings or {}).get("database", "rds"))
     raise BuildError(f"Unknown target '{target}'")

@@ -14,15 +14,18 @@ import io
 import logging
 import os
 import zipfile
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
+from deploy import code_update
 from deploy.analyzer import analyze
 from deploy.artifacts import get_artifact_store
 from deploy.builder import BuildError, build
 from deploy.config import BUILD_RETENTION_DAYS
 from deploy.decision_engine import blocked_by_secrets, decide
-from deploy.plan_bundle import create_plan_bundle
+from deploy.fullstack import detect as detect_fullstack
+from deploy.plan_bundle import create_plan_bundle, extract_plan_bundle
 from deploy.plan_policy import evaluate_plan_policy
+from deploy.preflight import BOUNDARY_TARGETS, VPC_TARGETS, boundary_arn_for, boundary_problem, vpc_quota_problem
 from deploy.renderer import render
 from deploy.secret_scan import scan_source
 from deploy.source_intake import ExtractedSource, IntakeError, extract_archive
@@ -34,6 +37,7 @@ from services.database import SessionLocal
 from services.redis_client import redis_service
 from tools.credential_scrubber import CredentialScrubber
 from tools.sandbox_registry import create_sandbox, release_sandbox
+from tools.subprocess_exec import describe_exception
 from tools.terraform_runner import TerraformRunner
 
 logger = logging.getLogger("terraagent.deploy")
@@ -49,6 +53,27 @@ async def _fail(deployment_id: str, message: str, **fields: Any) -> None:
     transition(deployment_id, DeployStatus.FAILED, reason=message, error=message, **fields)
 
 
+_PLAN_ERROR_MAX_CHARS = 4000
+
+
+def plan_failure_message(plan_result: Dict[str, Any]) -> str:
+    """The failed step and Terraform's own error text, never a blank. Output starts
+    at the first "Error:" (the refresh lines before it are noise), capped in length."""
+    failed = next((c for c in plan_result.get("checks", []) if not c.get("passed")), None)
+    if failed is None:
+        return "Terraform plan failed: no step reported an error (no output was captured)."
+    step = failed.get("check_name") or "plan"
+    output = (failed.get("output") or "").strip()
+    if not output:
+        return f"Terraform plan failed at '{step}' with no output on stdout or stderr."
+    start = output.find("Error:")
+    if start > 0:
+        output = output[start:]
+    if len(output) > _PLAN_ERROR_MAX_CHARS:
+        output = output[:_PLAN_ERROR_MAX_CHARS] + "\n... (truncated)"
+    return f"Terraform plan failed at '{step}':\n{output}"
+
+
 def _extract(deployment: Dict[str, Any], dest: str) -> ExtractedSource:
     data = get_artifact_store().read_bytes(deployment["source_artifact_id"])
     return extract_archive(data, dest)
@@ -57,6 +82,7 @@ def _extract(deployment: Dict[str, Any], dest: str) -> ExtractedSource:
 async def run_analysis(deployment_id: str) -> None:
     deployment = transition(deployment_id, DeployStatus.ANALYZING, reason="analysis started")
     sandbox = create_sandbox(prefix="terraagent_deploy_src_")
+    chain_build = False
     try:
         await log(deployment_id, f"Extracting {deployment['source_name']} (safe extraction: no symlinks, no path traversal, size caps)")
         source = await asyncio.to_thread(_extract, deployment, sandbox)
@@ -74,19 +100,35 @@ async def run_analysis(deployment_id: str) -> None:
 
         sizes = {f.path: f.size for f in source.files}
         profile = await asyncio.to_thread(analyze, sandbox, source.paths, sizes)
+        profile["fullstack"] = await asyncio.to_thread(detect_fullstack, sandbox, source.paths, sizes, profile)
         decision = decide(profile)
         await log(deployment_id, f"Detected runtime={profile['runtime']} framework={profile['framework'] or '-'}; "
                                  f"eligible targets: {', '.join(decision['eligible']) or 'none'}")
+        updating = code_update.is_active(deployment)
+        target = deployment["target_type"] if updating else decision["recommended"]
+        if updating and target not in decision["eligible"]:
+            await _fail(deployment_id, f"The new source can no longer be deployed as {target} (eligible now: "
+                                       f"{', '.join(decision['eligible']) or 'none'}). Nothing was changed in AWS; "
+                                       "upload it as a new deployment instead.",
+                        intake=intake, profile=profile, decision=decision)
+            return
         transition(deployment_id, DeployStatus.ANALYZED, reason="analysis complete",
                    intake=intake, profile=profile, decision=decision,
-                   target_type=decision["recommended"], error=None)
+                   target_type=target, error=None)
+        if updating:
+            # Code update: rebuild with the deployed target and settings, no clicks needed.
+            transition(deployment_id, DeployStatus.BUILDING, reason=f"code update: rebuilding for {target}",
+                       build=None, rendered=None, verification=None, verdict=None)
+            chain_build = True
     except IntakeError as e:
         await _fail(deployment_id, str(e))
     except Exception as e:
         logger.exception(f"[{deployment_id}] analysis crashed")
-        await _fail(deployment_id, f"Analysis failed unexpectedly: {e}")
+        await _fail(deployment_id, f"Analysis failed unexpectedly: {describe_exception(e)}")
     finally:
         release_sandbox(sandbox)
+    if chain_build:
+        await run_build_and_verify(deployment_id)
 
 
 def _zip_dir(root: str) -> bytes:
@@ -109,22 +151,33 @@ async def run_build_and_verify(deployment_id: str) -> None:
     settings = deployment["settings"] or {}
     src_dir = create_sandbox(prefix="terraagent_deploy_src_")
     workdir = create_sandbox(prefix="terraagent_deploy_build_")
+    chain_plan = False
     try:
         source = await asyncio.to_thread(_extract, deployment, src_dir)
         await log(deployment_id, f"Building for {target}")
-        result = await build(source, deployment["profile"], target, workdir)
+        result = await build(source, deployment["profile"], target, workdir, settings)
         for warning in result.warnings:
             await log(deployment_id, f"WARNING: {warning}")
-        files = render(target, deployment_id, deployment["region"], deployment["environment"], settings, result, workdir)
+        files = render(target, deployment_id, deployment["region"], deployment["environment"], settings, result, workdir,
+                       profile=deployment["profile"])
         await log(deployment_id, f"Rendered {len(files)} Terraform files from the '{target}' template")
 
         bundle = get_artifact_store().put_bytes(await asyncio.to_thread(_zip_dir, workdir))
         record_artifact(deployment_id, "bundle", bundle, sensitive=True, retention_days=BUILD_RETENTION_DAYS)
+        # The plan stage unpacks this bundle so built artifacts (site/, function.zip,
+        # source.zip) sit next to the .tf files that reference them.
+        build_summary = {**result.summary(), "bundle_artifact_id": bundle["artifact_id"]}
 
         transition(deployment_id, DeployStatus.VERIFYING, reason="build complete",
-                   build=result.summary(), rendered=files)
-        await log(deployment_id, "Verifying: terraform fmt/init/validate, Checkov, Trivy, OPA, Infracost")
-        verification = await verify(deployment_id, files)
+                   build=build_summary, rendered=files)
+        reused = code_update.reusable_verification(deployment, files) if code_update.is_active(deployment) else None
+        if reused:
+            await log(deployment_id, "Terraform files are unchanged since the deployed release (only the image changed): "
+                                     "reusing its verification")
+            verification = reused
+        else:
+            await log(deployment_id, "Verifying: terraform fmt/init/validate, Checkov, Trivy, OPA, Infracost")
+            verification = await verify(deployment_id, files)
         await log(deployment_id, f"Verification verdict: {verification['verdict']}")
         if verification["verdict"] == "FAIL":
             transition(deployment_id, DeployStatus.FAILED, reason="generated Terraform failed validation",
@@ -134,14 +187,42 @@ async def run_build_and_verify(deployment_id: str) -> None:
             return
         transition(deployment_id, DeployStatus.VERIFIED, reason=f"verification {verification['verdict']}",
                    verification=verification, verdict=verification["verdict"], error=None)
+        if code_update.is_active(deployment) and deployment.get("target_id"):
+            transition(deployment_id, DeployStatus.PLANNING, reason="code update: planning against the deployed stack",
+                       plan=None, plan_summary=None, plan_bundle_sha256=None, plan_artifact_id=None, plan_policy=None,
+                       is_destructive=False, approved_by=None, approved_at=None, approval_reason=None,
+                       rejection_reason=None, error=None)
+            chain_plan = True
     except (BuildError, IntakeError) as e:
         await _fail(deployment_id, str(e))
     except Exception as e:
         logger.exception(f"[{deployment_id}] build/verify crashed")
-        await _fail(deployment_id, f"Build or verification failed unexpectedly: {e}")
+        await _fail(deployment_id, f"Build or verification failed unexpectedly: {describe_exception(e)}")
     finally:
         release_sandbox(src_dir)
         release_sandbox(workdir)
+    if chain_plan:
+        await run_plan(deployment_id)
+
+
+async def deploy_preflight_problem(deployment: Dict[str, Any]) -> Optional[str]:
+    """Read-only checks repeated when Deploy is clicked, for plans approved before a
+    check existed or an account changed since: today, the workload boundary."""
+    if deployment.get("target_type") not in BOUNDARY_TARGETS or not deployment.get("target_id"):
+        return None
+    session = SessionLocal()
+    try:
+        rec = session.get(AwsDeployTarget, deployment["target_id"])
+        if not rec:
+            return None
+        target = {"id": rec.id, "region": rec.region, "account_id": rec.account_id,
+                  "plan_role_arn": rec.plan_role_arn, "state_bucket": rec.state_bucket,
+                  "external_id": rec.external_id}
+    finally:
+        session.close()
+    creds = await asyncio.to_thread(plan_session, target, deployment["id"])
+    boundary = boundary_arn_for(deployment.get("settings"), target["account_id"])
+    return await asyncio.to_thread(boundary_problem, creds, deployment["region"], boundary)
 
 
 async def run_plan(deployment_id: str) -> None:
@@ -182,7 +263,29 @@ async def run_plan(deployment_id: str) -> None:
         await log(deployment_id, f"Obtaining short-lived STS credentials for Plan role on target '{target_dict['name']}'")
         plan_creds = await asyncio.to_thread(plan_session, target_dict, deployment_id)
 
-        # Write rendered terraform files to plan workdir
+        # A first deployment of a container target creates a VPC: check the quota now
+        # rather than fail half-way through apply. Read-only (DescribeVpcs, GetServiceQuota).
+        if deployment.get("target_type") in VPC_TARGETS and not deployment.get("applied_at"):
+            problem = await asyncio.to_thread(vpc_quota_problem, plan_creds, deployment["region"])
+            if problem:
+                await _fail(deployment_id, problem)
+                return
+
+        # Every IAM role these templates create carries the workload boundary; without it
+        # apply fails on each role after the rest of the stack exists. Read-only (GetPolicy).
+        if deployment.get("target_type") in BOUNDARY_TARGETS:
+            boundary = boundary_arn_for(deployment.get("settings"), target_dict["account_id"])
+            problem = await asyncio.to_thread(boundary_problem, plan_creds, deployment["region"], boundary)
+            if problem:
+                await _fail(deployment_id, problem)
+                return
+
+        # Built artifacts first (templates reference them by path), then the
+        # rendered files from Postgres - the ones that were verified - on top.
+        bundle_id = (deployment.get("build") or {}).get("bundle_artifact_id")
+        if bundle_id:
+            bundle_data = get_artifact_store().read_bytes(bundle_id)
+            await asyncio.to_thread(extract_plan_bundle, bundle_data, workdir)
         rendered = deployment.get("rendered") or {}
         for fname, content in rendered.items():
             fpath = os.path.join(workdir, fname)
@@ -200,9 +303,7 @@ async def run_plan(deployment_id: str) -> None:
         )
 
         if not plan_result.get("passed"):
-            checks = plan_result.get("checks", [])
-            err_msg = next((c.get("output") for c in checks if not c.get("passed")), "Terraform plan failed.")
-            await _fail(deployment_id, f"Terraform plan failed: {err_msg}", plan=plan_result.get("plan_json"))
+            await _fail(deployment_id, plan_failure_message(plan_result), plan=plan_result.get("plan_json"))
             return
 
         # Create deterministic plan bundle & store artifacts
@@ -235,6 +336,11 @@ async def run_plan(deployment_id: str) -> None:
                         plan=plan_result["plan_json"], plan_policy=policy_res)
             return
 
+        code_only = code_update.is_active(deployment) and code_update.is_code_only(plan_result["changes"])
+        is_destructive = bool(plan_result["is_destructive"]) and not code_only
+        if code_only:
+            await log(deployment_id, "Code-only update: just the new source, image tag and task revision change; "
+                                     "no infrastructure changes")
         counts = plan_result["counts"]
         n_delete = counts.get("delete", counts.get("dest" + "roy", 0))
         await log(deployment_id, f"Plan policy verified. Changes: {counts.get('create', 0)} to create, {counts.get('update', 0)} to update, "
@@ -248,17 +354,18 @@ async def run_plan(deployment_id: str) -> None:
             plan_summary={
                 "counts": counts,
                 "changes": plan_result["changes"],
-                "is_destructive": plan_result["is_destructive"],
+                "is_destructive": is_destructive,
+                "code_only": code_only,
             },
             plan_bundle_sha256=bundle_sha256,
             plan_artifact_id=plan_bundle_artifact["artifact_id"],
             plan_policy=policy_res,
-            is_destructive=plan_result["is_destructive"],
+            is_destructive=is_destructive,
             error=None,
         )
     except Exception as e:
         logger.exception(f"[{deployment_id}] plan crashed")
-        await _fail(deployment_id, f"Planning failed unexpectedly: {e}")
+        await _fail(deployment_id, f"Planning failed unexpectedly: {describe_exception(e)}")
     finally:
         release_sandbox(workdir)
 

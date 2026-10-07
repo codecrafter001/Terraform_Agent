@@ -6,7 +6,6 @@ from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
-
 # The adoption decision for one resource (the Week 3 plan's four outcomes):
 #   manage    - bring under this Terraform: resource + import block
 #   reference - exists but owned elsewhere: data block

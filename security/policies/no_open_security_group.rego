@@ -1,5 +1,7 @@
 package main
 
+import rego.v1
+
 # Sensitive administrative and database ports
 sensitive_ports := [22, 3389, 5432, 3306, 27017, 6379]
 

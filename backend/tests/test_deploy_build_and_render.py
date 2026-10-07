@@ -234,3 +234,20 @@ def test_zip_dir_helper_used_for_bundles_is_readable(tmp_path):
     (tmp_path / "a" / "b.txt").write_text("x")
     with zipfile.ZipFile(io.BytesIO(_zip_dir(str(tmp_path)))) as zf:
         assert zf.namelist() == ["a/b.txt"]
+
+
+@pytest.mark.parametrize("target", ["ecs_service", "fullstack_app"])
+def test_source_is_uploaded_after_the_pipeline_can_use_it(target):
+    """CodePipeline runs once on creation with its brand-new role; before IAM had
+    propagated that run failed and nothing retried, so no image was built (ECS:
+    CannotPullContainerError). The first real build must come from the upload event."""
+    import re
+
+    main_tf = open(os.path.join(os.path.dirname(__file__), "..", "deploy", "templates", target, "main.tf"),
+                   encoding="utf-8").read()
+    pipeline = re.search(r'resource "aws_codepipeline" "app" \{.*?\n\}', main_tf, re.S).group(0)
+    source = re.search(r'resource "aws_s3_object" "source" \{.*?\n\}', main_tf, re.S).group(0)
+    assert "aws_s3_object.source" not in pipeline
+    for dependency in ("aws_cloudwatch_event_target.source_updated", "aws_s3_bucket_notification.source",
+                       "aws_iam_role_policy.events"):
+        assert dependency in source

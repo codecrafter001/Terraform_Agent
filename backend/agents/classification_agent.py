@@ -35,7 +35,8 @@ async def classification_agent_node(state: Dict[str, Any]) -> Dict[str, Any]:
         unsupported_ids = [c.resource_id for c in report.classifications if c.category == "unsupported"]
         await redis_service.publish_log(
             job_id,
-            f"[AGENT:classification_agent] Explicitly identified {len(unsupported_ids)} unsupported resource(s): {', '.join(unsupported_ids)} - will not be synthesized into Terraform.",
+            f"[AGENT:classification_agent] Explicitly identified {len(unsupported_ids)} unsupported resource(s): "
+            f"{', '.join(unsupported_ids)} - will not be synthesized into Terraform.",
             agent_name="classification_agent"
         )
 

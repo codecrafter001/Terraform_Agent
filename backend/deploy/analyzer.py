@@ -10,7 +10,7 @@ import json
 import os
 import re
 import tomllib
-from typing import Any, Dict, List, Optional, TypedDict
+from typing import Any, Dict, List, Optional, Set, TypedDict
 
 from deploy.config import MAX_ANALYZED_SOURCE_FILES
 
@@ -68,6 +68,7 @@ class ProjectProfile(TypedDict):
     has_dockerfile: bool
     evidence: Dict[str, List[Evidence]]
     warnings: List[str]
+    fullstack: Optional[Dict[str, Any]]  # deploy.fullstack.FullstackLayout, filled in by the pipeline
 
 
 def _obj(value: Any) -> Dict[str, Any]:
@@ -152,6 +153,7 @@ def analyze(root: str, paths: List[str], sizes: Optional[Dict[str, int]] = None)
         "static_output_dir": None, "dependency_manifest": None, "dependencies": [], "has_lockfile": False,
         "native_dependencies": [], "source_bytes": sum((sizes or {}).values()),
         "has_dockerfile": tree.has("Dockerfile"), "evidence": evidence, "warnings": warnings,
+        "fullstack": None,
     }
     if profile["has_dockerfile"]:
         ev("has_dockerfile").append({"file": "Dockerfile", "rule": "container.dockerfile"})
@@ -199,8 +201,12 @@ def analyze(root: str, paths: List[str], sizes: Optional[Dict[str, int]] = None)
             "server/index.ts", "server/index.js", "src/server.ts", "src/server.js",
             "src/index.js", "src/index.ts", "src/handler.js", "src/handler.ts", "src/app.ts", "src/app.js",
         ]
+        seen: Set[str] = set()
         for path in candidates:
             path = path.lstrip("./")
+            if path in seen:  # the same file is often named by main, start and dev
+                continue
+            seen.add(path)
             text = tree.read(path)
             if text is None:
                 continue

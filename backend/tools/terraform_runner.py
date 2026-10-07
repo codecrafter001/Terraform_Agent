@@ -10,7 +10,8 @@ import contextlib
 import json
 import logging
 import os
-from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
+import re
+from typing import Any, AsyncIterator, Dict, List, Mapping, Optional, Tuple
 
 try:  # POSIX only (the containers); on a Windows dev host init just isn't serialized
     import fcntl
@@ -19,12 +20,21 @@ except ImportError:  # pragma: no cover
 
 from tools.credential_scrubber import CredentialScrubber
 from tools.sandbox_registry import create_sandbox, release_sandbox
+from tools.subprocess_exec import describe_exception, run_exec
 
 logger = logging.getLogger("terraagent.terraform_runner")
 
 # Upper bound on any single terraform/tofu invocation. Generous by default: a
 # first `init` may legitimately download a large provider.
 TERRAFORM_COMMAND_TIMEOUT_SECONDS = float(os.getenv("TERRAAGENT_TF_COMMAND_TIMEOUT", "600"))
+
+# `init` output when the registry/provider download was unreachable - not a code problem.
+_NETWORK_FAILURE = re.compile(
+    r"could not connect to registry|Failed to query available provider packages|"
+    r"Failed to install provider|no such host|dial tcp|i/o timeout|TLS handshake timeout|"
+    r"connection reset|did not properly respond",
+    re.IGNORECASE,
+)
 
 ALLOWED_BINARIES = frozenset({"terraform", "tofu"})
 ALLOWED_SUBCOMMANDS = frozenset({"version", "fmt", "init", "validate", "plan", "show", "providers"})
@@ -99,6 +109,18 @@ def _cli_config_path(cache_dir: str) -> str:
     return path
 
 
+def ensure_plugin_cache_dir() -> str:
+    """Process startup (API and worker): the image sets TF_PLUGIN_CACHE_DIR, a host
+    run had none, so every `init` downloaded the AWS provider (~100 MB) again and a
+    flaky link failed the plan. Defaults to ~/.terraform.d/plugin-cache, the image's
+    layout. Without fcntl (Windows) concurrent inits aren't serialized."""
+    cache = os.environ.setdefault(
+        "TF_PLUGIN_CACHE_DIR", os.path.join(os.path.expanduser("~"), ".terraform.d", "plugin-cache")
+    )
+    os.makedirs(cache, exist_ok=True)
+    return cache
+
+
 def _with_cache_config(env: Optional[Dict[str, str]]) -> Optional[Dict[str, str]]:
     """The subprocess env plus TF_CLI_CONFIG_FILE (cache reuse) and
     CHECKPOINT_DISABLE (skips HashiCorp's version-check call). Leaves env
@@ -114,6 +136,14 @@ def _with_cache_config(env: Optional[Dict[str, str]]) -> Optional[Dict[str, str]
         logger.warning(f"Could not write the Terraform CLI config, provider cache not reused: {e}")
         return env
     return {**base, "TF_CLI_CONFIG_FILE": config, "CHECKPOINT_DISABLE": "1"}
+
+
+def _credential(aws_credentials: Optional[Mapping[str, Optional[str]]], key: str, env_key: str) -> str:
+    """Migration mode passes {access_key, secret_key, session_token}; deploy/sts.py's
+    plan_session returns the env-var names. Read either - the plan role's credentials
+    were once dropped here, so terraform silently fell back to the operator's own keys."""
+    creds = aws_credentials or {}
+    return creds.get(key) or creds.get(env_key) or ""
 
 
 class TerraformRunner:
@@ -141,22 +171,12 @@ class TerraformRunner:
         env = _with_cache_config(env)
         lock = _plugin_cache_lock(env) if subcommand == "init" else contextlib.nullcontext()
         async with lock:
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                cwd=cwd,
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=env
-            )
             try:
-                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+                returncode, stdout, stderr = await run_exec(cmd, cwd=cwd, env=env, timeout=timeout)
             except asyncio.TimeoutError:
-                process.kill()
-                await process.wait()
                 raise TimeoutError(f"'{' '.join(cmd[:2])}' timed out after {int(timeout)}s")
         return (
-            process.returncode or 0,
+            returncode,
             stdout.decode("utf-8", errors="replace"),
             stderr.decode("utf-8", errors="replace")
         )
@@ -224,15 +244,24 @@ class TerraformRunner:
 
             # 2. Init (backend=false)
             code, out, err = await cls.run_command(
-                [binary, "init", "-backend=false", "-input=false"],
+                [binary, "init", "-backend=false", "-input=false", "-no-color"],
                 cwd=sandbox_dir
             )
             init_passed = code == 0
+            init_output = out + ("\n" + err if err else "")
             results["checks"].append({
                 "check_name": "init",
                 "passed": init_passed,
-                "output": out + ("\n" + err if err else "")
+                "output": init_output
             })
+            if not init_passed and _NETWORK_FAILURE.search(init_output):
+                # Nothing was validated, so it's not the code's fault: INCOMPLETE, not FAIL.
+                results["checks"].append({
+                    "check_name": "system",
+                    "passed": False,
+                    "output": "terraform init could not download providers (network/DNS problem "
+                              "reaching registry.terraform.io) - retry when the connection is back.",
+                })
 
             # 3. Validate
             if init_passed:
@@ -251,11 +280,11 @@ class TerraformRunner:
                 results["passed"] = False
 
         except Exception as e:
-            logger.error(f"Validation execution error: {e}")
+            logger.error(f"Validation execution error: {describe_exception(e)}")
             results["checks"].append({
                 "check_name": "system",
                 "passed": False,
-                "output": str(e)
+                "output": CredentialScrubber.scrub_text(describe_exception(e))
             })
             results["passed"] = False
         finally:
@@ -265,22 +294,30 @@ class TerraformRunner:
         return results
 
     @staticmethod
-    def _scoped_aws_env(aws_credentials: Dict[str, Optional[str]], region: str) -> Dict[str, str]:
+    def _scoped_aws_env(aws_credentials: Mapping[str, Optional[str]], region: str) -> Dict[str, str]:
         """Minimal env for a single credentialed subprocess - never
-        os.environ.copy(). Only PATH/HOME/TF_PLUGIN_CACHE_DIR plus the AWS
+        os.environ.copy(). Only PATH/HOME/SystemRoot/TF_PLUGIN_CACHE_DIR plus the AWS
         credential vars; TF_LOG/TF_LOG_PATH forced unset (provider debug logs
         can write raw request bodies, credentials included, to disk)."""
         env = {
             "PATH": os.environ.get("PATH", ""),
             "HOME": os.environ.get("HOME", ""),
+            "USERPROFILE": os.environ.get("USERPROFILE", ""),
+            "SYSTEMROOT": os.environ.get("SYSTEMROOT", os.environ.get("SystemRoot", "C:\\Windows")),
+            "SystemRoot": os.environ.get("SystemRoot", os.environ.get("SYSTEMROOT", "C:\\Windows")),
+            "TMP": os.environ.get("TMP", ""),
+            "TEMP": os.environ.get("TEMP", ""),
             "TF_PLUGIN_CACHE_DIR": os.environ.get("TF_PLUGIN_CACHE_DIR", ""),
             "TF_IN_AUTOMATION": "1",
-            "AWS_ACCESS_KEY_ID": aws_credentials.get("access_key") or "",
-            "AWS_SECRET_ACCESS_KEY": aws_credentials.get("secret_key") or "",
+            "AWS_ACCESS_KEY_ID": _credential(aws_credentials, "access_key", "AWS_ACCESS_KEY_ID"),
+            "AWS_SECRET_ACCESS_KEY": _credential(aws_credentials, "secret_key", "AWS_SECRET_ACCESS_KEY"),
             "AWS_DEFAULT_REGION": region,
+            # No instance-metadata lookups: on a dev box they only stall until timeout.
+            "AWS_EC2_METADATA_DISABLED": "true",
         }
-        if aws_credentials.get("session_token"):
-            env["AWS_SESSION_TOKEN"] = aws_credentials["session_token"]
+        session_token = _credential(aws_credentials, "session_token", "AWS_SESSION_TOKEN")
+        if session_token:
+            env["AWS_SESSION_TOKEN"] = session_token
         env.pop("TF_LOG", None)
         env.pop("TF_LOG_PATH", None)
         return env
@@ -335,7 +372,7 @@ class TerraformRunner:
                                      "output": CredentialScrubber.scrub_text(out + ("\n" + err if err else ""))[-4000:]})
         except Exception as e:
             result["checks"].append({"check_name": "system", "passed": False,
-                                     "output": CredentialScrubber.scrub_text(str(e))})
+                                     "output": CredentialScrubber.scrub_text(describe_exception(e))})
         finally:
             release_sandbox(sandbox_dir)
         return result
@@ -473,7 +510,7 @@ class TerraformRunner:
             result["checks"].append({
                 "check_name": "system",
                 "passed": False,
-                "output": CredentialScrubber.scrub_text(str(e)),
+                "output": CredentialScrubber.scrub_text(describe_exception(e)),
             })
         finally:
             release_sandbox(sandbox_dir)
@@ -514,7 +551,16 @@ class TerraformRunner:
             "checks": [],
         }
 
-        env = cls._scoped_aws_env(aws_credentials, region)
+        env = cls._scoped_aws_env(aws_credentials or {}, region)
+        if not (env["AWS_ACCESS_KEY_ID"] and env["AWS_SECRET_ACCESS_KEY"]):
+            # Without them the AWS SDK would fall back to whatever ~/.aws holds.
+            result["checks"].append({
+                "check_name": "credentials",
+                "passed": False,
+                "output": "No plan-role credentials were supplied; refusing to run terraform "
+                          "with ambient AWS credentials.",
+            })
+            return result
         target_id = target.get("id", "default")
         bucket = target.get("state_bucket", "")
         backend_key = f"terraagent/{target_id}/{deployment_id}.tfstate"
@@ -534,6 +580,7 @@ class TerraformRunner:
                 f"-backend-config=key={backend_key}",
                 f"-backend-config=region={region}",
                 "-input=false",
+                "-no-color",
             ]
             code, out, err = await cls.run_command(init_cmd, cwd=workdir, env=env)
             init_passed = code == 0
@@ -546,7 +593,7 @@ class TerraformRunner:
                 return result
 
             # 2. terraform plan -out=tfplan -lock=false (read-only plan role)
-            plan_cmd = [binary, "plan", "-out=tfplan", "-input=false", "-lock=false"]
+            plan_cmd = [binary, "plan", "-out=tfplan", "-input=false", "-lock=false", "-parallelism=20", "-no-color"]
             code, out, err = await cls.run_command(plan_cmd, cwd=workdir, env=env)
             plan_passed = code == 0
             result["checks"].append({
@@ -620,7 +667,7 @@ class TerraformRunner:
             result["checks"].append({
                 "check_name": "system",
                 "passed": False,
-                "output": CredentialScrubber.scrub_text(str(e)),
+                "output": CredentialScrubber.scrub_text(describe_exception(e)),
             })
 
         return result

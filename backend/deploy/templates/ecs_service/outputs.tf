@@ -27,3 +27,13 @@ output "codebuild_project_name" {
   description = "CodeBuild project name."
   value       = aws_codebuild_project.builder.name
 }
+
+output "pipeline_name" {
+  description = "CodePipeline that builds the image and rolls the service."
+  value       = aws_codepipeline.app.name
+}
+
+output "vpc_id" {
+  description = "The deployment's own VPC."
+  value       = aws_vpc.main.id
+}

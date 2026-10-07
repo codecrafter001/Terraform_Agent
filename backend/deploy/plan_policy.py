@@ -39,26 +39,68 @@ ALLOWED_TARGET_RESOURCES: Dict[str, Set[str]] = {
         "aws_apigatewayv2_route",
         "aws_apigatewayv2_integration",
     },
-    "ecs_service": {
-        "aws_ecr_repository",
-        "aws_ecr_lifecycle_policy",
-        "aws_codebuild_project",
-        "aws_ecs_cluster",
-        "aws_ecs_task_definition",
-        "aws_ecs_service",
-        "aws_lb",
-        "aws_lb_target_group",
-        "aws_lb_listener",
-        "aws_security_group",
-        "aws_security_group_rule",
-        "aws_iam_role",
-        "aws_iam_role_policy",
-        "aws_iam_role_policy_attachment",
-        "aws_cloudwatch_log_group",
-    },
+    "ecs_service": set(),  # filled below: network + build pipeline + service
+}
+
+_NETWORK = {
+    "aws_vpc",
+    "aws_internet_gateway",
+    "aws_subnet",
+    "aws_route_table",
+    "aws_route_table_association",
+    "aws_security_group",
+    "aws_security_group_rule",
+}
+_BUILD_PIPELINE = {
+    "aws_s3_bucket",
+    "aws_s3_bucket_ownership_controls",
+    "aws_s3_bucket_public_access_block",
+    "aws_s3_bucket_versioning",
+    "aws_s3_bucket_server_side_encryption_configuration",
+    "aws_s3_bucket_notification",
+    "aws_s3_object",
+    "aws_ecr_repository",
+    "aws_ecr_lifecycle_policy",
+    "aws_codebuild_project",
+    "aws_codepipeline",
+    "aws_cloudwatch_event_rule",
+    "aws_cloudwatch_event_target",
+}
+_CONTAINER_SERVICE = {
+    "aws_ecs_cluster",
+    "aws_ecs_task_definition",
+    "aws_ecs_service",
+    "aws_lb",
+    "aws_lb_target_group",
+    "aws_lb_listener",
+    "aws_iam_role",
+    "aws_iam_role_policy",
+    "aws_cloudwatch_log_group",
+}
+ALLOWED_TARGET_RESOURCES["ecs_service"] = _NETWORK | _BUILD_PIPELINE | _CONTAINER_SERVICE
+ALLOWED_TARGET_RESOURCES["fullstack_app"] = _NETWORK | _BUILD_PIPELINE | _CONTAINER_SERVICE | {
+    "aws_s3_bucket_policy",
+    "aws_cloudfront_distribution",
+    "aws_cloudfront_origin_access_control",
+    "aws_cloudfront_function",
+    "aws_db_subnet_group",
+    "aws_db_parameter_group",
+    "aws_db_instance",
+    "aws_secretsmanager_secret",
+    # Phase 4 add-ons
+    "aws_rds_cluster",
+    "aws_rds_cluster_instance",
+    "aws_rds_cluster_parameter_group",
+    "aws_elasticache_serverless_cache",
+    "aws_appautoscaling_target",
+    "aws_appautoscaling_policy",
 }
 
 MAX_RESOURCE_COUNT_DEFAULT = 50
+# A full stack is a VPC, build pipeline, service, CDN, database, optional add-ons
+# (cache, uploads bucket, worker, autoscaling) and one secret per environment
+# variable - more than 50 resources by construction.
+MAX_RESOURCE_COUNT_BY_TARGET: Dict[str, int] = {"fullstack_app": 150}
 MAX_MONTHLY_COST_DEFAULT = 200.0
 
 
@@ -67,7 +109,7 @@ def evaluate_plan_policy(
     target_type: str,
     deployment_id: str,
     monthly_cost: Optional[float] = None,
-    max_resources: int = MAX_RESOURCE_COUNT_DEFAULT,
+    max_resources: Optional[int] = None,
     max_cost: float = MAX_MONTHLY_COST_DEFAULT,
 ) -> Dict[str, Any]:
     """Evaluates the plan against security and sanity policies.
@@ -89,6 +131,8 @@ def evaluate_plan_policy(
     warnings: List[str] = []
     destructive_changes: List[Dict[str, str]] = []
 
+    if max_resources is None:
+        max_resources = MAX_RESOURCE_COUNT_BY_TARGET.get(target_type, MAX_RESOURCE_COUNT_DEFAULT)
     resource_changes = plan_json.get("resource_changes", []) or []
     allowed_types = ALLOWED_TARGET_RESOURCES.get(target_type)
 
@@ -114,9 +158,12 @@ def evaluate_plan_policy(
             )
 
         # 2. Tagging & Naming scoping
-        # Check tags or name if create action
-        if "create" in actions:
-            tags = after.get("tags") or after.get("tags_all") or {}
+        # Check tags or name if create action. tags_all is the resource's own tags
+        # merged with the provider's default_tags, where the deployment tag lives;
+        # resources with neither attribute (policies, associations, bucket
+        # sub-resources, event targets) can't carry tags at all, so aren't checked.
+        if "create" in actions and ("tags" in after or "tags_all" in after):
+            tags = {**(after.get("tags") or {}), **(after.get("tags_all") or {})}
             dep_tag = tags.get("terraagent:deployment-id")
             res_name = after.get("name") or after.get("bucket") or after.get("function_name") or ""
 
