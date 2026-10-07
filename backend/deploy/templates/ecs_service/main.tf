@@ -5,6 +5,7 @@
 # TerraAgent never calls a build or deploy API itself.
 
 locals {
+  source_key  = "source.zip"
   name        = "terraagent-${var.deployment_id}"
   azs         = slice(data.aws_availability_zones.available.names, 0, 2)
   boundary    = coalesce(var.permissions_boundary_arn, "arn:${data.aws_partition.current.partition}:iam::${data.aws_caller_identity.current.account_id}:policy/TerraAgentWorkloadBoundary")
@@ -107,11 +108,22 @@ resource "aws_s3_bucket_notification" "source" {
 
 resource "aws_s3_object" "source" {
   bucket      = aws_s3_bucket.source.id
-  key         = "source.zip"
+  key         = local.source_key
   source      = "${path.module}/${var.source_file}"
   source_hash = filemd5("${path.module}/${var.source_file}")
 
-  depends_on = [aws_s3_bucket_versioning.source, aws_s3_bucket_server_side_encryption_configuration.source]
+  # Uploaded after the pipeline, its trigger and the load balancer (2-3 min): CodePipeline's
+  # automatic run on creation used the brand-new role before IAM had propagated it, failed,
+  # and nothing retried, so no image was ever built. Now that run finds no source yet, and
+  # this upload's Object Created event starts the first real build with settled permissions.
+  depends_on = [
+    aws_s3_bucket_versioning.source,
+    aws_s3_bucket_server_side_encryption_configuration.source,
+    aws_s3_bucket_notification.source,
+    aws_cloudwatch_event_target.source_updated,
+    aws_iam_role_policy.events,
+    aws_lb.app,
+  ]
 }
 
 # --- ECR -----------------------------------------------------------------------
@@ -439,7 +451,7 @@ resource "aws_codebuild_project" "builder" {
   depends_on = [aws_iam_role_policy.codebuild, aws_cloudwatch_log_group.codebuild]
 }
 
-# --- Pipeline: runs once when created, then on every new source.zip --------------
+# --- Pipeline: builds on every new source.zip (including the first upload) --------------
 
 resource "aws_codepipeline" "app" {
   name          = local.name
@@ -464,7 +476,7 @@ resource "aws_codepipeline" "app" {
 
       configuration = {
         S3Bucket             = aws_s3_bucket.source.bucket
-        S3ObjectKey          = aws_s3_object.source.key
+        S3ObjectKey          = local.source_key
         PollForSourceChanges = "false"
       }
     }
@@ -487,7 +499,7 @@ resource "aws_codepipeline" "app" {
     }
   }
 
-  depends_on = [aws_iam_role_policy.codepipeline, aws_s3_object.source]
+  depends_on = [aws_iam_role_policy.codepipeline, aws_iam_role_policy.codebuild]
 }
 
 resource "aws_cloudwatch_event_rule" "source_updated" {
@@ -499,7 +511,7 @@ resource "aws_cloudwatch_event_rule" "source_updated" {
     detail-type = ["Object Created"]
     detail = {
       bucket = { name = [aws_s3_bucket.source.bucket] }
-      object = { key = [aws_s3_object.source.key] }
+      object = { key = [local.source_key] }
     }
   })
 }
